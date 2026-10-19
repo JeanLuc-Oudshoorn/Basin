@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+# Preserve vendored source bytes so the recorded SHA-256 hashes survive cloning.
+third_party/** -text

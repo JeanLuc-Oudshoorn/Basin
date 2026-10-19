@@ -1,0 +1,7 @@
+[project]
+name = "basin"
+version = "0.1.0"
+description = "RWKV-7 time-series foundation model targeting approximately 400 million parameters"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
