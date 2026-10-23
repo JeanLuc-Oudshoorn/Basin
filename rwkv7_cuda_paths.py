@@ -1,9 +1,9 @@
 from __future__ import annotations
+
 import hashlib
 import os
-from pathlib import Path
 import sys
-import torch
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -19,12 +19,14 @@ def prepend_env_path(name: str, path: Path) -> None:
     if path_value not in entries:
         os.environ[name] = os.pathsep.join([path_value, *entries])
 
+
 def ninja_safe_overlay_root() -> Path:
     override = os.environ.get("MAMBA_CPP_BUILD_OVERLAY_DIR")
     candidates = [Path(override)] if override else []
     if os.name == "posix":
         candidates.append(Path.home() / ".cache" / "mamba_cpp_build_overlays")
-        candidates.append(Path("/tmp"))
+        # Existing fallback root; link helpers below reject conflicting targets.
+        candidates.append(Path("/tmp"))  # nosec B108
     else:
         candidates.append(PROJECT_ROOT / ".cache" / "cpp_build_overlays")
 
@@ -41,12 +43,15 @@ def ninja_safe_overlay_root() -> Path:
         "Could not create a no-space overlay directory for PyTorch/Ninja builds."
     )
 
+
 def ninja_safe_build_path(path: Path, prefix: str, description: str) -> Path:
     path = path.resolve()
     if os.name != "posix" or not any(character.isspace() for character in str(path)):
         return path
 
-    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(str(path).encode("utf-8"), usedforsecurity=False).hexdigest()[
+        :12
+    ]
     link_path = ninja_safe_overlay_root() / f"{prefix}-{digest}"
     if link_path.exists() or link_path.is_symlink():
         if link_path.resolve() == path:
@@ -66,20 +71,22 @@ def ninja_safe_build_path(path: Path, prefix: str, description: str) -> Path:
         ) from exc
     return link_path
 
+
 def ninja_safe_cuda_home(cuda_home: Path) -> Path:
     cuda_home = cuda_home.resolve()
     if os.name != "posix":
         return cuda_home
 
     has_spaces = any(character.isspace() for character in str(cuda_home))
-    needs_cudart_alias = (
-        not (cuda_home / "lib" / "libcudart.so").exists()
-        and any((cuda_home / "lib").glob("libcudart.so.*"))
+    needs_cudart_alias = not (cuda_home / "lib" / "libcudart.so").exists() and any(
+        (cuda_home / "lib").glob("libcudart.so.*")
     )
     if not has_spaces and not needs_cudart_alias:
         return cuda_home
 
-    digest = hashlib.sha1(str(cuda_home).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(
+        str(cuda_home).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:12]
     overlay_path = ninja_safe_overlay_root() / f"mamba-cuda-build-{digest}"
     overlay_path.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +103,7 @@ def ninja_safe_cuda_home(cuda_home: Path) -> Path:
     ensure_versioned_library_alias(overlay_lib, "libcudart.so")
     return overlay_path
 
+
 def ensure_symlink(link_path: Path, target_path: Path) -> None:
     if link_path.exists() or link_path.is_symlink():
         if link_path.resolve() == target_path.resolve():
@@ -105,6 +113,7 @@ def ensure_symlink(link_path: Path, target_path: Path) -> None:
             "points somewhere else."
         )
     link_path.symlink_to(target_path, target_is_directory=target_path.is_dir())
+
 
 def ensure_versioned_library_alias(lib_dir: Path, unversioned_name: str) -> None:
     unversioned_path = lib_dir / unversioned_name
@@ -116,12 +125,14 @@ def ensure_versioned_library_alias(lib_dir: Path, unversioned_name: str) -> None
         return
     unversioned_path.symlink_to(matches[-1])
 
+
 def ninja_safe_torch_lib_path(torch_lib_path: Path) -> Path:
     return ninja_safe_build_path(
         torch_lib_path,
         "mamba-torch-lib",
         "PyTorch library path",
     )
+
 
 def require_cuda_cccl_headers(cuda_home: Path) -> None:
     if (cuda_home / "include" / "nv" / "target").exists():
@@ -134,6 +145,7 @@ def require_cuda_cccl_headers(cuda_home: Path) -> None:
         "nvidia-cuda-nvcc version."
     )
 
+
 def configure_torch_cpp_extension_paths(cuda_home: Path) -> None:
     import torch.utils.cpp_extension as cpp_extension
 
@@ -141,6 +153,7 @@ def configure_torch_cpp_extension_paths(cuda_home: Path) -> None:
     cpp_extension.CUDA_HOME = str(cuda_home)
     cpp_extension.TORCH_LIB_PATH = str(torch_lib_path)
     prepend_env_path("LD_LIBRARY_PATH", torch_lib_path)
+
 
 def configure_cuda_home() -> None:
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
@@ -155,12 +168,7 @@ def configure_cuda_home() -> None:
 
     python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
     candidates = [
-        Path(sys.prefix)
-        / "lib"
-        / python_version
-        / "site-packages"
-        / "nvidia"
-        / "cu13",
+        Path(sys.prefix) / "lib" / python_version / "site-packages" / "nvidia" / "cu13",
         PROJECT_ROOT
         / ".venv-wsl"
         / "lib"

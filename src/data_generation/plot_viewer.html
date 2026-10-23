@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Basin · Generated plots</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f1f4f7; color: #25364a; font: 15px system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; padding: 16px 24px; background: #fff;
+           border-bottom: 1px solid #dce3eb; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 auto 0 0; }
+  select, input, button { font: inherit; border: 1px solid #c9d3df; border-radius: 6px; padding: 7px 10px; background: #fff; }
+  button { cursor: pointer; }
+  input { width: 230px; }
+  main { max-width: 1700px; margin: auto; padding: 24px; }
+  article { background: #fff; border: 1px solid #dce3eb; border-radius: 10px; margin-bottom: 24px; padding: 16px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; overflow-wrap: anywhere; }
+  .plots { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; align-items: start; }
+  figure { margin: 0; min-width: 0; }
+  figcaption { font-size: 12px; color: #65768a; margin-bottom: 6px; }
+  img { width: 100%; height: 480px; object-fit: contain; background: #fafbfc; cursor: zoom-in; border-radius: 5px; }
+  .missing { height: 120px; display: grid; place-items: center; color: #7c8b9c; background: #f8fafc; }
+  #status { color: #65768a; font-size: 13px; }
+  dialog { width: 96vw; max-width: none; height: 94vh; max-height: none; border: 0; border-radius: 10px; padding: 45px 12px 12px; }
+  dialog::backdrop { background: #152336bb; }
+  dialog img { height: auto; min-height: 0; cursor: auto; }
+  #close { position: fixed; top: 5vh; right: 4vw; background: #fff; z-index: 3; }
+  @media (max-width: 800px) { .plots { grid-template-columns: 1fr; } main { padding: 12px; } img { height: auto; } }
+</style>
+<header>
+  <h1>Basin · Generated plots</h1>
+  <label>Date <select id="date" aria-label="Dataset date"></select></label>
+  <input id="filter" placeholder="Filter table names…" aria-label="Filter table names">
+  <button id="refresh">Refresh</button>
+  <span id="status" role="status"></span>
+</header>
+<main id="tables"></main>
+<dialog id="zoom" aria-label="Expanded plot"><button id="close">Close · Esc</button><img id="expanded" alt="Expanded plot"></dialog>
+<script>
+  const dates = document.querySelector('#date'), filter = document.querySelector('#filter');
+  const tables = document.querySelector('#tables'), status = document.querySelector('#status');
+  const zoom = document.querySelector('#zoom'), expanded = document.querySelector('#expanded');
+  let data = [], requestNumber = 0;
+  async function get(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw Error(`Could not load data (${response.status}). Refresh to retry.`);
+    return response.json();
+  }
+  function render() {
+    tables.replaceChildren();
+    const visible = data.filter(table => table.name.toLowerCase().includes(filter.value.toLowerCase()));
+    status.textContent = `${visible.length} / ${data.length} tables · Click a plot to enlarge`;
+    for (const table of visible) {
+      const card = document.createElement('article'), title = document.createElement('h2');
+      title.textContent = table.name;
+      const plots = document.createElement('div'); plots.className = 'plots';
+      for (const [file, label] of [['series.png', 'Time series'], ['dag.png', 'Structural causal model']]) {
+        const figure = document.createElement('figure'), caption = document.createElement('figcaption');
+        caption.textContent = label; figure.append(caption);
+        if (table.plots.includes(file)) {
+          const img = document.createElement('img');
+          img.src = `/image/${[dates.value, table.name, file].map(encodeURIComponent).join('/')}`;
+          img.alt = `${label} for ${table.name}`; img.loading = 'lazy'; img.decoding = 'async';
+          img.tabIndex = 0;
+          function enlarge() { expanded.src = img.src; expanded.alt = img.alt; zoom.showModal(); zoom.scrollTop = 0; }
+          img.onclick = enlarge;
+          img.onkeydown = event => { if (event.key === 'Enter') enlarge(); };
+          figure.append(img);
+        } else {
+          const missing = document.createElement('div'); missing.className = 'missing';
+          missing.textContent = `${label} was not saved`; figure.append(missing);
+        }
+        plots.append(figure);
+      }
+      card.append(title, plots); tables.append(card);
+    }
+    if (!visible.length) tables.textContent = data.length ? 'No matching tables.' : 'No generated tables for this date.';
+  }
+  async function load() {
+    const number = ++requestNumber;
+    status.textContent = 'Loading…';
+    try {
+      const result = await get(`/api/tables?date=${encodeURIComponent(dates.value)}`);
+      if (number !== requestNumber) return;
+      data = result; render(); window.scrollTo(0, 0);
+    } catch (error) { if (number === requestNumber) status.textContent = error.message; }
+  }
+  async function refresh() {
+    try {
+      const current = dates.value, result = await get('/api/dates');
+      dates.replaceChildren(...result.dates.map(date => new Option(date, date)));
+      dates.value = result.dates.includes(current) ? current :
+        result.dates.includes(result.initial_date) ? result.initial_date : result.dates[0] || '';
+      if (dates.value) await load();
+      else { tables.textContent = 'No generated date folders yet.'; status.textContent = '0 tables'; }
+    } catch (error) { status.textContent = error.message; }
+  }
+  dates.onchange = load; filter.oninput = render;
+  document.querySelector('#refresh').onclick = refresh;
+  document.querySelector('#close').onclick = () => zoom.close();
+  refresh();
+</script>
+</html>

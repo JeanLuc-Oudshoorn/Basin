@@ -1,0 +1,22 @@
+- 1D Perlin noise - DONE
+- Pink noise - DONE
+- Increasing seasonal amplitude - DONE
+- Non sine humps like air passengers dataset - DONE
+- Too many timeseries have trend - DONE
+- Sawtooth like pattern? - DONE
+- Bimodal: high peak, low peak alternating - DONE
+- Colliding frequencies
+- ReLU effect from one variable to another - DONE
+- Decision tree influence (X1 -> X2)?
+- Ceiling/floor values
+- Noise amplification and increasing seasonal amplitude - DONE
+- ON/OFF type state transitions - DONE
+- Fourier series - DONE
+- Unrealistic that DAG contains residuals of outcome from 180 timesteps ago (in general, dependencies from long back are too common)
+- Too often all covariates are in one straight line - DONE
+- Too often the outcome is a straight line, or slightly bending up or down line (2/10) - DONE
+- Allow temporal relations between covariate and outcome? (e.g [covariate2 t-80] -> [outcome]) - SHOULD BE REVERSED
+- Patch embeddings
+- Model support both for univariate and providing up to 5 covariates?
+- Connect all datasets together with a token for separation?
+- Holt-Winters for series viability

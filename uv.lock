@@ -15,21 +15,57 @@ source = { virtual = "." }
 [package.optional-dependencies]
 data = [
     { name = "matplotlib" },
+    { name = "networkx" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "scipy" },
 ]
+validation = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "prophet" },
+    { name = "pyarrow" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "matplotlib", marker = "extra == 'data'" },
+    { name = "networkx", marker = "extra == 'data'" },
     { name = "numpy", marker = "extra == 'data'" },
+    { name = "numpy", marker = "extra == 'validation'" },
     { name = "pandas", marker = "extra == 'data'" },
+    { name = "pandas", marker = "extra == 'validation'" },
+    { name = "prophet", marker = "extra == 'validation'", specifier = ">=1.1.5,<2" },
     { name = "pyarrow", marker = "extra == 'data'" },
+    { name = "pyarrow", marker = "extra == 'validation'" },
     { name = "scipy", marker = "extra == 'data'" },
 ]
-provides-extras = ["data"]
+provides-extras = ["data", "validation"]
+
+[[package]]
+name = "cmdstanpy"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "stanio" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/40/0a/cc5cbec39155e5ab76b96cbb1acd23bd7f19a4e2203fdf9948a7cbec65b8/cmdstanpy-1.3.0.tar.gz", hash = "sha256:60b10d110993bd8345735994786b2b17782fdc5530a6adbc0cd8ec836d82c2b9", size = 122922, upload-time = "2025-10-20T19:25:08.128Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/04/7bbe85aa6abf99236cc657ceb5a629f63a82a01910a095533111ea3860f3/cmdstanpy-1.3.0-py3-none-any.whl", hash = "sha256:67d83fbb823948c3ca8a84912359d6c0a5c616a62025526dba5f43a1d970bc52", size = 99147, upload-time = "2025-10-20T19:25:06.306Z" },
+]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
 
 [[package]]
 name = "contourpy"
@@ -77,6 +113,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/de/d3baf686e4ac5726a24819a670747c51571c774dcfa41cc0528e5e8c1a2d/fonttools-4.67.0-cp312-cp312-win32.whl", hash = "sha256:e8a8545cbd58bd29494ffe81e3cb35f8a29332a8e495c42bec334145ce8cd65b", size = 2446090, upload-time = "2026-10-14T13:18:53.379Z" },
     { url = "https://files.pythonhosted.org/packages/c1/3a/625a6dd0173e88dbea1826405b4bcbfa06c6ca095310ed720caba36b2e43/fonttools-4.67.0-cp312-cp312-win_amd64.whl", hash = "sha256:2bfab2f5d1d255dec82f4bd082a1c10e77df808e42210890f50a9c30bf91570e", size = 2497985, upload-time = "2026-10-14T13:18:55.245Z" },
     { url = "https://files.pythonhosted.org/packages/3d/61/4161946319472aaa9b897bd18ad5108a5b10f5ebaa503d921a001ac4fff9/fonttools-4.67.0-py3-none-any.whl", hash = "sha256:4304f03ed7f4ba000a8dcc941ad854bfa52e2f3b6112b8f099b6f431cf98e701", size = 1213142, upload-time = "2026-10-14T13:20:26.258Z" },
+]
+
+[[package]]
+name = "holidays"
+version = "0.107"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/f2/7aa646c4ecb198a3af80a9b3dd727cf9f2659e52cee598dcd5b8ed6d9087/holidays-0.107.tar.gz", hash = "sha256:2f02cdfbe41a5f14e053590f2385a932fe42f0c692aed75cb55601ad37cebb4d", size = 1077660, upload-time = "2026-10-19T23:35:18.493Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/6d/ec046c6d998d32b08cd344b8c80fad7d77d3297586e2a3f8a1b3d4476b85/holidays-0.107-py3-none-any.whl", hash = "sha256:5e4582d543b145d8ebb80ce8943e60ea5c8b6a30b74201ad0f95af0cbe67cb14", size = 1694848, upload-time = "2026-10-19T23:35:16.486Z" },
 ]
 
 [[package]]
@@ -129,6 +177,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/84/39/02e21b74f7439bd643d717ea846006d46e309e6d29b632b57751265311d6/matplotlib-3.11.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:3aa4b8516fd26659e4363abbf317c703d9116496c5db2e9d0609a2866dd39dd2", size = 10810580, upload-time = "2026-09-11T19:03:31.402Z" },
     { url = "https://files.pythonhosted.org/packages/04/93/0d239bde12b308262265c2d98909b2f0ecad2b5deeae96241642e822e9c7/matplotlib-3.11.2-cp312-cp312-win_amd64.whl", hash = "sha256:c5c1c68ee401fc98271263410f0e5ce88285abacf7627132914e8adf3d70ff43", size = 9349409, upload-time = "2026-09-11T19:03:34.195Z" },
     { url = "https://files.pythonhosted.org/packages/49/a8/06baf901c02246c8a222b655cc4540ef9c15e1549a04e07927f9cde716c3/matplotlib-3.11.2-cp312-cp312-win_arm64.whl", hash = "sha256:643ff850d8e0f5b8319337f87ed3cb59506afb3df3cc48de777d85871233be7b", size = 9028084, upload-time = "2026-09-11T19:03:37.032Z" },
+]
+
+[[package]]
+name = "networkx"
+version = "3.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/76/3af777226b63a5e64a6b36b1ec5855c14e2b94a37096d4760e595fc43511/networkx-3.7.tar.gz", hash = "sha256:fd77a511bd90f39f3d016351345b52cf5319b813bdca01de3f755d3cca62e96a", size = 1866482, upload-time = "2026-09-21T16:45:16.974Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl", hash = "sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0", size = 2142205, upload-time = "2026-09-21T16:45:14.609Z" },
 ]
 
 [[package]]
@@ -204,6 +261,27 @@ wheels = [
 ]
 
 [[package]]
+name = "prophet"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cmdstanpy" },
+    { name = "holidays" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/5b/8f9e2387cefc8fab4071f9ece67d89793f3c13566d6349dd43e9d8a5a3e3/prophet-1.5.0.tar.gz", hash = "sha256:d9a2eb52dffc8381be2c4b84821abc8c2a3deaaeeea21776396b09d154341c63", size = 76054, upload-time = "2026-10-05T06:25:35.639Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/14/7095d4a7531ca0d04bfd4c2790071b85ec6704b47663a7f87bf9c708aa4b/prophet-1.5.0-py3-none-macosx_10_11_x86_64.whl", hash = "sha256:6a280744c0b58fb96531e73fdd8664e7ac42ecf987fa47e3fca7e383eae059fb", size = 12583333, upload-time = "2026-10-05T06:25:22.379Z" },
+    { url = "https://files.pythonhosted.org/packages/29/02/230e3259931103a1c219e14fd5a86bb5d627e066601184058935f26e157a/prophet-1.5.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:49efc66c6432905aefceab96614e970c3e9eef71af5e3a5caf782f01be78b80e", size = 12018178, upload-time = "2026-10-05T06:25:24.711Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/9f/6edcd70f28604a2f3bf96fdd8f46f9800e3feb832d35336d43ce5a72ff54/prophet-1.5.0-py3-none-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:beb7986c32be0868b1750becc3f0e0ec175d626066b1f31581dfaa8e6b0d5b9b", size = 11888760, upload-time = "2026-10-05T06:25:29.302Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/75/8030ac1c518e8c49c75fcb8bbd162b53e780842436c791312a50b2e28466/prophet-1.5.0-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:391029e357b1584440cebca73415c5767af3a98db9ab1d32b3f07ef3a1a29487", size = 11890727, upload-time = "2026-10-05T06:25:31.377Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/dd/f21d4916182144b26130b73951b08b3d6487599a21c34d082c774d868dae/prophet-1.5.0-py3-none-win_amd64.whl", hash = "sha256:c1e0dee57cfe570d24fb4cc4ed5b875cb1b16354b9f8626e9271eb97dbf5e821", size = 12119548, upload-time = "2026-10-05T06:25:33.526Z" },
+]
+
+[[package]]
 name = "pyarrow"
 version = "26.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -267,6 +345,30 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "stanio"
+version = "0.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/5b/6e376499c3f9d71e4154b031d059663598534dd038f421e8c643d61afec5/stanio-0.5.1.tar.gz", hash = "sha256:348d52f947dec431e118f4b601c4c5296929b86401d4d4dd5aa9373b0d4ae4ac", size = 11983, upload-time = "2024-07-08T19:35:48.029Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/87/37a80e4d5bd453c33262d8fb618b6840fd98d24ed08e046a4a9b10177fa3/stanio-0.5.1-py3-none-any.whl", hash = "sha256:99ad590daa5834681245c2b651716ec2e06223853661ada21430c621521c849f", size = 8065, upload-time = "2024-07-08T19:35:46.503Z" },
+]
+
+[[package]]
+name = "tqdm"
+version = "4.70.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl", hash = "sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73", size = 80199, upload-time = "2026-09-11T07:25:14.599Z" },
 ]
 
 [[package]]

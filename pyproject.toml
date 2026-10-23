@@ -5,3 +5,27 @@ description = "RWKV-7 time-series foundation model targeting approximately 400 m
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = []
+
+[project.optional-dependencies]
+data = ["numpy", "scipy", "pandas", "matplotlib", "pyarrow", "networkx"]
+validation = ["prophet>=1.1.5,<2", "numpy", "pandas", "pyarrow"]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# These entry points support direct execution by setting sys.path before imports.
+"tests/*.py" = ["E402"]
+"src/data_generation/generate_operational_data.py" = ["E402"]
+"src/data_generation/preview_fourier_seasons.py" = ["E402"]
+"src/data_validation/validate_generated_data.py" = ["E402"]
+
+[tool.bandit]
+exclude_dirs = [".venv", ".venv-wsl", "third_party"]
+
+[tool.bandit.assert_used]
+skips = ["*/tests/*", "*/smoke_rwkv7_timeseries.py", "*/scripts/verify_cached_rwkv7.py"]
