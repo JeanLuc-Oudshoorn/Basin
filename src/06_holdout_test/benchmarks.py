@@ -96,6 +96,7 @@ def select_plot_tables(records, config):
     )
     selected = sorted(ranked[:count])
     return set(selected), {
+        "format": "plotly_html",
         "requested_tables": count,
         "selected_tables": len(selected),
         "sample_seed": seed,
@@ -105,7 +106,7 @@ def select_plot_tables(records, config):
                 "table_index": i,
                 "source": records[i]["source"],
                 "plots": [
-                    f"test_table_{i:03d}_target_{j}.png"
+                    f"test_table_{i:03d}_target_{j}.html"
                     for j in range(len(records[i]["targets"]))
                 ],
             }

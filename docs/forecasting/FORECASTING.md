@@ -9,6 +9,13 @@ The latest exported model and its stored test split are selected automatically.
 General forecasting moved to `src/07_forecasting`. See the
 [stage separation audit](../audits/2026-10-29/separate_holdout_stage/REPORT.md).
 
+Random holdout comparison plots now use self-contained Plotly HTML rather than
+Matplotlib PNG. The existing `plot.max_plots` and `plot.sample_seed` controls
+still select the example tables. Open HTML in a browser for zoom, pan, hover,
+range selection and legend-based model toggles. To regenerate an existing
+completed run's plots without rerunning inference:
+`uv run python src/06_holdout_test/plotting.py`.
+
 Comparisons are now configurable using `holdout.benchmark_models`: default
 `["prophet", "naive", "chronos"]`, with `"timestral"` also available.
 RWKV always runs. `holdout.sample_percent` selects a reproducible percentage

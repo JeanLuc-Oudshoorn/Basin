@@ -12,6 +12,7 @@ import torch
 from benchmarks import FoundationBenchmarks, benchmark_names, select_plot_tables
 from inference import forecast_contexts
 from loguru import logger
+from plotting import write_holdout_plot
 from training_log import emit_training_event
 from training_progress import duration
 from training_protocol import sampled_origins
@@ -175,11 +176,6 @@ def summarize(frame):
 @torch.inference_mode()
 def evaluate_holdout(model, records, config):
     """Never fit the neural model on these sources, including their initial context."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     settings = config.get("holdout", {})
     percentiles = settings.get("percentiles", [1, 25, 50, 75, 99])
     batch_size = settings.get("inference_batch_size", 5)
@@ -331,38 +327,17 @@ def evaluate_holdout(model, records, config):
             )
             if table_index in plot_indices:
                 for target in targets:
-                    selected = table_frame[table_frame.target == target]
-                    fig, axis = plt.subplots(
-                        figsize=(config["plot"]["width"], config["plot"]["height"])
-                    )
-                    axis.plot(frame.index, frame[target], color="black", label="Actual")
-                    for method_index, method in enumerate(methods):
-                        for number, (_, segment) in enumerate(
-                            selected.groupby("origin")
-                        ):
-                            axis.plot(
-                                segment.time_index,
-                                segment[method],
-                                label=method if number == 0 else None,
-                                color=f"C{method_index % 10}",
-                            )
-                    axis.axvline(
-                        2 * patch, color="gray", linestyle="--", label="First forecast"
-                    )
-                    axis.set(
-                        title=f"Held-out table {table_index}: {target} ({len(origins)} sampled one-token forecasts)",
-                        xlabel="Timestep",
-                        ylabel=target,
-                    )
-                    axis.legend()
-                    fig.tight_layout()
                     target_index = targets.index(target)
-                    fig.savefig(
+                    write_holdout_plot(
+                        frame,
+                        table_frame,
+                        target,
+                        methods,
                         directory
-                        / f"test_table_{table_index:03d}_target_{target_index}.png",
-                        dpi=config["plot"]["dpi"],
+                        / f"test_table_{table_index:03d}_target_{target_index}.html",
+                        config,
+                        table_index,
                     )
-                    plt.close(fig)
             elapsed = perf_counter() - started
             completed = len(table_metrics)
             progress = {

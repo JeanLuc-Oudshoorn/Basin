@@ -13,7 +13,7 @@ not train or draw a new split. `train.py` now stops after saving its artifacts.
 
 The default output is `results/next_patch_300m_validated/holdout_test`, configured
 by `paths.holdout_test`. It contains metrics JSON, prediction parquet files,
-forecast plots, live progress/ETA and `model_used.json` recording the model's
+interactive Plotly HTML plots, live progress/ETA and `model_used.json` recording the model's
 checksum and selected epoch. Ordinary logs and a timestamped JSONL journal are
 written under `logs/`, including when Windows routes execution to WSL.
 
@@ -36,7 +36,20 @@ Holdout comparison plots use a separate reproducible random sample of the
 evaluated tables: `plot.max_plots=10`, `plot.sample_seed=7`. Each plot overlays
 actuals and every model selected in `holdout.benchmark_models`, plus RWKV.
 If fewer tables are evaluated, all are plotted; set `max_plots=0` to disable.
-`plot_selection.json` lists the chosen sources and their PNG filenames.
+`plot_selection.json` lists the chosen sources and their HTML filenames.
+Open the HTML files in a browser to zoom, pan, hover over predictions and toggle
+models using the legend. Plotly is embedded, so the files work offline.
+
+Convert an existing completed run's saved random examples without rerunning any
+models:
+
+```powershell
+uv run python src/06_holdout_test/plotting.py
+```
+
+This reuses the saved selection and parquet predictions, updates plot filenames
+in the manifests, and leaves forecast values and scores unchanged. Original PNG
+files are retained. Future holdout runs generate HTML automatically.
 
 Chronos-2's public checkpoint is 119.5M parameters; no public 300M–500M Chronos-2
 checkpoint was available when implemented. Timestral-209M is available without

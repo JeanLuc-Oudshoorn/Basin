@@ -652,6 +652,9 @@ launched on Windows automatically use the configured WSL CUDA environment.
 The outputs include logs, training loss, forecast RMSE and Prophet/last-observation
 carry-forward comparison plots. Holdout evaluation uses up to five origins per
 table, configured by `holdout.percentiles`, with table-level progress and ETA.
+Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
+slider and model toggles. Regenerate them from existing saved predictions with
+`uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
 Results go to `results/next_patch_300m_validated/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
 exported `paths.training/model.pt` and its saved test split.
