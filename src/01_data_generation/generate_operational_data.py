@@ -4,38 +4,41 @@ import sys
 from pathlib import Path
 
 # User settings (one fresh structural causal model per table).
-NUM_TABLES = 100
+NUM_TABLES = 150000
 SEED = 1  # Use None for a fresh random seed each execution.
-OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "generated"
-MIN_ROWS = 20
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
+MIN_ROWS = 48
 MAX_ROWS = 2056  # Inclusive.
 MIN_COVARIATES = (
     3  # Includes a binary event source; other nodes are compound processes.
 )
-MAX_COVARIATES = 10
-MAX_LAG = 192  # Maximum outcome-history lag.
-MAX_LAG_COUNT = 6  # Lag 1 is always present; all selected outcome lags are visible.
+MAX_COVARIATES = 7
+MAX_LAG = 512  # Maximum outcome-history lag.
+MAX_LAG_COUNT = 4  # Internal SCM dependencies only; no lag columns are exported.
 SEASONAL_LAG_PROBABILITY = (
     0.8  # If selected: 1/2/3 seasonal anchors with weights 80/16/4%.
 )
 LONG_LAG_PROBABILITY = (
-    0.20  # One additional unstructured lag, subject to MAX_LAG_COUNT.
+    0.05  # One additional unstructured lag, subject to MAX_LAG_COUNT.
 )
 MAX_COVARIATE_LAG = (
-    24  # Maximum delay for covariate edges, including events and switches.
+    96  # Maximum delay for covariate edges, including events and switches.
 )
-INSTANTANEOUS_PROBABILITY = 0.10  # Otherwise there is at least one timestep of delay.
+INSTANTANEOUS_PROBABILITY = 0.05  # Otherwise there is at least one timestep of delay.
 COVARIATE_DELAY_SCALE = 0.75  # Exponential scale; positive lag = 1 + floor(draw).
 # Additional outcome lags in 2..7: zero/one/two with probabilities 15/75/10%.
-VARIANCE_DYNAMICS_PROBABILITY = 0.37  # Noise envelope can change even with a flat mean.
-HIDDEN_COVARIATE_PROBABILITY = 0.4
-EDGE_PROBABILITY = 0.18  # Extra edges beyond randomly selected causal scaffolds.
+VARIANCE_DYNAMICS_PROBABILITY = 0.2  # Noise envelope can change even with a flat mean.
+HIDDEN_COVARIATE_PROBABILITY = 0.37
+EDGE_PROBABILITY = 0.1  # Extra edges beyond randomly selected causal scaffolds.
 DIRECT_OUTCOME_PROBABILITY = 0.65  # At least two process parents when available.
 OUTCOME_FEEDBACK_PROBABILITY = 0.15  # Historical outcome -> covariate edge probability.
 DRIFT_PROBABILITY = (
     0.5  # Covariate drift within trending profiles, not a second outcome-trend draw.
 )
-RANDOM_WALK_PROBABILITY = 0.15
+RANDOM_WALK_PROBABILITY = 0.1
+NOISE_FREE_COVARIATE_PROBABILITY = (
+    0.3  # Per process covariate; deterministic given its parents.
+)
 TREND_FREE_FRACTION = (
     0.5  # Batch quota, screened using outcome linear-trend R² <= 0.15.
 )
@@ -44,20 +47,33 @@ TREND_FREE_FRACTION = (
 RESIDUAL_HISTORY_PROBABILITY = (
     0.08  # Per selected outcome lag; residuals supplement full values.
 )
-MULTIPLICATIVE_TREND_PROBABILITY = (
-    0.25  # Among trending proposals (~15% overall at a 50/50 split).
-)
+MULTIPLICATIVE_TREND_PROBABILITY = 0.2  # Among trending proposals
 MULTIPLICATIVE_CONSTANT_NOISE_PROBABILITY = (
     0.05  # Among multiplicative trends; fixed direct noise scale.
 )
 MULTIPLICATIVE_CONSTANT_SEASONALITY_PROBABILITY = (
     0.05  # Independent rare draw; no seasonal growth.
 )
-SWITCHING_PROBABILITY = 0.15  # Binary shutdown/restart or ramp-reset node.
-MAX_EFFECT_COMPONENTS = 8  # Expression DAG size per edge; increase for more complexity.
+SWITCHING_PROBABILITY = 0.12  # Binary shutdown/restart or ramp-reset node.
+MAX_EFFECT_COMPONENTS = 6  # Expression DAG size per edge; increase for more complexity.
+COMPOSITE_EFFECT_PROBABILITY = 0.25  # Otherwise one operator per edge.
+ANGLE_COVARIATE_PROBABILITY = (
+    0.05  # Wrapped radians; sine/cosine/tangent maps require angular parents.
+)
+# Relative weights, not percentages. Unlisted operators retain tier defaults:
+# often=8, sometimes=2, rare=0.15. Set a weight to zero to disable an operator.
+# Static and temporal operators share this prior. See effect_mechanisms.py.
+EFFECT_WEIGHTS = {}  # Example: {"affine": 16, "hill": 4, "tangent": 0}.
+PARENT_COMBINATION_WEIGHTS = {}  # Override sum/product/ratio/min/max/soft_min/gate/etc.
+NODE_LINK_WEIGHTS = {}  # identity/saturation/softplus/exponential/sigmoid/logarithm.
+PAIRWISE_INTERACTION_PROBABILITY = 0.85  # Most selected interactions use a random pair.
+ADDITIVE_INTERACTION_PROBABILITY = (
+    0.25  # Product-like maps may supplement the sum instead of replacing a group.
+)
+JOINT_NUMERIC_LIMIT = 1e6  # Overflow guard, independent of physical saturation links.
 FOURIER_PROBABILITY = 0.7  # Per seasonal component, for covariates AND outcome.
 MAX_FOURIER_HARMONICS = 16  # Also capped by period and maximum clock speed.
-SEASONAL_SHAPE_DRIFT_PROBABILITY = 0.25  # Smoothly evolve between two sampled shapes.
+SEASONAL_SHAPE_DRIFT_PROBABILITY = 0.15  # Smoothly evolve between two sampled shapes.
 # Relative shape weights; use zero to disable a family. Unlisted families keep
 # defaults. Existing amplitude, cyclic timing and alternating peaks still apply.
 FOURIER_WEIGHTS = {
@@ -117,10 +133,13 @@ PRIOR_RANGES = {
     ),  # Exponential falloff in recent-lag selection probability.
 }
 BURN_IN = 256  # Unrecorded history for warm-up and valid initial lag columns.
-SAVE_SCM = True
-SAVE_PLOT = True
-SAVE_DAG = True  # Causal structure with hidden nodes and explicit history proxies.
+SAVE_SCM = False
+SAVE_PLOT = False
+SAVE_DAG = False  # Causal structure with hidden nodes and explicit history proxies.
 PLOT_COVARIATES = True  # False plots only the outcome.
+RENDER_WORKERS = (
+    None  # Automatically use up to four plot processes; 1 renders serially.
+)
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -144,6 +163,7 @@ def main():
         delayed_probability=OUTCOME_FEEDBACK_PROBABILITY,
         drift_probability=DRIFT_PROBABILITY,
         walk_probability=RANDOM_WALK_PROBABILITY,
+        noise_free_covariate_probability=NOISE_FREE_COVARIATE_PROBABILITY,
         trend_free_fraction=TREND_FREE_FRACTION,
         residual_history_probability=RESIDUAL_HISTORY_PROBABILITY,
         multiplicative_trend_probability=MULTIPLICATIVE_TREND_PROBABILITY,
@@ -157,6 +177,14 @@ def main():
         max_covariate_lag=MAX_COVARIATE_LAG,
         switching_probability=SWITCHING_PROBABILITY,
         max_effect_components=MAX_EFFECT_COMPONENTS,
+        composite_effect_probability=COMPOSITE_EFFECT_PROBABILITY,
+        angle_covariate_probability=ANGLE_COVARIATE_PROBABILITY,
+        effect_weights=EFFECT_WEIGHTS,
+        parent_combination_weights=PARENT_COMBINATION_WEIGHTS,
+        node_link_weights=NODE_LINK_WEIGHTS,
+        pairwise_interaction_probability=PAIRWISE_INTERACTION_PROBABILITY,
+        additive_interaction_probability=ADDITIVE_INTERACTION_PROBABILITY,
+        joint_numeric_limit=JOINT_NUMERIC_LIMIT,
         prior_ranges=PRIOR_RANGES,
         fourier_probability=FOURIER_PROBABILITY,
         max_fourier_harmonics=MAX_FOURIER_HARMONICS,
@@ -167,6 +195,7 @@ def main():
         save_plot=SAVE_PLOT,
         plot_covariates=PLOT_COVARIATES,
         save_dag=SAVE_DAG,
+        render_workers=RENDER_WORKERS,
     )
     paths = generator.generate(NUM_TABLES)
     print(f"Saved {len(paths)} tables under {paths[0].parent}")

@@ -12,11 +12,22 @@
 - Noise amplification and increasing seasonal amplitude - DONE
 - ON/OFF type state transitions - DONE
 - Fourier series - DONE
-- Unrealistic that DAG contains residuals of outcome from 180 timesteps ago (in general, dependencies from long back are too common)
+- Is Holt-Winters so shit in forecasting because we are not supplying the seasonal period? - DONE
+- GPU barely activates during training - DONE
+- Prophet should be measured on MAE - DONE
+- Exclude 'data' folder from IDE scanning features - DONE
+- Automatic Git workflow test suite on Git push
+- More interpretable training logs - DONE
+- Config.json should contain date table(s) for training - DONE
+- Unrealistic that DAG contains residuals of outcome from 180 timesteps ago - DONE
 - Too often all covariates are in one straight line - DONE
 - Too often the outcome is a straight line, or slightly bending up or down line (2/10) - DONE
-- Allow temporal relations between covariate and outcome? (e.g [covariate2 t-80] -> [outcome]) - SHOULD BE REVERSED
-- Patch embeddings
-- Model support both for univariate and providing up to 5 covariates?
-- Connect all datasets together with a token for separation?
-- Holt-Winters for series viability
+- Allow temporal relations between covariate and outcome? (e.g [covariate2 t-80] -> [outcome]) - DONE
+- Patch embeddings - DONE
+- Prophet for series viability - DONE
+- Fix model name 'next_patch_300m_validated'
+- Can we use a smaller architecture? (Chronos-2 is 119.5M parameters, Timestral is 209M parameters)
+- Add plotly for interactive plots
+- RWKV doesn't understand when a series has flatlined it seems
+- Should we include tables with little information?
+- Measure forecasting speed

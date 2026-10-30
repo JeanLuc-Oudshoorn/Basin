@@ -1,4 +1,4 @@
-"""Run this file to browse generated series and DAGs in your default browser.
+"""Run this file to browse 01_generated series and DAGs in your default browser.
 
 Uses only Python's standard library. Stop the local server with Ctrl+C.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 # Settings: select a day here, or switch dates inside the viewer.
-GENERATED_DIR = Path(__file__).resolve().parents[2] / "data" / "generated"
+GENERATED_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
 INITIAL_DATE = None  # None selects the latest available day, e.g. "2026-10-23".
 PORT = 0  # Zero chooses an available local port automatically.
 OPEN_BROWSER = True
@@ -75,7 +75,7 @@ class PlotHandler(BaseHTTPRequestHandler):
             return
         if request.path.startswith("/image/"):
             parts = unquote(request.path[len("/image/") :]).split("/")
-            # Serve only the two generated plot files, confined to day/table.
+            # Serve only the two 01_generated plot files, confined to day/table.
             if len(parts) == 3 and parts[-1] in ("series.png", "dag.png"):
                 path = root.joinpath(*parts).resolve()
                 if (

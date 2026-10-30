@@ -6,12 +6,46 @@ parameters are saved. Evaluation resamples innovations, never the equations.
 
 import json
 import math
+import os
+import sys
 import uuid
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+try:
+    from .effect_mechanisms import (
+        STATIC_OPERATORS,
+        TEMPORAL_OPERATORS,
+        apply_node_link,
+        clip_scalar,
+        combine_parents,
+        evaluate_extra,
+        prepare_parent_combination,
+    )
+except ImportError:
+    from effect_mechanisms import (
+        STATIC_OPERATORS,
+        TEMPORAL_OPERATORS,
+        apply_node_link,
+        clip_scalar,
+        combine_parents,
+        evaluate_extra,
+        prepare_parent_combination,
+    )
+
+
+def _render_plot_job(generator, model, frame, directory):
+    """Independent rendering job; workers never sample SCMs or observations."""
+    if generator.save_plot:
+        generator._plot(frame, directory / "series.png")
+    if generator.save_dag:
+        generator._plot_dag(model, directory / "dag.png")
 
 
 class OperationalSCMGenerator:
@@ -65,6 +99,24 @@ class OperationalSCMGenerator:
         "relative_seasonal_amplitude": (0.04, 0.18),
         "variance_growth_factor": (1.5, 5.0),
         "recent_lag_decay": (0.5, 1.2),
+        "effect_k": (0.2, 4.0),
+        "effect_width": (0.2, 3.0),
+        "effect_threshold": (0.05, 2.0),
+        "effect_shape": (0.5, 4.0),
+        "effect_leak": (0.01, 0.25),
+        "effect_floor": (0.01, 0.2),
+        "effect_tau": (1.0, 30.0),
+        "effect_rate": (0.02, 1.5),
+        "effect_pid_i": (0.01, 0.5),
+        "effect_pid_d": (0.01, 0.3),
+        "effect_kernel_spread": (1.2, 3.0),
+        "effect_delay_steps": (1, 8),
+        "effect_kernel_stages": (2, 5),
+        "joint_strength": (0.2, 4.0),
+        "joint_mix_concentration": (0.3, 3.0),
+        "joint_power": (0.2, 1.8),
+        "joint_mlp_weight_scale": (0.3, 1.5),
+        "joint_mlp_width": (3, 12),
     }
     BASE_NOISES = (
         "normal",
@@ -105,23 +157,100 @@ class OperationalSCMGenerator:
         "random_spectrum": 2,
     }
     OPERATORS = (
-        "affine",
-        "sine",
-        "cosine",
-        "damped_sine",
-        "damped_cosine",
-        "tangent",
-        "sigmoid",
-        "exponential",
-        "power",
-        "inverse_square",
-        "log",
-        "relu",
-        "mlp",
-        "add",
-        "multiply",
-        "gate",
+        (
+            "affine",
+            "sine",
+            "cosine",
+            "damped_sine",
+            "damped_cosine",
+            "tangent",
+            "sigmoid",
+            "exponential",
+            "power",
+            "inverse_square",
+            "log",
+            "relu",
+            "mlp",
+            "add",
+            "multiply",
+            "gate",
+        )
+        + STATIC_OPERATORS
+        + TEMPORAL_OPERATORS
     )
+    DEFAULT_EFFECT_WEIGHTS = dict.fromkeys(OPERATORS, 2.0)
+    DEFAULT_EFFECT_WEIGHTS.update(
+        dict.fromkeys(
+            (
+                "affine",
+                "saturation",
+                "power",
+                "exponential",
+                "arrhenius",
+                "antoine",
+                "relu",
+                "deadband",
+                "clip",
+                "knee",
+                "leaky_relu",
+                "log",
+                "decreasing_quadratic",
+                "quadratic_friction",
+                "stefan_boltzmann",
+                "first_order_lag",
+                "delay",
+                "integrator",
+                "min",
+                "max",
+                "soft_min",
+                "multiply",
+                "ratio",
+                "add",
+            ),
+            8.0,
+        )
+    )
+    DEFAULT_EFFECT_WEIGHTS.update(
+        dict.fromkeys(
+            (
+                "sine",
+                "cosine",
+                "tangent",
+                "damped_sine",
+                "damped_cosine",
+                "inverse_square",
+                "swiglu",
+                "mlp",
+            ),
+            0.15,
+        )
+    )
+    DEFAULT_PARENT_COMBINATION_WEIGHTS = {
+        "sum": 16,
+        "product": 4,
+        "saddle": 0.2,
+        "ratio": 3,
+        "min": 3,
+        "max": 3,
+        "soft_min": 3,
+        "gate": 1,
+        "exponent_gate": 0.5,
+        "threshold": 1,
+        "convex_mix": 3,
+        "mlp": 0.5,
+        "log_sum": 1,
+        "regime_switch": 1,
+        "volatility_coupling": 1,
+        "swiglu": 0.15,
+    }
+    DEFAULT_NODE_LINK_WEIGHTS = {
+        "identity": 16,
+        "saturation": 4,
+        "softplus": 2,
+        "exponential": 1,
+        "sigmoid": 1,
+        "logarithm": 1,
+    }
 
     def __init__(
         self,
@@ -140,6 +269,7 @@ class OperationalSCMGenerator:
         delayed_probability=0.15,
         drift_probability=0.5,
         walk_probability=0.15,
+        noise_free_covariate_probability=0.10,
         trend_free_fraction=0.5,
         residual_history_probability=0.08,
         switching_probability=0.3,
@@ -157,6 +287,14 @@ class OperationalSCMGenerator:
         seasonal_shape_drift_probability=0.25,
         fourier_weights=None,
         max_effect_components=8,
+        composite_effect_probability=0.25,
+        angle_covariate_probability=0.05,
+        effect_weights=None,
+        parent_combination_weights=None,
+        node_link_weights=None,
+        pairwise_interaction_probability=0.85,
+        additive_interaction_probability=0.35,
+        joint_numeric_limit=1e6,
         prior_ranges=None,
         noise_weights=None,
         burn_in=256,
@@ -164,8 +302,19 @@ class OperationalSCMGenerator:
         save_plot=True,
         plot_covariates=True,
         save_dag=True,
+        render_workers=None,
     ):
         settings = locals().copy()
+        self._auto_render_workers = render_workers is None
+        if render_workers is None:
+            render_workers = min(4, max(1, (os.cpu_count() or 2) // 2))
+        if (
+            isinstance(render_workers, bool)
+            or not isinstance(render_workers, int)
+            or render_workers < 1
+        ):
+            raise ValueError("render_workers must be a positive integer or None")
+        self.render_workers = render_workers
         for name in (
             "min_rows",
             "max_rows",
@@ -193,6 +342,7 @@ class OperationalSCMGenerator:
             "delayed_probability",
             "drift_probability",
             "walk_probability",
+            "noise_free_covariate_probability",
             "trend_free_fraction",
             "residual_history_probability",
             "switching_probability",
@@ -205,6 +355,10 @@ class OperationalSCMGenerator:
             "instantaneous_probability",
             "fourier_probability",
             "seasonal_shape_drift_probability",
+            "composite_effect_probability",
+            "angle_covariate_probability",
+            "pairwise_interaction_probability",
+            "additive_interaction_probability",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -212,6 +366,26 @@ class OperationalSCMGenerator:
         if not np.isfinite(covariate_delay_scale) or covariate_delay_scale <= 0:
             raise ValueError("covariate_delay_scale must be finite and positive")
         self.covariate_delay_scale = float(covariate_delay_scale)
+        if not np.isfinite(joint_numeric_limit) or joint_numeric_limit <= 0:
+            raise ValueError("joint_numeric_limit must be finite and positive")
+        self.joint_numeric_limit = float(joint_numeric_limit)
+        for attribute, defaults, overrides in (
+            ("effect_weights", self.DEFAULT_EFFECT_WEIGHTS, effect_weights),
+            (
+                "parent_combination_weights",
+                self.DEFAULT_PARENT_COMBINATION_WEIGHTS,
+                parent_combination_weights,
+            ),
+            ("node_link_weights", self.DEFAULT_NODE_LINK_WEIGHTS, node_link_weights),
+        ):
+            weights = dict(defaults)
+            for name, weight in (overrides or {}).items():
+                if name not in weights or not np.isfinite(weight) or weight < 0:
+                    raise ValueError(f"Invalid {attribute} entry: {name}")
+                weights[name] = float(weight)
+            if sum(weights.values()) <= 0:
+                raise ValueError(f"At least one {attribute} entry must be positive")
+            setattr(self, attribute, weights)
         self.fourier_weights = dict(self.DEFAULT_FOURIER_WEIGHTS)
         for name, weight in (fourier_weights or {}).items():
             if (
@@ -247,9 +421,15 @@ class OperationalSCMGenerator:
             "ar_mass",
             "event_probability",
             "contamination_probability",
+            "effect_floor",
+            "effect_leak",
         ):
             if self.priors[name][1] >= 1:
                 raise ValueError(f"{name} must be below 1")
+        for name in ("effect_delay_steps", "effect_kernel_stages", "joint_mlp_width"):
+            low, high = self.priors[name]
+            if int(low) != low or int(high) != high or high > 1024:
+                raise ValueError(f"{name} must have integer bounds within [1, 1024]")
         low, high = self.priors["perlin_octaves"]
         if int(low) != low or int(high) != high or low < 1 or high > 16:
             raise ValueError("perlin_octaves must have integer bounds within [1, 16]")
@@ -520,7 +700,7 @@ class OperationalSCMGenerator:
     def _quantize(value, step, offset):
         return offset + step * np.round((value - offset) / step) if step else value
 
-    def _expression(self):
+    def _expression(self, input_domain=None):
         """Build an expression DAG with reusable intermediate results.
 
         Evaluation in instruction order is dynamic programming: shared results
@@ -528,8 +708,23 @@ class OperationalSCMGenerator:
         an optional older result, so the program contains no dead instructions.
         """
         r, program = self.rng, []
-        for i in range(int(r.integers(1, self.max_effect_components + 1))):
-            op = str(r.choice(self.OPERATORS))
+        count = (
+            int(r.integers(2, self.max_effect_components + 1))
+            if self.max_effect_components > 1
+            and r.random() < self.composite_effect_probability
+            else 1
+        )
+        names = list(self.effect_weights)
+        weights = np.array(list(self.effect_weights.values()), dtype=float)
+        if input_domain is not None and input_domain != "angle":
+            # Static trig of an arbitrary load/pressure is rarely meaningful.
+            # Direct inspection can omit context; sampled SCM edges supply it.
+            for op in ("sine", "cosine", "tangent"):
+                weights[names.index(op)] = 0
+        if weights.sum() <= 0:
+            raise ValueError(f"No enabled effects for input domain {input_domain!r}")
+        for i in range(count):
+            op = str(r.choice(names, p=weights / weights.sum()))
             instruction = {
                 "op": op,
                 "a": i,
@@ -557,13 +752,49 @@ class OperationalSCMGenerator:
                     bias=r.normal(0, r.uniform(0.2, 2), size=width).tolist(),
                     v=(r.normal(size=width) / np.sqrt(width)).tolist(),
                 )
+            if op in STATIC_OPERATORS + TEMPORAL_OPERATORS:
+                # Sample the shape and temporal parameters once per equation,
+                # never while evaluating observations. Ranges are configurable.
+                instruction.update(
+                    k=self._draw("effect_k", log=True),
+                    width=self._draw("effect_width", log=True),
+                    threshold=self._draw("effect_threshold", log=True),
+                    shape=self._draw("effect_shape"),
+                    center=self._draw("effect_offset"),
+                    level=self._draw("effect_gain"),
+                    leak=self._draw("effect_leak"),
+                    floor=self._draw("effect_floor", log=True),
+                    tau=self._draw("effect_tau", log=True),
+                    rise_rate=self._draw("effect_rate", log=True),
+                    fall_rate=self._draw("effect_rate", log=True),
+                    steps=int(
+                        r.integers(
+                            int(self.priors["effect_delay_steps"][0]),
+                            int(self.priors["effect_delay_steps"][1]) + 1,
+                        )
+                    ),
+                    stages=int(
+                        r.integers(
+                            int(self.priors["effect_kernel_stages"][0]),
+                            int(self.priors["effect_kernel_stages"][1]) + 1,
+                        )
+                    ),
+                    spread=self._draw("effect_kernel_spread"),
+                    period=self._draw("ringing_period", log=True),
+                    high_gain=self._draw("effect_gain"),
+                    ki=self._draw("effect_pid_i", log=True),
+                    kd=self._draw("effect_pid_d", log=True),
+                )
             program.append(instruction)
         return program
 
     @staticmethod
-    def _evaluate(program, value):
+    def _evaluate(program, value, state=None):
+        # One state dictionary per edge, with an independent slot per instruction.
+        # Omitting state evaluates a fresh one-step response for inspection.
+        state = {} if state is None else state
         values = [value]
-        for instruction in program:
+        for index, instruction in enumerate(program):
             a, b = values[instruction["a"]], values[instruction["b"]]
             z = instruction["gain"] * a + instruction["offset"]
             op, limit = instruction["op"], instruction["limit"]
@@ -609,6 +840,10 @@ class OperationalSCMGenerator:
                 result = z * b
             elif op == "gate":
                 result = z * (1 + np.tanh(b)) / 2
+            elif op in STATIC_OPERATORS + TEMPORAL_OPERATORS:
+                result = evaluate_extra(
+                    op, z, b, instruction, state.setdefault(index, {})
+                )
             else:
                 raise ValueError(f"Unknown operator: {op}")
             # Soft saturation models finite capacity and controls nonlinear
@@ -616,7 +851,7 @@ class OperationalSCMGenerator:
             values.append(float(limit * np.tanh(result / limit)))
         return values[-1]
 
-    def _edge(self, parent, lag=0):
+    def _edge(self, parent, lag=0, input_domain=None):
         return {
             "parent": parent,
             "lag": lag,
@@ -624,14 +859,91 @@ class OperationalSCMGenerator:
             "input_scale": self._draw("input_scale", log=True),
             "input_offset": self._draw("effect_offset"),
             "output_offset": self._draw("effect_offset"),
-            "program": self._expression(),
+            "program": self._expression(input_domain),
+        }
+
+    def _sample_parent_combination(self, parent_count):
+        """Sample operator, participating parents and roles independently."""
+        if parent_count < 2:
+            raise ValueError("A joint map requires at least two parents")
+        r = self.rng
+        modes = list(self.parent_combination_weights)
+        weights = np.array(list(self.parent_combination_weights.values()), float)
+        # A log-sum requires an exponential link to form a power law. Honor an
+        # explicit decision to disable exponential links by excluding that pair.
+        if not self.node_link_weights["exponential"]:
+            weights[modes.index("log_sum")] = 0
+        if weights.sum() <= 0:
+            raise ValueError("No compatible parent combination and node link enabled")
+        mode = str(r.choice(modes, p=weights / weights.sum()))
+        if mode == "log_sum":
+            count = parent_count
+        elif mode == "mlp" and parent_count >= 3:
+            count = int(r.integers(3, min(5, parent_count) + 1))
+        elif parent_count == 2 or r.random() < self.pairwise_interaction_probability:
+            count = 2
+        else:
+            count = int(r.integers(3, min(5, parent_count) + 1))
+        spec = {
+            "version": 2,
+            "mode": mode,
+            "indices": r.choice(parent_count, count, replace=False).tolist(),
+            "application": "replace",
+            "scale": self._draw("input_scale", log=True),
+            "floor": self._draw("effect_floor"),
+            "strength": self._draw("joint_strength", log=True),
+            "positive_map": str(r.choice(["softplus", "exp"], p=[0.85, 0.15])),
+            "threshold": self._draw("effect_offset"),
+            "temperature": self._draw("effect_width", log=True),
+            "low_gain": self._draw("effect_leak"),
+            "high_gain": self._draw("joint_power"),
+            "numeric_limit": self.joint_numeric_limit,
+        }
+        if (
+            mode
+            in ("product", "saddle", "ratio", "mlp", "volatility_coupling", "swiglu")
+            and r.random() < self.additive_interaction_probability
+        ):
+            spec["application"] = "additive"
+        if mode == "convex_mix":
+            concentration = self._draw("joint_mix_concentration")
+            spec["weights"] = r.dirichlet(np.full(count, concentration)).tolist()
+        if mode == "mlp":
+            low, high = self.priors["joint_mlp_width"]
+            width = int(r.integers(int(low), int(high) + 1))
+            magnitude = self._draw("joint_mlp_weight_scale")
+            spec.update(
+                w=(r.normal(size=(width, count)) * magnitude / np.sqrt(count)).tolist(),
+                bias=r.normal(0, magnitude, width).tolist(),
+                v=(r.normal(size=width) / np.sqrt(width)).tolist(),
+            )
+        if mode == "log_sum":
+            spec["powers"] = [self._draw("joint_power") for _ in range(count)]
+        return spec
+
+    def _sample_node_link(self, force_exponential=False):
+        modes = list(self.node_link_weights)
+        weights = np.array(list(self.node_link_weights.values()), float)
+        mode = (
+            "exponential"
+            if force_exponential
+            else str(self.rng.choice(modes, p=weights / weights.sum()))
+        )
+        return {
+            "mode": mode,
+            "scale": 1.0 if force_exponential else self._draw("input_scale", log=True),
+            "input_offset": 0.0 if force_exponential else self._draw("effect_offset"),
+            "output_offset": 0.0 if force_exponential else self._draw("effect_offset"),
+            "gain": self._draw("effect_gain"),
+            "capacity": self._draw("effect_limit"),
+            "numeric_limit": self.joint_numeric_limit,
         }
 
     @classmethod
-    def _effect(cls, edge, value):
+    def _effect(cls, edge, value, state=None):
         value = (value - edge["input_offset"]) / edge["input_scale"]
         return edge["weight"] * (
-            cls._evaluate(edge["program"], value) + edge["output_offset"]
+            cls._evaluate(edge["program"], value, state) + edge["output_offset"]
         )
 
     def _dynamics(self, event_name):
@@ -787,10 +1099,20 @@ class OperationalSCMGenerator:
                     "initial_on": True,
                 }
             )
+
+        def sample_edge(parent, lag=0):
+            domain = next(
+                (n.get("domain", "real") for n in nodes if n["name"] == parent), "real"
+            )
+            return self._edge(parent, lag, input_domain=domain)
+
         for i in range(len(nodes), count):
             node = {
                 "name": f"covariate_{i:02d}",
                 "kind": "process",
+                "domain": "angle"
+                if r.random() < self.angle_covariate_probability
+                else "real",
                 "visible": bool(r.random() >= self.hidden_probability),
                 "edges": [],
                 **self._dynamics(event),
@@ -799,7 +1121,7 @@ class OperationalSCMGenerator:
             for parent in nodes:
                 if r.random() < probability:
                     lag = self._sample_covariate_lag()
-                    node["edges"].append(self._edge(parent["name"], lag))
+                    node["edges"].append(sample_edge(parent["name"], lag))
             # Scaffolds allow deep mediation, shared causes and colliders.
             # Random extra edges retain diversity; hiding is independently drawn.
             forced = []
@@ -814,10 +1136,10 @@ class OperationalSCMGenerator:
             for parent in forced:
                 if not any(e["parent"] == parent for e in node["edges"]):
                     node["edges"].append(
-                        self._edge(parent, self._sample_covariate_lag())
+                        sample_edge(parent, self._sample_covariate_lag())
                     )
             if r.random() < self.delayed_probability:
-                node["edges"].append(self._edge(f"outcome_lag_{int(r.choice(lags))}"))
+                node["edges"].append(sample_edge(f"outcome_lag_{int(r.choice(lags))}"))
             nodes.append(node)
         processes = [n for n in nodes if n["kind"] == "process"]
         selected = [n for n in processes if r.random() < self.direct_probability]
@@ -830,7 +1152,7 @@ class OperationalSCMGenerator:
         outcome = {
             **self._dynamics(event),
             "edges": [
-                self._edge(n["name"], self._sample_covariate_lag()) for n in selected
+                sample_edge(n["name"], self._sample_covariate_lag()) for n in selected
             ],
             "baseline": self._draw("baseline"),
             "scale": self._draw("outcome_scale", log=True),
@@ -863,11 +1185,17 @@ class OperationalSCMGenerator:
             node["event_lag"] = (
                 self._sample_covariate_lag() if node["event_parent"] else 0
             )
-            node["interaction"] = (
-                float(r.uniform(-0.8, 0.8))
-                if len(node["edges"]) >= 2 and r.random() < 0.5
-                else 0.0
-            )
+            # Joint maps explicitly combine DIFFERENT parent effects. Existing
+            # saved SCMs without this field keep their original sum/interaction.
+            node["interaction"] = 0.0
+            if len(node["edges"]) >= 2:
+                node["parent_combination"] = self._sample_parent_combination(
+                    len(node["edges"])
+                )
+            if node["edges"]:
+                node["node_link"] = self._sample_node_link(
+                    node.get("parent_combination", {}).get("mode") == "log_sum"
+                )
             self._revise_dynamics(node, rows, trend_free, node is outcome)
             if r.random() < 0.25:
                 # A causal impulse response supplies actual time-domain decay,
@@ -881,6 +1209,29 @@ class OperationalSCMGenerator:
                     "phase": float(r.uniform(-np.pi, np.pi)),
                     "wave": str(r.choice(["sine", "cosine"])),
                 }
+            if (
+                node is not outcome
+                and r.random() < self.noise_free_covariate_probability
+            ):
+                # A deterministic structural equation has no private innovation,
+                # random walk, measurement error or auxiliary random shock input.
+                # Explicit causal parents can still transmit their own variation.
+                # Zero-scale normal uses the existing replay schema: saved models
+                # do not require a new noise family or simulator special case.
+                node["noise_free"] = True
+                node["noise"] = {"kind": "normal", "location": 0.0, "scale": 0.0}
+                for key in (
+                    "walk_scale",
+                    "slope_walk",
+                    "white_noise_scale",
+                    "heteroskedasticity",
+                    "quantization_step",
+                ):
+                    node[key] = 0.0
+                node["event_parent"] = None
+                node["event_lag"] = 0
+                node.pop("ringing", None)
+                node.pop("volatility", None)
         if switch:
             outcome["operation"] = {
                 "parent": switch,
@@ -999,12 +1350,18 @@ class OperationalSCMGenerator:
             "topology": topology,
             "prior_ranges": self.priors.copy(),
             "noise_weights": self.noise_weights.copy(),
+            "effect_weights": self.effect_weights.copy(),
+            "parent_combination_weights": self.parent_combination_weights.copy(),
+            "node_link_weights": self.node_link_weights.copy(),
+            "pairwise_interaction_probability": self.pairwise_interaction_probability,
+            "additive_interaction_probability": self.additive_interaction_probability,
+            "composite_effect_probability": self.composite_effect_probability,
             "equations": {
                 "process": "x=quantize(intercept+level+seasonal+shock+residual); residual=persistence*previous_residual+forcing+heteroskedastic_noise",
                 "level": "slope+=slope_walk*N(0,1); on event reverse/reset/add event_slope; level+=slope+walk_scale*N(0,1)+event*level_jump",
                 "shock": "shock=shock_decay*previous_shock+event*shock_size",
                 "seasonal": "sum(amplitude*(1+modulation*sin(2*pi*t/modulation_period))*sin(2*pi*t/period+phase))",
-                "forcing": "sum(edge effects)+interaction*tanh(effect[0])*tanh(effect[1])",
+                "forcing": "node_link(selected-parent joint map plus remaining additive edge effects); optional additive joint contribution; log_sum plus exponential link gives positive multi-parent power laws; innovations remain outside link; legacy schemas retain original maps",
                 "noise": "saved noise draw*(1+heteroskedasticity*abs(tanh(previous_residual)))",
                 "variance": "center innovations by their distribution mean; scale centered innovations and white noise by time-varying volatility and optional (latent_level/initial_level)**noise_elasticity; retain innovation mean",
                 "multiplicative_seasonality": "seasonal * seasonal_base_scale * (latent_level/initial_level)**seasonal_elasticity",
@@ -1014,7 +1371,7 @@ class OperationalSCMGenerator:
                 "seasonal_v3": "integrated phase with smoothly varying frequency; saved Fourier sine/cosine expansion (or legacy harmonic wave) times alternating-cycle envelope and optional exponential amplitude growth",
                 "fourier": "sum_k(a_k(t)*cos(k*phase)+b_k(t)*sin(k*phase)); coefficients optionally interpolate smoothly between saved start/end spectra; no DC term",
                 "quantization": "offset+step*round((x-offset)/step), bypassed when step=0",
-                "initialization": "States zero except saved slopes; t starts at -burn_in; discard t<0. Outcome-lag edge parents use full normalized historical x; exported lags use physical outcome units.",
+                "initialization": "States zero except saved slopes; t starts at -burn_in; discard t<0. Outcome-lag edge parents use full normalized historical x internally; exported columns contain only current outcome, time index and visible current covariates.",
                 "graph": "Topological contemporaneous edges plus positive temporal lags. Past values are separate vertices when time is unrolled; innovations are independent.",
             },
         }
@@ -1227,7 +1584,7 @@ class OperationalSCMGenerator:
         if trend.get("kind") == "multiplicative":
             # Fit in observation units without logging possibly signed/noisy
             # observations. The known exponential shape is a structural prior,
-            # not a curve selected by searching over the generated outcome.
+            # not a curve selected by searching over the 01_generated outcome.
             columns = [
                 np.ones(len(y)),
                 np.expm1(trend["log_rate"] * np.arange(1, len(y) + 1)),
@@ -1283,7 +1640,10 @@ class OperationalSCMGenerator:
                 from legacy_scm_generator import OperationalSCMGenerator as Legacy
             # Dispatch on a legacy instance so its noise/effect evaluators also
             # use the original schema, preserving existing dataset replay.
-            return Legacy(self.output_dir).simulate(model)
+            frame = Legacy(self.output_dir).simulate(model)
+            return frame.drop(
+                columns=[c for c in frame if c.startswith("outcome_lag_")]
+            )
         if model["version"] not in (2, 3):
             raise ValueError("Unsupported SCM schema version")
         # Validate before evaluating any equations. A positive delay may refer
@@ -1294,9 +1654,34 @@ class OperationalSCMGenerator:
         length = rows + warmup
         names = [n["name"] for n in model["nodes"]] + ["outcome"]
         specs = model["nodes"] + [model["outcome"]]
+        edge_states = {
+            name: [{} for _ in spec["edges"]] for name, spec in zip(names, specs)
+        }
         # Precompute innovations once. Visibility never affects random draws.
         history = {name: np.zeros(length) for name in names}
         residuals = {name: np.zeros(length) for name in names}
+        active_nodes = [
+            (name, spec)
+            for name, spec in zip(names, specs)
+            if spec.get("kind") not in ("event", "switch")
+        ]
+        # Resolve source buffers, lag aliases and fixed joint-map arrays once.
+        # Keep per-row arithmetic and random-draw order identical to replay.
+        edge_inputs, parent_maps = {}, {}
+        for name, spec in active_nodes:
+            sources = []
+            for index, edge in enumerate(spec["edges"]):
+                parent, lag = edge["parent"], edge["lag"]
+                if parent.startswith("outcome_lag_"):
+                    lag += int(parent.rsplit("_", 1)[1])
+                    parent = "outcome"
+                sources.append((edge, history[parent], lag, edge_states[name][index]))
+            edge_inputs[name] = sources
+            parent_maps[name] = prepare_parent_combination(
+                spec.get("parent_combination"), len(sources)
+            )
+        residual_ar = list(zip(model["outcome"]["ar_weights"], lags))
+        outcome_ar = list(zip(model["outcome"].get("outcome_ar_weights", []), lags))
         randoms, states, season_values, white_errors = {}, {}, {}, {}
         noise_scales, noise_means = {}, {}
         time = np.arange(-warmup, rows)
@@ -1365,9 +1750,7 @@ class OperationalSCMGenerator:
 
         for i in range(length):
             t = i - warmup
-            for name, spec in zip(names, specs):
-                if spec.get("kind") in ("event", "switch"):
-                    continue
+            for name, spec in active_nodes:
                 noise, walk, slope_walk = randoms[name]
                 event = (
                     past(spec["event_parent"], i - spec.get("event_lag", 0))
@@ -1392,7 +1775,7 @@ class OperationalSCMGenerator:
                 )
                 if "level_limit" in spec:
                     level = float(
-                        np.clip(level, -spec["level_limit"], spec["level_limit"])
+                        clip_scalar(level, -spec["level_limit"], spec["level_limit"])
                     )
                 shock = spec["shock_decay"] * shock + event * spec["shock_size"]
                 states[name] = [level, slope, shock]
@@ -1411,34 +1794,33 @@ class OperationalSCMGenerator:
                     )
                 )
                 effects = []
-                for edge in spec["edges"]:
-                    parent = edge["parent"]
-                    value = (
-                        past("outcome", i - int(parent.rsplit("_", 1)[1]) - edge["lag"])
-                        if parent.startswith("outcome_lag_")
-                        else past(parent, i - edge["lag"])
+                for edge, source, lag, state in edge_inputs[name]:
+                    value = source[i - lag] if i >= lag else 0.0
+                    effects.append(self._effect(edge, value, state))
+                forcing = (
+                    combine_parents(
+                        effects, spec["parent_combination"], parent_maps[name]
                     )
-                    effects.append(self._effect(edge, value))
-                forcing = sum(effects)
-                if spec["interaction"]:
+                    if "parent_combination" in spec
+                    else sum(effects)
+                )
+                if "parent_combination" not in spec and spec["interaction"]:
                     forcing += (
                         spec["interaction"] * np.tanh(effects[0]) * np.tanh(effects[1])
                     )
+                forcing = apply_node_link(forcing, spec.get("node_link"))
                 previous = residuals[name][i - 1] if i else 0.0
                 ar = (
                     sum(
                         w * residuals[name][i - lag]
-                        for w, lag in zip(spec["ar_weights"], lags)
+                        for w, lag in residual_ar
                         if i >= lag
                     )
                     if name == "outcome"
                     else spec["persistence"] * previous
                 )
                 if name == "outcome":
-                    ar += sum(
-                        w * past("outcome", i - lag)
-                        for w, lag in zip(spec.get("outcome_ar_weights", []), lags)
-                    )
+                    ar += sum(w * past("outcome", i - lag) for w, lag in outcome_ar)
                 innovation = noise[i]
                 if name in noise_scales:
                     # Scale deviations, not the distribution's location. Thus
@@ -1486,6 +1868,8 @@ class OperationalSCMGenerator:
                         ramp += operation["ramp_rate"] * (1 if on else -1)
                         value += ramp
                     previous_on = on
+                if spec.get("domain") == "angle":
+                    value = float(np.arctan2(np.sin(value), np.cos(value)))
                 history[name][i] = value
         outcome = model["outcome"]
         physical = outcome["baseline"] + outcome["scale"] * history["outcome"]
@@ -1493,8 +1877,6 @@ class OperationalSCMGenerator:
         if operation and operation["mode"] == "shutdown":
             physical[history[operation["parent"]] == 0] = operation["flat_value"]
         data = {"time_index": np.arange(rows), "outcome": physical[warmup:]}
-        for lag in lags:
-            data[f"outcome_lag_{lag}"] = physical[warmup - lag : length - lag]
         for node in model["nodes"]:
             if node["visible"]:
                 data[node["name"]] = history[node["name"]][warmup:]
@@ -1998,45 +2380,74 @@ class OperationalSCMGenerator:
         profiles = [True] * math.ceil(num_tables * self.trend_free_fraction)
         profiles += [False] * (num_tables - len(profiles))
         self.rng.shuffle(profiles)
-        for index, trend_free in enumerate(profiles):
-            for attempt in range(100):
-                model = self.sample_model(trend_free=trend_free)
-                frame = self.simulate(model)
-                score = self.trend_score(frame)
-                strength = self.trend_strength(frame, model)
-                if (trend_free and score <= 0.15) or (
-                    not trend_free and strength >= 0.4
-                ):
-                    break
-            else:
-                raise RuntimeError(
-                    "Could not meet trend-profile screening criterion after 100 attempts"
+        # Sampling, RNG consumption, screening and table order stay serial and
+        # unchanged. Only independent image rendering runs in other processes.
+        workers = min(self.render_workers, num_tables)
+        # Spawn needs an importable entry point. Interactive Python/notebooks
+        # still work, and tiny automatic batches avoid process startup overhead.
+        main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+        if (
+            not main_file
+            or not Path(main_file).is_file()
+            or (self._auto_render_workers and num_tables < 4)
+        ):
+            workers = 1
+        executor = (
+            ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
+            if workers > 1 and (self.save_plot or self.save_dag)
+            else None
+        )
+        pending = deque()
+        try:
+            for index, trend_free in enumerate(profiles):
+                for attempt in range(100):
+                    model = self.sample_model(trend_free=trend_free)
+                    frame = self.simulate(model)
+                    score = self.trend_score(frame)
+                    strength = self.trend_strength(frame, model)
+                    if (trend_free and score <= 0.15) or (
+                        not trend_free and strength >= 0.4
+                    ):
+                        break
+                else:
+                    raise RuntimeError(
+                        "Could not meet trend-profile screening criterion after 100 attempts"
+                    )
+                model["quality"] = {
+                    "linear_trend_r_squared": score,
+                    "screened_trend_free": trend_free,
+                    "trend_shape_r_squared": strength,
+                    "sampling_attempts": attempt + 1,
+                }
+                directory = dated_dir / f"table_{run_id}_{index:06d}"
+                directory.mkdir(exist_ok=False)
+                frame.to_parquet(
+                    directory / "data.parquet",
+                    engine="pyarrow",
+                    index=False,
+                    compression="zstd",
                 )
-            model["quality"] = {
-                "linear_trend_r_squared": score,
-                "screened_trend_free": trend_free,
-                "trend_shape_r_squared": strength,
-                "sampling_attempts": attempt + 1,
-            }
-            directory = dated_dir / f"table_{run_id}_{index:06d}"
-            directory.mkdir(exist_ok=False)
-            frame.to_parquet(
-                directory / "data.parquet",
-                engine="pyarrow",
-                index=False,
-                compression="zstd",
-            )
-            if self.save_scm:
-                (directory / "scm.json").write_text(
-                    json.dumps(model, indent=2, allow_nan=False), encoding="utf-8"
+                if self.save_scm:
+                    (directory / "scm.json").write_text(
+                        json.dumps(model, indent=2, allow_nan=False), encoding="utf-8"
+                    )
+                if executor:
+                    pending.append(
+                        executor.submit(_render_plot_job, self, model, frame, directory)
+                    )
+                    # Bound queued frames/SCMs; surface rendering failures early.
+                    if len(pending) >= 2 * workers:
+                        pending.popleft().result()
+                else:
+                    _render_plot_job(self, model, frame, directory)
+                paths.append(directory)
+                print(
+                    f"[{index + 1}/{num_tables}] {directory.name}: {len(frame)} rows, {len(frame.columns)} columns",
+                    flush=True,
                 )
-            if self.save_plot:
-                self._plot(frame, directory / "series.png")
-            if self.save_dag:
-                self._plot_dag(model, directory / "dag.png")
-            paths.append(directory)
-            print(
-                f"[{index + 1}/{num_tables}] {directory.name}: {len(frame)} rows, {len(frame.columns)} columns",
-                flush=True,
-            )
+            for future in pending:
+                future.result()
+        finally:
+            if executor:
+                executor.shutdown(wait=True, cancel_futures=True)
         return paths

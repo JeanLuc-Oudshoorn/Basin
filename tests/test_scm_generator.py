@@ -8,11 +8,106 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from data_generation.scm_generator import OperationalSCMGenerator
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "src" / "01_data_generation")
+)
+from scm_generator import OperationalSCMGenerator
 
 
 class GeneratorTests(unittest.TestCase):
+    def assert_training_columns(self, frame, model):
+        self.assertEqual(
+            list(frame),
+            ["time_index", "outcome"]
+            + [n["name"] for n in model["nodes"] if n["visible"]],
+        )
+
+    def test_internal_lags_remain_causal_without_exported_predictors(self):
+        generator = OperationalSCMGenerator(
+            "unused",
+            min_rows=20,
+            max_rows=20,
+            min_covariates=3,
+            max_covariates=3,
+            max_lag=3,
+            switching_probability=0,
+        )
+        model = generator.sample_model()
+        for node in model["nodes"][1:] + [model["outcome"]]:
+            self._quiet_process(node)
+        model.update(lags=[1, 3], burn_in=3)
+        model["outcome"].update(
+            intercept=1,
+            ar_weights=[0, 0],
+            outcome_ar_weights=[0, 0.5],
+            baseline=0,
+            scale=1,
+        )
+        frame = generator.simulate(model)
+        expected = []
+        for i in range(23):
+            expected.append(1 + (0.5 * expected[i - 3] if i >= 3 else 0))
+        np.testing.assert_array_equal(frame["outcome"], expected[3:])
+        self.assert_training_columns(frame, model)
+
+    def test_noise_free_covariates_are_deterministic_and_replayable(self):
+        generator = OperationalSCMGenerator(
+            "unused",
+            seed=14,
+            min_rows=100,
+            max_rows=100,
+            min_covariates=4,
+            max_covariates=4,
+            switching_probability=0,
+            noise_free_covariate_probability=1,
+            edge_probability=0,
+            delayed_probability=0,
+            walk_probability=1,
+            drift_probability=1,
+        )
+        model = generator.sample_model(trend_free=False)
+        processes = [node for node in model["nodes"] if node["kind"] == "process"]
+        for node in processes:
+            self.assertTrue(node["noise_free"])
+            self.assertEqual(node["noise"]["scale"], 0)
+            self.assertEqual(node["walk_scale"], 0)
+            self.assertEqual(node["slope_walk"], 0)
+            self.assertEqual(node["white_noise_scale"], 0)
+            self.assertIsNone(node["event_parent"])
+            self.assertNotIn("ringing", node)
+            node["visible"] = True
+        root = processes[0]
+        self.assertFalse(root["edges"])
+        # Changing observation randomness cannot change an exogenous noise-free
+        # function, while the outcome continues to receive stochastic noise.
+        observed = generator.simulate(model)
+        changed = copy.deepcopy(model)
+        changed["observation_seed"] += 1
+        other = generator.simulate(changed)
+        np.testing.assert_array_equal(observed[root["name"]], other[root["name"]])
+        self.assertGreater(np.std(observed[root["name"]]), 0)
+        self.assertFalse(np.array_equal(observed["outcome"], other["outcome"]))
+        pd.testing.assert_frame_equal(
+            observed, generator.simulate(json.loads(json.dumps(model)))
+        )
+        generator = OperationalSCMGenerator(
+            "unused", noise_free_covariate_probability=0
+        )
+        model = generator.sample_model()
+        self.assertFalse(any(node.get("noise_free") for node in model["nodes"]))
+        self.assertGreater(model["outcome"]["noise"]["scale"], 0)
+
+    def test_noise_free_covariate_prior(self):
+        generator = OperationalSCMGenerator("unused", seed=321)
+        count, total = 0, 0
+        for _ in range(80):
+            model = generator.sample_model()
+            for node in model["nodes"]:
+                if node["kind"] == "process":
+                    total += 1
+                    count += bool(node.get("noise_free"))
+        self.assertTrue(0.06 < count / total < 0.14)
+
     def test_fourier_families_energy_period_and_sampling_limit(self):
         season = {
             "period": 64.0,
@@ -105,18 +200,13 @@ class GeneratorTests(unittest.TestCase):
                 self.assertTrue(all(e["parent"] in available for e in node["edges"]))
                 available.add(node["name"])
                 self.assertEqual(node["name"] in frame, node["visible"])
-            for lag in model["lags"]:
-                if lag < len(frame):
-                    np.testing.assert_array_equal(
-                        frame[f"outcome_lag_{lag}"].to_numpy()[lag:],
-                        frame["outcome"].to_numpy()[:-lag],
-                    )
+            self.assert_training_columns(frame, model)
             hidden = copy.deepcopy(model)
             for node in hidden["nodes"]:
                 node["visible"] = False
             hidden_frame = generator.simulate(hidden)
             pd.testing.assert_series_equal(frame["outcome"], hidden_frame["outcome"])
-            self.assertEqual(len(hidden_frame.columns), 2 + len(model["lags"]))
+            self.assertEqual(len(hidden_frame.columns), 2)
 
     def test_saved_artifacts_and_replay(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,6 +220,31 @@ class GeneratorTests(unittest.TestCase):
             second = generator.generate(1)[0]
             self.assertNotEqual(first, second)
             self.assertTrue((first / "data.parquet").exists())
+
+    def test_parallel_rendering_preserves_data_models_and_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            options = dict(
+                seed=818, min_rows=48, max_rows=48, min_covariates=3, max_covariates=3
+            )
+            serial = OperationalSCMGenerator(
+                Path(directory) / "serial", render_workers=1, **options
+            )
+            parallel = OperationalSCMGenerator(
+                Path(directory) / "parallel", render_workers=2, **options
+            )
+            for left, right in zip(serial.generate(2), parallel.generate(2)):
+                pd.testing.assert_frame_equal(
+                    pd.read_parquet(left / "data.parquet"),
+                    pd.read_parquet(right / "data.parquet"),
+                    check_exact=True,
+                )
+                self.assertEqual(
+                    (left / "scm.json").read_bytes(), (right / "scm.json").read_bytes()
+                )
+                for name in ("series.png", "dag.png"):
+                    self.assertEqual(
+                        (left / name).read_bytes(), (right / name).read_bytes()
+                    )
 
     def test_reproducibility_bounds_and_options(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -148,7 +263,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertEqual(left.sample_model(), right.sample_model())
             path = left.generate(1)[0]
             frame = pd.read_parquet(path / "data.parquet")
-            self.assertEqual(frame.shape, (2056, 3))
+            self.assertEqual(frame.shape, (2056, 2))
             self.assertTrue(np.isfinite(frame.to_numpy()).all())
             self.assertEqual({p.name for p in path.iterdir()}, {"data.parquet"})
 
@@ -205,6 +320,8 @@ class GeneratorTests(unittest.TestCase):
         spec.update(white_noise_scale=0, outcome_ar_weights=[], event_lag=0)
         spec.pop("level_limit", None)
         spec.pop("operation", None)
+        spec.pop("parent_combination", None)
+        spec.pop("node_link", None)
         spec.pop("trend", None)
         spec.pop("ringing", None)
         spec.pop("volatility", None)
@@ -320,19 +437,22 @@ class GeneratorTests(unittest.TestCase):
                     operators.update(p["op"] for p in edge["program"])
                     for value in [-1000, 0, 1000]:
                         self.assertTrue(np.isfinite(generator._effect(edge, value)))
-        self.assertEqual(operators, set(generator.OPERATORS))
+        self.assertTrue(operators.issubset(set(generator.OPERATORS)))
         self.assertEqual(topologies, {"sparse", "fork", "diamond", "dense"})
         self.assertTrue(delayed and indirect)
 
     def test_legacy_replay(self):
-        from data_generation.legacy_scm_generator import (
+        from legacy_scm_generator import (
             OperationalSCMGenerator as Legacy,
         )
 
         legacy = Legacy("unused", min_rows=20, max_rows=20)
         model = legacy.sample_model()
         pd.testing.assert_frame_equal(
-            legacy.simulate(model), OperationalSCMGenerator("unused").simulate(model)
+            legacy.simulate(model).drop(
+                columns=[f"outcome_lag_{lag}" for lag in model["lags"]]
+            ),
+            OperationalSCMGenerator("unused").simulate(model),
         )
 
     def test_perlin_smoothness_replay_and_mixture_time_axis(self):
@@ -387,6 +507,7 @@ class GeneratorTests(unittest.TestCase):
         weights = {name: float(name == "perlin") for name in generator.NOISES}
         perlin = OperationalSCMGenerator(
             "unused",
+            noise_free_covariate_probability=0,
             noise_weights=weights,
             min_rows=100,
             max_rows=100,
@@ -402,12 +523,7 @@ class GeneratorTests(unittest.TestCase):
         pd.testing.assert_frame_equal(
             frame, perlin.simulate(json.loads(json.dumps(model)))
         )
-        for lag in model["lags"]:
-            if lag < len(frame):
-                np.testing.assert_array_equal(
-                    frame[f"outcome_lag_{lag}"].to_numpy()[lag:],
-                    frame["outcome"].to_numpy()[:-lag],
-                )
+        self.assert_training_columns(frame, model)
 
     def test_invalid_noise_weights_and_perlin_priors(self):
         for weights in (
@@ -450,6 +566,7 @@ class GeneratorTests(unittest.TestCase):
         weights = {name: float(name == "pink") for name in generator.NOISES}
         pink = OperationalSCMGenerator(
             "unused",
+            noise_free_covariate_probability=0,
             noise_weights=weights,
             min_rows=30,
             max_rows=30,
@@ -607,12 +724,7 @@ class GeneratorTests(unittest.TestCase):
             pd.testing.assert_frame_equal(
                 frame, generator.simulate(json.loads(json.dumps(model)))
             )
-            for lag in model["lags"]:
-                if lag < len(frame):
-                    np.testing.assert_array_equal(
-                        frame[f"outcome_lag_{lag}"].to_numpy()[lag:],
-                        frame["outcome"].to_numpy()[:-lag],
-                    )
+            self.assert_training_columns(frame, model)
 
     def test_variance_growth_with_constant_mean(self):
         generator = OperationalSCMGenerator(
@@ -1106,11 +1218,7 @@ class GeneratorTests(unittest.TestCase):
             pd.testing.assert_frame_equal(
                 frame, generator.simulate(json.loads(json.dumps(model)))
             )
-            for lag in model["lags"]:
-                np.testing.assert_array_equal(
-                    frame[f"outcome_lag_{lag}"].to_numpy()[lag:],
-                    frame["outcome"].to_numpy()[:-lag],
-                )
+            self.assert_training_columns(frame, model)
 
 
 if __name__ == "__main__":

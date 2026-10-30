@@ -8,7 +8,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from scm_generator import OperationalSCMGenerator
 
-OUTPUT_DIR = Path(__file__).resolve().parents[2] / "results" / "data_generation"
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "results" / "01_data_generation"
 SEED = 23
 PERIOD = 96
 CYCLES = 4

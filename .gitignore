@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.cache/
 build/
 dist/
 .env
@@ -20,6 +21,7 @@ data/*
 !data/.gitkeep
 checkpoints/
 runs/
+logs/
 wandb/
 *.pt
 *.pth

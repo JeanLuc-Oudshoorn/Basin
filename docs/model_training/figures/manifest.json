@@ -1,0 +1,39 @@
+{
+  "model_settings": {
+    "patch_size": 16,
+    "width": 1024,
+    "layers": 25,
+    "variate_heads": 16,
+    "max_patches": 128,
+    "quantiles": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ],
+    "objective": "next_patch",
+    "context_length": 2048,
+    "gradient_checkpointing": true
+  },
+  "illustration": "Three variables and short sequences are illustrative; dimensions follow config.",
+  "sources_sha256": {
+    "configs/config.json": "282e9bcc825a10209718378652fe0ab9e619d1b549776b5a27adafa3b5d01251",
+    "src/04_creating_embeddings/embed.py": "817ef0c25306ec2c55cce902c1bbb48d9a22b325aa36bb18ca69a6a029ae7e18",
+    "src/05_model_training/train.py": "6020182cc73a2bcc7fbc62fee07fbd833b8eb95577a4a37c5528a97eee5924eb",
+    "src/05_model_training/training_protocol.py": "47c435ab06393f3d84d29de05997ea5c9c4ffbb574d974bd6717d8195c275d48",
+    "scripts/render_architecture_diagrams.py": "0cad472e6c2501d1859451272198d941d1fa7f01dc4a46220d5272939c782d30"
+  },
+  "outputs": [
+    "01_observations_to_forecast.png",
+    "01_observations_to_forecast.svg",
+    "02_time_and_variable_mixing.png",
+    "02_time_and_variable_mixing.svg",
+    "03_training_validation_forecasting.png",
+    "03_training_validation_forecasting.svg"
+  ]
+}

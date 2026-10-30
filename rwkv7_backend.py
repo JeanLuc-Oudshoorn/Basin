@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import torch
@@ -25,6 +26,7 @@ def load_rwkv(*, ctx_len=1024, inference_only=False):
             "RWKV_FLOAT_MODE": "bf16",
             "RWKV_JIT_ON": "0",
             "RWKV_INFERENCE_ONLY": "1" if inference_only else "0",
+            "RWKV_SKIP_LM_LOSS": "1",
         }
     )
     os.environ.setdefault("RWKV_PREFER_CACHED_EXTENSIONS", "1")
@@ -43,6 +45,16 @@ def load_rwkv(*, ctx_len=1024, inference_only=False):
     previous_dir = Path.cwd()
     os.chdir(train_dir)  # The vendored CUDA source paths are relative.
     try:
-        return importlib.import_module("src.model")
+        # The vendored trainer uses Lightning 1.9.5, whose Fabric import calls
+        # pkg_resources for namespace registration. Suppress only that known
+        # deprecation notice; dependency errors and other warnings still surface.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"pkg_resources is deprecated as an API\..*",
+                category=UserWarning,
+                module=r"lightning_fabric(?:\..*)?$",
+            )
+            return importlib.import_module("src.model")
     finally:
         os.chdir(previous_dir)

@@ -1,4 +1,4 @@
-"""Convert MATLAB datasets in data/public into Parquet tables in data/public_cleaned."""
+"""Convert MATLAB datasets in data/00_public into Parquet tables in data/public_cleaned."""
 
 import re
 from collections import defaultdict
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 
-PUBLIC_DIR = Path(__file__).resolve().parents[1] / "data" / "public"
+PUBLIC_DIR = Path(__file__).resolve().parents[1] / "data" / "00_public"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "public_cleaned"
 
 

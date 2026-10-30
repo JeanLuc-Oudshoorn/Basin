@@ -326,7 +326,7 @@ class OperationalSCMGenerator:
                 data[node["name"]] = values[node["name"]][warmup:]
         frame = pd.DataFrame(data)
         if not np.isfinite(frame.to_numpy()).all():
-            raise FloatingPointError("SCM generated non-finite observations")
+            raise FloatingPointError("SCM 01_generated non-finite observations")
         return frame
 
     def _plot(self, frame, path):
