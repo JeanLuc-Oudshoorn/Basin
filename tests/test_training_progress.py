@@ -12,6 +12,29 @@ from training_progress import duration, epoch_progress, journal_progress
 
 
 class TrainingProgressTests(unittest.TestCase):
+    def test_hourly_journal_uses_saved_active_training_eta(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "training.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "event": "metrics",
+                        "epoch": 1,
+                        "global_step": 25,
+                        "epoch_update": 25,
+                        "epoch_updates": 100,
+                        "epoch_elapsed_seconds": 50.0,
+                        "epoch_eta_seconds": 150.0,
+                        "elapsed_seconds": 800.0,
+                    }
+                )
+                + "\n"
+            )
+            progress = journal_progress(path, {"updates_per_epoch": 100})
+            self.assertEqual(progress["epoch_eta_seconds"], 150.0)
+            self.assertEqual(progress["epoch_updates_per_second"], 0.5)
+            self.assertIn("00:02:30", progress["message"])
+
     def test_epoch_fraction_rate_eta_and_complete_pass(self):
         value = epoch_progress(25, 100, 200, 800, 50.0)
         self.assertEqual(value["epoch_progress_percent"], 25.0)

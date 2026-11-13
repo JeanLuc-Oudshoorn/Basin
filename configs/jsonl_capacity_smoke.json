@@ -1,0 +1,115 @@
+{
+  "seed": 7,
+  "paths": {
+    "raw": "data/01_generated/2026-10-23",
+    "processed": "data/02_processed/447m_model",
+    "embedded": "data/03_embedded/447m_model",
+    "training": "results/jsonl_smoke/capacity",
+    "forecasts": "results/jsonl_smoke/capacity_forecasts",
+    "logs": "logs"
+  },
+  "logging": {
+    "level": "INFO",
+    "preview_values": 8
+  },
+  "data": {
+    "context_length": 2048,
+    "horizon": 16,
+    "targets": [
+      "outcome"
+    ],
+    "past_covariates": "auto",
+    "known_covariates": [],
+    "time_column": "time_index",
+    "max_tables": null,
+    "train_windows_per_table": 2,
+    "stride": 16,
+    "excluded_column_patterns": [
+      "(?i)(?:^|_)lag(?:ged)?(?:_?\\d+)?(?:_|$)"
+    ],
+    "export_processed_tables": false
+  },
+  "model": {
+    "patch_size": 16,
+    "width": 960,
+    "layers": 19,
+    "variate_heads": 12,
+    "max_patches": 128,
+    "quantiles": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ],
+    "objective": "next_patch",
+    "context_length": 2048,
+    "gradient_checkpointing": true
+  },
+  "training": {
+    "steps": 3,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0,
+    "gradient_clip": 1.0,
+    "train_embeddings": true,
+    "epochs": 1,
+    "checkpoint_every": 25,
+    "cpu_threads": 4,
+    "shuffle": true,
+    "batch_size": 8,
+    "evaluation_batch_size": 8,
+    "initial_checkpoint": "results/447m_model/training/model.pt",
+    "scheduler": {
+      "name": "warmup_cosine",
+      "warmup_steps": 2,
+      "min_learning_rate": 3e-05
+    }
+  },
+  "baseline": {
+    "trend": "add",
+    "seasonal": "add",
+    "seasonal_periods": 16,
+    "damped_trend": false,
+    "initialization_method": "estimated"
+  },
+  "plot": {
+    "width": 12,
+    "height": 5,
+    "dpi": 140,
+    "max_plots": 6,
+    "context_points": 128
+  },
+  "prophet": {
+    "enabled": true,
+    "start_date": "2000-01-01",
+    "frequency": "D",
+    "yearly_seasonality": false,
+    "weekly_seasonality": false,
+    "daily_seasonality": false,
+    "seasonality_mode": "additive",
+    "changepoint_prior_scale": 0.05,
+    "seasonality_prior_scale": 10.0,
+    "seasonality_period": 16,
+    "fourier_order": 3,
+    "uncertainty_samples": 0
+  },
+  "validation": {
+    "enabled": true,
+    "metrics_path": "results/02_data_validation/learnability_2026-10-23/metrics.parquet",
+    "train_fraction": 0.8,
+    "covariate_mode": "forecast",
+    "step_duration": "1D",
+    "seasonal_periods": [],
+    "prophet_options": {
+      "daily_seasonality": false,
+      "weekly_seasonality": false,
+      "yearly_seasonality": false,
+      "seasonality_mode": "additive",
+      "uncertainty_samples": 0
+    }
+  }
+}

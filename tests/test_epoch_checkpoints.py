@@ -19,7 +19,7 @@ for stage in (
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from checkpoints import atomic_torch_save
+from checkpoints import atomic_torch_save, resume_path
 from epoch_training import (
     EarlyStopping,
     accumulated_update,
@@ -45,6 +45,7 @@ def setup(directory, *, epochs=None):
     config = copy.deepcopy(load_config())
     config["paths"]["training"] = str(directory)
     config["training"].update(
+        resume="auto",
         validate_before_training=False,
         epochs=epochs,
         steps=None,
@@ -229,9 +230,27 @@ class EpochCheckpointTests(unittest.TestCase):
         early = EarlyStopping(1, 0.0)
         self.assertEqual(early.observe(0.5, 1), (True, False))
         self.assertEqual(early.observe(0.5, 2), (False, True))
-        for value in (True, None, 3, ""):
+        for value in (True, None, 3, "", "true", "false", " TRUE "):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 training_options({"resume": value})
+
+    def test_fresh_start_ignores_existing_checkpoint_and_quoted_booleans_fail_clearly(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "latest_checkpoint.pt"
+            checkpoint.write_bytes(b"existing checkpoint")
+            config = {"paths": {"training": directory}, "training": {"resume": False}}
+            self.assertIsNone(resume_path(config))
+            config["training"]["resume"] = "auto"
+            self.assertEqual(resume_path(config), checkpoint)
+            for requested in (True, "true", "false", " FALSE "):
+                config["training"]["resume"] = requested
+                with (
+                    self.subTest(requested=requested),
+                    self.assertRaisesRegex(ValueError, "without quotes"),
+                ):
+                    resume_path(config)
 
 
 if __name__ == "__main__":

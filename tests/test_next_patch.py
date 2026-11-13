@@ -71,6 +71,8 @@ class CausalTokenTests(unittest.TestCase):
 
     def test_all_tables_short_and_chunked_exclude_final_patch(self):
         config = copy.deepcopy(load_config())
+        config["data"]["validation_policy"] = "reserved_tail"
+        config["data"]["horizon"] = 16  # Explicit legacy one-patch split fixture.
         config["data"].pop("generated_dates", None)  # Legacy flat-table fixture.
         config["validation"]["enabled"] = (
             False  # Synthetic split fixture, no screening stage.

@@ -23,9 +23,12 @@ from transform import file_digest
 
 def load_config():
     config = pipeline_config()
+    config["data"]["validation_policy"] = "reserved_tail"  # legacy split fixtures
+    config["training"]["holdout_fraction"] = 0.1
     # Protocol unit tests do not download foundation model weights.
     config["holdout"]["benchmark_models"] = ["prophet", "naive"]
     config["prophet"]["use_covariates"] = False
+    config["holdout"]["latency"] = {"warmup_requests": 0, "repeats": 1}
     return config
 
 
@@ -57,7 +60,7 @@ class HoldoutProtocolTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "data.parquet"
-            pd.DataFrame({"outcome": np.arange(48)}).to_parquet(path)
+            pd.DataFrame({"outcome": np.arange(96)}).to_parquet(path)
             config["paths"]["holdout_test"] = str(Path(directory) / "output")
             record = {
                 "source": str(path),
@@ -68,11 +71,11 @@ class HoldoutProtocolTests(unittest.TestCase):
             with (
                 patch("holdout.logger.info") as info,
                 patch(
-                    "holdout.forecast_contexts", return_value=[torch.zeros(1, 16, 3)]
+                    "holdout.forecast_contexts", return_value=[torch.zeros(1, 64, 3)]
                 ),
                 patch(
                     "holdout.baseline_forecasts",
-                    return_value={"prophet": np.zeros(16), "naive": np.zeros(16)},
+                    return_value={"prophet": np.zeros(64), "naive": np.zeros(64)},
                 ),
                 patch("holdout.write_json"),
                 patch.object(pd.DataFrame, "to_parquet"),
@@ -213,7 +216,7 @@ class HoldoutProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             path = base / "data.parquet"
-            values = list(range(2099))
+            values = list(range(2195))
             pd.DataFrame(
                 {"outcome": values, "covariate": [2 * v for v in values]}
             ).to_parquet(path)
@@ -234,27 +237,49 @@ class HoldoutProtocolTests(unittest.TestCase):
                     "naive": [history[-1]] * horizon,
                 }
 
-            def predict(actual_model, contexts, batch_size):
+            config["holdout"]["horizon_probabilities"] = [1.0]
+
+            def predict(actual_model, contexts, batch_size, prediction_patches=1):
                 for context in contexts:
-                    yield actual_model.forecast(**context, horizon=16).quantiles[0]
+                    yield actual_model.forecast(
+                        **context, horizon=prediction_patches * 16
+                    ).quantiles[0]
 
             with (
                 patch("holdout.baseline_forecasts", side_effect=baseline),
                 patch("holdout.forecast_contexts", side_effect=predict),
             ):
                 result = evaluate_holdout(model, [record], config)
-            self.assertEqual(result["pooled"]["observations"], 4 * 16 + 3)
+            self.assertEqual(result["pooled"]["observations"], 5 * 64)
             self.assertEqual(result["origin_target_count"], 5)
             self.assertEqual(model.contexts[0].shape[-1], 32)
             self.assertEqual(
-                model.contexts[1][0, 0, -1], 527
+                model.contexts[1][0, 0, -1], 543
             )  # actual, never previous prediction
             self.assertEqual(model.contexts[-1].shape[-1], 2048)
-            self.assertEqual(model.contexts[-1][0, 0, 0], 48)
-            self.assertEqual(len(seen), len(model.contexts))
-            self.assertEqual(seen[-1][-1], 2095)
+            self.assertEqual(model.contexts[-1][0, 0, 0], 80)
+            self.assertEqual(len(seen), 2 * len(model.contexts))
+            self.assertEqual(seen[-1][-1], 2127)
             self.assertTrue(model.training)
             self.assertIsNone(model.weight.grad)
+
+    def test_complete_four_token_origins_reserve_future_and_keep_distinct_starts(self):
+        self.assertEqual(
+            sampled_origins(2048, 16, prediction_patches=4), [32, 512, 1024, 1536, 1984]
+        )
+        self.assertEqual(
+            sampled_origins(2056, 16, prediction_patches=4), [32, 512, 1024, 1536, 1984]
+        )
+        self.assertEqual(sampled_origins(96, 16, prediction_patches=4), [32])
+        self.assertEqual(sampled_origins(95, 16, prediction_patches=4), [])
+        self.assertEqual(sampled_origins(48, 16, prediction_patches=4), [])
+        for length in range(96, 2080):
+            origins = sampled_origins(length, 16, prediction_patches=4)
+            self.assertEqual(origins, sorted(set(origins)))
+            self.assertEqual(origins[-1], (length - 64) // 16 * 16)
+            self.assertTrue(
+                all(origin >= 32 and origin + 64 <= length for origin in origins)
+            )
 
     def test_sampled_origins_percentiles_short_series_and_ties(self):
         self.assertEqual(sampled_origins(2048, 16), [32, 512, 1024, 1536, 2032])

@@ -31,6 +31,7 @@ from transform import file_digest, load_config
 class TokenInventoryTests(unittest.TestCase):
     def fixture(self, root, length=64):
         config = copy.deepcopy(load_config())
+        config["data"]["validation_policy"] = "reserved_tail"
         config["model"].update(
             width=128, layers=2, variate_heads=4, context_length=32, max_patches=16
         )

@@ -4,40 +4,41 @@ import sys
 from pathlib import Path
 
 # User settings (one fresh structural causal model per table).
-NUM_TABLES = 150000
+NUM_TABLES = 2_500_000
 SEED = 1  # Use None for a fresh random seed each execution.
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
-MIN_ROWS = 48
+MIN_ROWS = 96
 MAX_ROWS = 2056  # Inclusive.
 MIN_COVARIATES = (
     3  # Includes a binary event source; other nodes are compound processes.
 )
-MAX_COVARIATES = 7
+
+MAX_COVARIATES = 6
 MAX_LAG = 512  # Maximum outcome-history lag.
 MAX_LAG_COUNT = 4  # Internal SCM dependencies only; no lag columns are exported.
 SEASONAL_LAG_PROBABILITY = (
-    0.8  # If selected: 1/2/3 seasonal anchors with weights 80/16/4%.
+    0.6  # If selected: 1/2/3 seasonal anchors with weights 80/16/4%.
 )
 LONG_LAG_PROBABILITY = (
-    0.05  # One additional unstructured lag, subject to MAX_LAG_COUNT.
+    0.035  # One additional unstructured lag, subject to MAX_LAG_COUNT.
 )
 MAX_COVARIATE_LAG = (
     96  # Maximum delay for covariate edges, including events and switches.
 )
-INSTANTANEOUS_PROBABILITY = 0.05  # Otherwise there is at least one timestep of delay.
+INSTANTANEOUS_PROBABILITY = 0.03  # Otherwise there is at least one timestep of delay.
 COVARIATE_DELAY_SCALE = 0.75  # Exponential scale; positive lag = 1 + floor(draw).
 # Additional outcome lags in 2..7: zero/one/two with probabilities 15/75/10%.
 VARIANCE_DYNAMICS_PROBABILITY = 0.2  # Noise envelope can change even with a flat mean.
-HIDDEN_COVARIATE_PROBABILITY = 0.37
+VISIBLE_COVARIATE_LAMBDA = 1.3  # Poisson count, capped at available covariates.
 EDGE_PROBABILITY = 0.1  # Extra edges beyond randomly selected causal scaffolds.
 DIRECT_OUTCOME_PROBABILITY = 0.65  # At least two process parents when available.
 OUTCOME_FEEDBACK_PROBABILITY = 0.15  # Historical outcome -> covariate edge probability.
 DRIFT_PROBABILITY = (
     0.5  # Covariate drift within trending profiles, not a second outcome-trend draw.
 )
-RANDOM_WALK_PROBABILITY = 0.1
+RANDOM_WALK_PROBABILITY = 0.08
 NOISE_FREE_COVARIATE_PROBABILITY = (
-    0.3  # Per process covariate; deterministic given its parents.
+    0.35  # Per process covariate; deterministic given its parents.
 )
 TREND_FREE_FRACTION = (
     0.5  # Batch quota, screened using outcome linear-trend R² <= 0.15.
@@ -45,16 +46,36 @@ TREND_FREE_FRACTION = (
 # Remaining tables MUST have a discernible trend (trend-shape R² >= 0.4).
 # They include rising/falling, accelerating/decelerating, and permanent shock breaks.
 RESIDUAL_HISTORY_PROBABILITY = (
-    0.08  # Per selected outcome lag; residuals supplement full values.
+    0.05  # Per selected outcome lag; residuals supplement full values.
 )
-MULTIPLICATIVE_TREND_PROBABILITY = 0.2  # Among trending proposals
+MULTIPLICATIVE_TREND_PROBABILITY = 0.22  # Among trending proposals
 MULTIPLICATIVE_CONSTANT_NOISE_PROBABILITY = (
     0.05  # Among multiplicative trends; fixed direct noise scale.
 )
 MULTIPLICATIVE_CONSTANT_SEASONALITY_PROBABILITY = (
     0.05  # Independent rare draw; no seasonal growth.
 )
-SWITCHING_PROBABILITY = 0.12  # Binary shutdown/restart or ramp-reset node.
+SWITCHING_PROBABILITY = 0.14  # Binary shutdown/restart or ramp-reset node.
+PROCESS_EPISODE_PROBABILITY = (
+    0.025  # One sustained run with idle start/end and gradual startup/release.
+)
+PROCESS_MULTILEVEL_PROBABILITY = 0.55  # Among episodes: extra operating setpoints.
+PROCESS_PRIMING_PROBABILITY = 0.30  # Small deterministic jitters before startup.
+FORMULA_COVARIATE_PROBABILITY = (
+    0.08  # Eligible extra slots: clock formulas plus optional noise.
+)
+DISCRETE_COVARIATE_PROBABILITY = (
+    0.25  # Additional source slots after the first continuous process.
+)
+SENSOR_BOUNDS_PROBABILITY = (
+    0.02  # Rare hard bounds, per continuous covariate and outcome; measured units.
+)
+DISCRETE_WEIGHTS = {
+    "bernoulli": 0.35,
+    "binary_markov": 0.35,
+    "categorical_markov": 0.30,
+}
+SWITCH_PROFILE_WEIGHTS = {"alternating": 0.4, "long_dwell": 0.5, "single_episode": 0.1}
 MAX_EFFECT_COMPONENTS = 6  # Expression DAG size per edge; increase for more complexity.
 COMPOSITE_EFFECT_PROBABILITY = 0.25  # Otherwise one operator per edge.
 ANGLE_COVARIATE_PROBABILITY = (
@@ -132,7 +153,7 @@ PRIOR_RANGES = {
         1.2,
     ),  # Exponential falloff in recent-lag selection probability.
 }
-BURN_IN = 256  # Unrecorded history for warm-up and valid initial lag columns.
+BURN_IN = 128  # Unrecorded history for warm-up and valid initial lag columns.
 SAVE_SCM = False
 SAVE_PLOT = False
 SAVE_DAG = False  # Causal structure with hidden nodes and explicit history proxies.
@@ -140,6 +161,13 @@ PLOT_COVARIATES = True  # False plots only the outcome.
 RENDER_WORKERS = (
     None  # Automatically use up to four plot processes; 1 renders serially.
 )
+GENERATION_WORKERS = (
+    None  # Auto: up to eight processes; 1 keeps the old serial RNG stream.
+)
+GENERATION_BATCH_SIZE = 16  # Tables per task; bounded queues avoid large memory spikes.
+PROGRESS_INTERVAL = 1.0  # Seconds between elapsed/rate/ETA console updates.
+COARSE_COPY_PROBABILITY = 0.03  # Extra thinned copy, only for originals with >512 rows.
+SIGN_INVERSION_PROBABILITY = 0.05  # Extra copy negating all values except time_index.
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -156,7 +184,7 @@ def main():
         max_covariates=MAX_COVARIATES,
         max_lag=MAX_LAG,
         max_lag_count=MAX_LAG_COUNT,
-        hidden_probability=HIDDEN_COVARIATE_PROBABILITY,
+        visible_covariate_lambda=VISIBLE_COVARIATE_LAMBDA,
         edge_probability=EDGE_PROBABILITY,
         burn_in=BURN_IN,
         direct_probability=DIRECT_OUTCOME_PROBABILITY,
@@ -176,6 +204,14 @@ def main():
         covariate_delay_scale=COVARIATE_DELAY_SCALE,
         max_covariate_lag=MAX_COVARIATE_LAG,
         switching_probability=SWITCHING_PROBABILITY,
+        process_episode_probability=PROCESS_EPISODE_PROBABILITY,
+        process_multilevel_probability=PROCESS_MULTILEVEL_PROBABILITY,
+        process_priming_probability=PROCESS_PRIMING_PROBABILITY,
+        formula_covariate_probability=FORMULA_COVARIATE_PROBABILITY,
+        discrete_covariate_probability=DISCRETE_COVARIATE_PROBABILITY,
+        sensor_bounds_probability=SENSOR_BOUNDS_PROBABILITY,
+        discrete_weights=DISCRETE_WEIGHTS,
+        switch_profile_weights=SWITCH_PROFILE_WEIGHTS,
         max_effect_components=MAX_EFFECT_COMPONENTS,
         composite_effect_probability=COMPOSITE_EFFECT_PROBABILITY,
         angle_covariate_probability=ANGLE_COVARIATE_PROBABILITY,
@@ -196,6 +232,11 @@ def main():
         plot_covariates=PLOT_COVARIATES,
         save_dag=SAVE_DAG,
         render_workers=RENDER_WORKERS,
+        generation_workers=GENERATION_WORKERS,
+        generation_batch_size=GENERATION_BATCH_SIZE,
+        progress_interval=PROGRESS_INTERVAL,
+        coarse_copy_probability=COARSE_COPY_PROBABILITY,
+        sign_inversion_probability=SIGN_INVERSION_PROBABILITY,
     )
     paths = generator.generate(NUM_TABLES)
     print(f"Saved {len(paths)} tables under {paths[0].parent}")

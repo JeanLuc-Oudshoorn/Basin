@@ -1,5 +1,6 @@
 """Gradient accumulation, full end-of-epoch validation and checkpoint selection."""
 
+import gc
 import math
 from time import perf_counter
 
@@ -17,7 +18,7 @@ from checkpoints import (
 )
 from learning_rate import make_scheduler, scheduler_snapshot
 from loguru import logger
-from performance import prepare_update, prepared_updates
+from performance import prepare_update, prepared_updates, split_prepared_batches
 from training_log import emit_training_event
 from training_progress import duration, epoch_progress
 from training_protocol import validate
@@ -25,13 +26,49 @@ from transform import location, write_json
 
 
 def training_options(training):
+    for key in (
+        "checkpoint_interval_seconds",
+        "validation_interval_seconds",
+        "max_run_hours",
+    ):
+        value = training.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"training.{key} must be positive and finite or null")
+    for key, default in (("shape_run_batches", 1), ("training_graph_min_reuse", 8)):
+        value = training.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"training.{key} must be a positive integer")
+    graph_tokens = training.get("training_graph_max_tokens", 32)
+    if graph_tokens is not None and (
+        isinstance(graph_tokens, bool)
+        or not isinstance(graph_tokens, int)
+        or graph_tokens < 1
+    ):
+        raise ValueError("training.training_graph_max_tokens must be positive or null")
+    if training.get("shape_run_batches", 1) > 1 and not training.get(
+        "bucket_by_length", True
+    ):
+        raise ValueError("training.shape_run_batches requires bucket_by_length")
+    diagnostic = training.get("diagnostic_seconds")
+    if diagnostic is not None and (
+        isinstance(diagnostic, bool)
+        or not isinstance(diagnostic, (int, float))
+        or not math.isfinite(diagnostic)
+        or diagnostic <= 0
+    ):
+        raise ValueError("training.diagnostic_seconds must be positive and finite")
     for key, default in (("microbatch_size", 4), ("microbatch_token_limit", 1536)):
         value = training.get(key, default)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value < 1
         ):
             raise ValueError(f"training.{key} must be a positive integer or null")
-    limit = training.get("cuda_memory_limit_gib", 8.0)
+    limit = training.get("cuda_memory_limit_gib", 11.0)
     if limit is not None and (
         isinstance(limit, bool)
         or not isinstance(limit, (int, float))
@@ -41,7 +78,22 @@ def training_options(training):
         raise ValueError(
             "training.cuda_memory_limit_gib must be positive and finite, or null"
         )
+    headroom = training.get("cuda_memory_headroom_gib", 0.5)
+    if (
+        isinstance(headroom, bool)
+        or not isinstance(headroom, (int, float))
+        or not math.isfinite(headroom)
+        or headroom < 0
+    ):
+        raise ValueError(
+            "training.cuda_memory_headroom_gib must be finite and nonnegative"
+        )
     resume = training.get("resume", "auto")
+    if isinstance(resume, str) and resume.strip().lower() in ("true", "false"):
+        raise ValueError(
+            "training.resume: use false (without quotes) to start fresh, "
+            "'auto' to resume the latest checkpoint, or an explicit checkpoint path"
+        )
     if resume is not False and (not isinstance(resume, str) or not resume.strip()):
         raise ValueError("training.resume must be 'auto', a checkpoint path, or false")
     for key in ("validation_batch_size",):
@@ -55,14 +107,34 @@ def training_options(training):
         )
     for key in (
         "bucket_by_length",
+        "storage_locality",
         "prefetch",
         "fused_optimizer",
         "compile_variate",
         "compile_variate_inference",
         "validate_before_training",
+        "training_cuda_graphs",
+        "auto_microbatch",
     ):
-        if not isinstance(training.get(key, True), bool):
+        if not isinstance(
+            training.get(key, False if key == "training_cuda_graphs" else True), bool
+        ):
             raise ValueError(f"training.{key} must be boolean")
+    shapes = training.get("training_graph_cache_shapes", 2)
+    memory = training.get("training_graph_memory_gib", 0.75)
+    if isinstance(shapes, bool) or not isinstance(shapes, int) or shapes < 1:
+        raise ValueError(
+            "training.training_graph_cache_shapes must be a positive integer"
+        )
+    if (
+        isinstance(memory, bool)
+        or not isinstance(memory, (int, float))
+        or not math.isfinite(memory)
+        or memory <= 0
+    ):
+        raise ValueError(
+            "training.training_graph_memory_gib must be positive and finite"
+        )
     cache = training.get("compile_cache_dir", ".cache/torchinductor")
     if not isinstance(cache, str) or not cache.strip():
         raise ValueError("training.compile_cache_dir must be a nonempty path")
@@ -80,9 +152,9 @@ def training_options(training):
                 f"training.{key} must be a positive integer or null for limits"
             )
     early = dict(training.get("early_stopping", {}))
-    if set(early) - {"patience_epochs", "min_delta", "monitor"}:
+    if set(early) - {"patience_epochs", "patience_checks", "min_delta", "monitor"}:
         raise ValueError("Unknown early_stopping fields")
-    patience = early.get("patience_epochs", 1)
+    patience = early.get("patience_checks", early.get("patience_epochs", 1))
     delta = early.get("min_delta", 0.0)
     monitor = early.get("monitor", "loss")
     if (
@@ -124,6 +196,97 @@ class EarlyStopping:
 def accumulated_update(
     model, microbatches, optimizer, gradient_clip, prepared_batches=None
 ):
+    """Retry activation OOMs before stepping; keep the same logical optimizer batch."""
+    if prepared_batches is None:
+        prepared_batches = prepare_update(
+            microbatches, next_patch=model.config.objective == "next_patch"
+        )
+    device = next(model.parameters()).device
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    recover = getattr(model, "auto_microbatch", True)
+    # Active graph captures need a separate lifetime protocol. Training graphs
+    # are off by default; never try to recover an invalidated capture here.
+    recover = recover and getattr(model, "training_graphs", None) is None
+    recover = recover and model.config.objective == "next_patch"
+    limits = getattr(model, "_microbatch_limits", {})
+    key = (
+        tuple(
+            sorted(
+                {(len(p["roles"]), p["padded_tokens"]) for p, _, _ in prepared_batches}
+            )
+        )
+        if recover
+        else ()
+    )
+    if recover and key in limits:
+        prepared_batches = split_prepared_batches(prepared_batches, limits[key])
+    initial_rng = rng_state() if recover else None
+    retries = 0
+    while True:
+        try:
+            result = _accumulated_gradients(
+                model, microbatches, optimizer, gradient_clip, prepared_batches
+            )
+            break
+        except torch.OutOfMemoryError:
+            # Let the failed forward/backward frame unwind before collecting its
+            # activations. A partially accumulated gradient must never be stepped.
+            optimizer.zero_grad(set_to_none=True)
+            largest = max(labels.shape[0] for _, labels, _ in prepared_batches)
+            checkpoint_all = (
+                largest == 1
+                and getattr(model.config, "gradient_checkpointing", False)
+                and getattr(model, "checkpoint_token_threshold", 0) > 0
+            )
+            if not recover or (largest == 1 and not checkpoint_all):
+                logger.error(
+                    "Training OOM cannot be reduced further: microbatch={} shapes={} "
+                    "checkpoint_threshold={}; optimizer update was not applied",
+                    largest,
+                    key,
+                    getattr(model, "checkpoint_token_threshold", None),
+                )
+                raise
+        # Outside the except block: its traceback no longer retains GPU tensors.
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        restore_rng(initial_rng)
+        retries += 1
+        if checkpoint_all:
+            model.checkpoint_token_threshold = 0
+            logger.warning("Activation OOM: retrying with every layer checkpointed")
+        else:
+            maximum = max(1, largest // 2)
+            limits[key] = maximum
+            model._microbatch_limits = limits
+            prepared_batches = split_prepared_batches(prepared_batches, maximum)
+            logger.warning(
+                "Activation OOM: retry={} shapes={} microbatch {} -> {}; "
+                "discarded partial gradients, restored RNG, unchanged optimizer batch",
+                retries,
+                key,
+                largest,
+                maximum,
+            )
+    # An optimizer OOM can partially change parameters/state. It MUST propagate,
+    # rather than replaying the update as if no weights had changed.
+    with torch.profiler.record_function("training.optimizer"):
+        optimizer.step()
+    result["oom_retries"] = retries
+    if device.type == "cuda":
+        result["cuda_allocated_gib"] = torch.cuda.memory_allocated(device) / 2**30
+        result["cuda_reserved_gib"] = torch.cuda.memory_reserved(device) / 2**30
+        result["cuda_peak_allocated_gib"] = (
+            torch.cuda.max_memory_allocated(device) / 2**30
+        )
+    return result
+
+
+def _accumulated_gradients(
+    model, microbatches, optimizer, gradient_clip, prepared_batches
+):
     """Point-weighted accumulation with one metrics transfer per optimizer update."""
     device = next(model.parameters()).device
     if prepared_batches is None:
@@ -131,10 +294,27 @@ def accumulated_update(
             microbatches, next_patch=model.config.objective == "next_patch"
         )
     total_points = sum(p for _, _, p in prepared_batches)
+    weights = getattr(model.config, "horizon_loss_weights", None)
+    if weights is not None:
+        from multi_horizon import weighted_label_mass
+
+        masses = [
+            float(weighted_label_mass(labels, weights))
+            for _, labels, _ in prepared_batches
+        ]
+    else:
+        masses = [points for _, _, points in prepared_batches]
+    total_mass = sum(masses)
     optimizer.zero_grad(set_to_none=True)
     weighted_loss = torch.zeros((), device=device)
     losses, shapes = [], []
+    graphs = getattr(model, "training_graphs", None)
+    if graphs is not None:
+        graphs.begin_update()
     for microstep, (prepared, labels, points) in enumerate(prepared_batches, 1):
+        graphs = getattr(model, "training_graphs", None)
+        if graphs is not None:
+            graphs.prepare(prepared)
         with torch.profiler.record_function("training.transfer"):
             prepared = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
@@ -151,9 +331,10 @@ def accumulated_update(
         if output.loss is None:
             raise FloatingPointError("Missing training loss")
         losses.append(output.loss.detach().float())
-        weighted_loss += losses[-1] * (points / total_points)
+        fraction = masses[microstep - 1] / total_mass
+        weighted_loss += losses[-1] * fraction
         with torch.profiler.record_function("training.backward"):
-            (output.loss * (points / total_points)).backward()
+            (output.loss * fraction).backward()
         shapes.append(list(x.shape))
         logger.debug(
             "Accumulation microbatch {}/{} embedding_shape[B,V,T,D]={} max_real_patches={} kernel_patches={} observed_labels={}",
@@ -183,12 +364,11 @@ def accumulated_update(
         )
         if not all(math.isfinite(value) for value in metrics):
             raise FloatingPointError("Nonfinite training loss or gradient norm")
-    with torch.profiler.record_function("training.optimizer"):
-        optimizer.step()
     logger.debug("Accumulation microbatch losses={}", metrics[3:])
     return {
         "loss": metrics[0],
         "target_points": total_points,
+        "target_loss_weight": total_mass,
         "microbatches": len(prepared_batches),
         "windows": sum(map(len, microbatches)),
         "gradient_norm": metrics[1],
@@ -196,6 +376,7 @@ def accumulated_update(
         "embedding_shapes": shapes,
         "embedding_shape": shapes[-1],
         "device": str(device),
+        "training_graphs": graphs.summary() if graphs is not None else None,
     }
 
 
@@ -203,6 +384,21 @@ def fit_epochs(
     model, records, validation_records, config, optimizer, validation_fn=None
 ):
     """One complete shuffled training pass precedes each full validation sweep."""
+    if (
+        config["data"].get("validation_policy") == "sampled_training_origins"
+        and validation_records
+        and "validation_origin" in validation_records[0]
+    ):
+        from timed_training import fit_timed
+
+        return fit_timed(
+            model,
+            records,
+            validation_records,
+            config,
+            optimizer,
+            validation_fn=validation_fn,
+        )
     validation_fn = validation_fn or (
         lambda model, records: validate(
             model,
@@ -218,7 +414,10 @@ def fit_epochs(
     directory.mkdir(parents=True, exist_ok=True)
     accumulation = options["gradient_accumulation_steps"]
     initial_batches = make_batches(
-        records, options["batch_size"], bucket_by_length=t.get("bucket_by_length", True)
+        records,
+        options["batch_size"],
+        bucket_by_length=t.get("bucket_by_length", True),
+        storage_locality=t.get("storage_locality", False),
     )
     updates_per_epoch = math.ceil(len(initial_batches) / accumulation)
     del initial_batches
@@ -234,7 +433,9 @@ def fit_epochs(
         **options,
         "planned_updates": total_budget,
         "updates_per_epoch": updates_per_epoch,
-        "validation_scope": "all_training_tables_last_token",
+        "validation_scope": "all_training_tables_reserved_tail",
+        "validation_horizon": config["data"]["horizon"],
+        "horizon_loss_weights": getattr(model.config, "horizon_loss_weights", None),
         "validation_frequency": "epoch_end",
         "validation_tables": len(validation_records),
         "performance": {
@@ -248,6 +449,12 @@ def fit_epochs(
                 "microbatch_size",
                 "microbatch_token_limit",
                 "cuda_memory_limit_gib",
+                "training_cuda_graphs",
+                "training_graph_cache_shapes",
+                "training_graph_memory_gib",
+                "shape_run_batches",
+                "training_graph_min_reuse",
+                "training_graph_max_tokens",
             )
         },
         "scheduler": schedule_plan,
@@ -364,6 +571,7 @@ def fit_epochs(
             "Resumed checkpoint has no epoch-0 baseline; cannot reconstruct the original untrained score"
         )
     model.train()
+    diagnostic_started = perf_counter()
     while reason is None:
         epoch += 1
         started_epoch = perf_counter()
@@ -375,6 +583,8 @@ def fit_epochs(
             options["batch_size"],
             seed,
             bucket_by_length=t.get("bucket_by_length", True),
+            shape_run_batches=t.get("shape_run_batches", 1),
+            storage_locality=t.get("storage_locality", False),
         )
         logger.info(
             "EPOCH {} start: {} windows, {} batch groups, {} updates, accumulate={}",
@@ -409,8 +619,9 @@ def fit_epochs(
                 points_processed += update["target_points"]
                 windows_processed += update["windows"]
                 epoch_windows += update["windows"]
-                epoch_points += update["target_points"]
-                epoch_loss_sum += update["loss"] * update["target_points"]
+                mass = update.get("target_loss_weight", update["target_points"])
+                epoch_points += mass
+                epoch_loss_sum += update["loss"] * mass
                 progress = epoch_progress(
                     offset // accumulation + 1,
                     updates_per_epoch,
@@ -463,6 +674,7 @@ def fit_epochs(
                     microbatches=update["microbatches"],
                     windows=update["windows"],
                     target_points=update["target_points"],
+                    target_loss_weight=mass,
                     train_loss_scope="accumulated_update",
                     training_target_points_processed=points_processed,
                     embedding_shape=update["embedding_shape"],
@@ -479,13 +691,24 @@ def fit_epochs(
                     completed_epoch = offset + accumulation >= len(batches)
                     reason = "step_limit"
                     break
+                if (
+                    t.get("diagnostic_seconds") is not None
+                    and perf_counter() - diagnostic_started >= t["diagnostic_seconds"]
+                ):
+                    completed_epoch = offset + accumulation >= len(batches)
+                    reason = "diagnostic_time_limit"
+                    logger.info(
+                        "Diagnostic training time limit reached after {:.1f}s",
+                        perf_counter() - diagnostic_started,
+                    )
+                    break
         finally:
             updates.close()
         optimizer.zero_grad(set_to_none=True)
         # Only an explicit debug step cap can end a partial epoch. The default
         # unlimited run validates exclusively after complete passes.
         logger.info(
-            "EPOCH {} validation: all {:,} validation tables, final held-out patch per table",
+            "EPOCH {} validation: all {:,} validation tables, full reserved tail per table",
             epoch,
             len(validation_records),
         )
@@ -522,6 +745,10 @@ def fit_epochs(
                 baseline_loss - validation["loss"]
             )
         validation_history.append(row)
+        graphs = getattr(model, "training_graphs", None)
+        if graphs is not None:
+            row["training_graphs"] = graphs.summary()
+            logger.info("Training CUDA graph cache: {}", row["training_graphs"])
         history[-1].update(
             validation_loss=validation["loss"], validation_rmse=validation["rmse"]
         )
@@ -540,6 +767,7 @@ def fit_epochs(
             best_epoch=early.best_epoch,
             epochs_without_improvement=early.bad_epochs,
             learning_rate=optimizer.param_groups[0]["lr"],
+            training_graphs=row.get("training_graphs"),
         )
         logger.info(
             "EPOCH {} end: train={} validation={} best_epoch={} no_improvement={}/{} next_lr={}",

@@ -2,6 +2,7 @@
 
 import copy
 import sys
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -73,6 +74,43 @@ def model_and_records(split="evaluation"):
 
 
 class TrainingPerformanceTests(unittest.TestCase):
+    def test_prefetch_prepares_on_worker_but_pins_only_on_consumer(self):
+        import performance
+
+        _, records = model_and_records("train")
+        batches = make_batches(records, 2)
+        consumer = threading.get_ident()
+        pack_threads, pin_threads = [], []
+        pack = performance.pack_records
+
+        def tracked_pack(records):
+            pack_threads.append(threading.get_ident())
+            return pack(records)
+
+        def checked_pin(tensor):
+            pin_threads.append(threading.get_ident())
+            self.assertEqual(threading.get_ident(), consumer)
+            return tensor  # CPU test verifies scheduling without requiring CUDA.
+
+        with (
+            patch("performance.pack_records", side_effect=tracked_pack),
+            patch.object(torch.Tensor, "pin_memory", checked_pin),
+        ):
+            actual = list(prepared_updates(batches, 2, prefetch=True, pin_memory=True))
+        self.assertTrue(pack_threads)
+        self.assertTrue(pin_threads)
+        self.assertTrue(all(thread != consumer for thread in pack_threads))
+        expected = list(prepared_updates(batches, 2, prefetch=False))
+        for a, b in zip(actual, expected):
+            self.assertEqual(a[0], b[0])
+            for (chunk, labels, points), (ref, ref_labels, ref_points) in zip(
+                a[2], b[2]
+            ):
+                self.assertIs(labels, chunk["labels"])
+                self.assertEqual(points, ref_points)
+                torch.testing.assert_close(chunk["features"], ref["features"])
+                torch.testing.assert_close(labels, ref_labels, equal_nan=True)
+
     def test_batched_forecasts_match_separate_contexts_including_missing_and_partial(
         self,
     ):
@@ -193,6 +231,50 @@ class TrainingPerformanceTests(unittest.TestCase):
             [[r["id"] for r in b] for b in batches],
             [[r["id"] for r in b] for b in again],
         )
+
+    def test_shape_runs_preserve_batches_coverage_and_time_order(self):
+        records = []
+        for variables in (1, 3, 6):
+            for tokens in (16, 32, 128):
+                for index in range(33):
+                    records.append(
+                        dict(
+                            id=(variables, tokens, index),
+                            prepared=dict(
+                                roles=torch.tensor([0] + [1] * (variables - 1)),
+                                tokens=tokens,
+                                chronological=torch.arange(tokens),
+                            ),
+                        )
+                    )
+
+        def schedule(seed, run):
+            return make_batches(
+                records, 4, seed, bucket_by_length=True, shape_run_batches=run
+            )
+
+        original, grouped = schedule(19, 1), schedule(19, 4)
+
+        def ids(batches):
+            return [[r["id"] for r in b] for b in batches]
+
+        self.assertEqual(sorted(ids(original)), sorted(ids(grouped)))
+        self.assertEqual(ids(grouped), ids(schedule(19, 4)))
+        self.assertNotEqual(ids(grouped), ids(schedule(20, 4)))
+        self.assertEqual(len({id(r) for b in grouped for r in b}), len(records))
+
+        def switches(batches):
+            return sum(
+                a[0]["id"][:2] != b[0]["id"][:2] for a, b in zip(batches, batches[1:])
+            )
+
+        self.assertLess(switches(grouped), switches(original))
+        for batch in grouped:
+            for record in batch:
+                torch.testing.assert_close(
+                    record["prepared"]["chronological"],
+                    torch.arange(record["prepared"]["tokens"]),
+                )
 
     def test_prefetch_matches_sync_and_does_not_cache_features(self):
         _, records = model_and_records("train")

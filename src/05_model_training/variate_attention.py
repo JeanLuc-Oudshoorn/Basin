@@ -62,4 +62,7 @@ def configure_variate_execution(model, training, root):
         mix.compiled_forward = forward
         mix.compile_training = enabled
         mix.compile_inference = inference
+    from training_graphs import configure_training_graphs
+
+    configure_training_graphs(model, training)
     return forward is not None

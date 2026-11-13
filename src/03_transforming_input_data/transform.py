@@ -3,12 +3,14 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from threading import Event, Thread
 from time import perf_counter
 
 import numpy as np
@@ -16,6 +18,11 @@ import pandas as pd
 import torch
 from loguru import logger
 from torch.utils.serialization import config as serialization_config
+from transform_progress import (
+    ShardedTransformCheckpoint,
+    TransformProgress,
+    atomic_write,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,8 +90,88 @@ def source_selection(config):
     }
 
 
-def discover_source_tables(config):
-    """Shared source selection for Prophet screening and both transform modes."""
+def discover_source_tables(config, *, manifest=None):
+    """Use a run-local native file index when crossing the Windows/WSL boundary."""
+    manifest = manifest or os.environ.get("BASIN_SOURCE_MANIFEST")
+    if not manifest:
+        return _scan_source_tables(config)
+    started = perf_counter()
+    logger.info("Loading source file index: {}", manifest)
+    payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    if payload.get("schema") != 1 or payload.get(
+        "source_selection"
+    ) != source_selection(config):
+        raise ValueError(
+            "Source file index does not match the configured root and dataset dates"
+        )
+    root = location(config, "raw")
+    dates = generated_dates(config)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Generated-data root not found: {root}")
+    for day in dates or ():
+        if not (root / day).is_dir():
+            raise FileNotFoundError(
+                f"Selected generated date folder not found: {root / day}"
+            )
+    keys = payload.get("paths")
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("Source file index must contain a nonempty list of paths")
+    paths, seen = [], set()
+    for key in keys:
+        if not isinstance(key, str) or "\\" in key or ":" in key:
+            raise ValueError("Source index paths must be portable relative paths")
+        relative = PurePosixPath(key)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.name != "data.parquet"
+        ):
+            raise ValueError(
+                "Source index paths must stay inside the selected data root"
+            )
+        if dates is not None and relative.parts[0] not in dates:
+            raise ValueError("Source index contains an unselected dataset date")
+        canonical = relative.as_posix()
+        if canonical in seen:
+            raise ValueError("Duplicate source paths in file index")
+        seen.add(canonical)
+        # Deliberately avoid resolve/is_file here: each would incur remote metadata
+        # requests on /mnt/e. The validator opens and hashes files as it uses them.
+        paths.append(root.joinpath(*relative.parts))
+    logger.info(
+        "Loaded {} source tables from file index in {:.2f}s",
+        len(paths),
+        perf_counter() - started,
+    )
+    return paths
+
+
+def write_source_manifest(config):
+    """Snapshot file membership natively on Windows before launching a GPU stage."""
+    paths = _scan_source_tables(config)
+    directory = ROOT / ".cache/source_indexes"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_")
+        + uuid.uuid4().hex
+        + ".json"
+    )
+    root = location(config, "raw")
+    write_json(
+        path,
+        {
+            "schema": 1,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source_selection": source_selection(config),
+            "paths": [p.relative_to(root).as_posix() for p in paths],
+        },
+    )
+    logger.info("Prepared native source file index: {} tables, {}", len(paths), path)
+    return path
+
+
+def _scan_source_tables(config):
+    """Shared recursive selection, with a heartbeat even before the first match."""
     root = location(config, "raw")
     if not root.is_dir():
         raise FileNotFoundError(f"Generated-data root not found: {root}")
@@ -96,7 +183,28 @@ def discover_source_tables(config):
             raise FileNotFoundError(
                 f"Selected generated date folder not found: {directory}"
             )
-        tables = sorted(directory.rglob("data.parquet"))
+        started = perf_counter()
+        tables = []
+        stop = Event()
+
+        def report_progress():
+            while not stop.wait(5):
+                logger.info(
+                    "Discovering source tables: {} | found {} | elapsed {:.1f}s",
+                    directory,
+                    len(tables),
+                    perf_counter() - started,
+                )
+
+        logger.info("Discovering source tables in {} (filesystem scan)", directory)
+        heartbeat = Thread(target=report_progress, daemon=True)
+        heartbeat.start()
+        try:
+            tables.extend(directory.rglob("data.parquet"))
+            tables.sort()
+        finally:
+            stop.set()
+            heartbeat.join()
         if not tables:
             raise ValueError(f"No data.parquet tables in selected folder: {directory}")
         logger.info("Selected generated folder={} tables={}", directory, len(tables))
@@ -291,6 +399,10 @@ def read_artifact(path, config):
         raise ValueError(
             f"Stale artifact {path}: seed/data/model configuration changed; rerun upstream stages"
         )
+    if artifact.get("format") == "sharded_windows_v1":
+        from sharded_records import ShardedRecords
+
+        return {**artifact, "records": ShardedRecords(artifact, path.parent)}
     if artifact.get("format") == "lazy_patch_index_v1":
         sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
         from embed import open_patch_index
@@ -301,7 +413,44 @@ def read_artifact(path, config):
 
 def write_json(path, value, *, level="INFO"):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, allow_nan=False), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    logger.log(level, "Writing JSON={}", path)
+    heartbeat = None
+    stop = Event()
+    keys = value.get("source_keys") if isinstance(value, dict) else None
+    if isinstance(keys, dict) and len(keys) >= 100_000:
+        started = perf_counter()
+
+        def report_progress():
+            while not stop.wait(30):
+                try:
+                    written = temporary.stat().st_size
+                except OSError:
+                    written = 0
+                logger.log(
+                    level,
+                    "Writing JSON={} bytes_written={:,} elapsed={:.1f}s",
+                    path,
+                    written,
+                    perf_counter() - started,
+                )
+
+        heartbeat = Thread(target=report_progress, daemon=True)
+        heartbeat.start()
+    try:
+        with temporary.open(
+            "w", encoding="utf-8", newline="\n", buffering=1024 * 1024
+        ) as stream:
+            json.dump(value, stream, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        stop.set()
+        if heartbeat is not None:
+            heartbeat.join()
+        temporary.unlink(missing_ok=True)
     logger.log(level, "Saved JSON={}", path)
 
 
@@ -386,13 +535,27 @@ def validation_report_path(config):
 def validated_sources(config, paths):
     """Admit current successful multivariate forecasts no worse than persistence."""
     policy = config.get("validation", {})
+    if policy.get("enabled", False) and policy.get("engine", "chronos_bolt") in (
+        "chronos2",
+        "chronos_bolt",
+    ):
+        return foundation_validated_sources(config, paths)
     if not policy.get("enabled", False):
-        logger.warning("Prophet learnability gate disabled for this configuration")
-        return paths, {
+        logger.info(
+            "Data screening skipped: validation.enabled=false; admitting all {} candidate tables",
+            len(paths),
+        )
+        audit = {
             "enabled": False,
+            "screening_skipped": True,
+            "reason": "validation.enabled=false",
+            "source_count": len(paths),
+            "admitted_count": len(paths),
             "excluded": [],
             "source_selection": source_selection(config),
         }
+        write_json(location(config, "processed") / "validation_selection.json", audit)
+        return paths, audit
     if (
         config["data"]["targets"] != ["outcome"]
         or config["data"]["time_column"] != "time_index"
@@ -492,20 +655,158 @@ def validated_sources(config, paths):
     return admitted, audit
 
 
+def foundation_validated_sources(config, paths):
+    """Use current foundation-model decisions; automatically screen stale cohorts."""
+    sys.path.insert(0, str(ROOT / "src/02_data_validation"))
+    from bolt_validator import bolt_admitted
+
+    policy = config["validation"]
+    engine = policy.get("engine", "chronos_bolt")
+    label = "Chronos-2 Small" if engine == "chronos2" else "Chronos-Bolt"
+    admission = bolt_admitted
+    if engine == "chronos2":
+        from chronos_validator import chronos_admitted
+
+        admission = chronos_admitted
+    tolerance = policy.get(
+        "max_relative_degradation", 0.15 if engine == "chronos2" else 0.1
+    )
+    expected = screening_signature(config)
+    digests = {}
+
+    def source_digest(path):
+        if path not in digests:
+            digests[path] = file_digest(path)
+        return digests[path]
+
+    try:
+        report = validation_report_path(config)
+        scores = pd.read_parquet(report)
+    except FileNotFoundError:
+        report, scores = None, None
+    required = {
+        "source_key",
+        "source_sha256",
+        "screening_signature",
+        "status",
+        "reserved_tail_rows",
+        "mase_scale",
+        "baseline_mase",
+        f"{engine}_mase",
+        "baseline_mae",
+        f"{engine}_mae",
+    }
+    current = (
+        scores is not None
+        and not (required - set(scores))
+        and scores.screening_signature.eq(expected).all()
+    )
+    keys = [path.relative_to(location(config, "raw")).as_posix() for path in paths]
+    if current:
+        if scores.source_key.duplicated().any():
+            raise ValueError("Duplicate source keys in validation report")
+        indexed = scores.set_index("source_key")
+        current = all(
+            key in indexed.index
+            and indexed.loc[key, "source_sha256"] == source_digest(path)
+            for path, key in zip(paths, keys)
+        )
+    if not current:
+        if not policy.get("auto_run", True):
+            raise ValueError(
+                f"Missing or stale {label} screening report; run src/02_data_validation/validate_generated_data.py"
+            )
+        from validate_generated_data import validate
+
+        logger.info(
+            "{} screening missing/stale; screening selected cohort before transformation",
+            label,
+        )
+        scores = validate(config, retry_errors=report is not None)
+        digests.clear()
+        report = Path(scores.attrs["report_path"])
+    if required - set(scores):
+        raise ValueError(f"{label} screening report lacks required columns")
+    if scores.source_key.duplicated().any():
+        raise ValueError("Duplicate source keys in validation report")
+    decisions = admission(scores, tolerance)
+    indexed = scores.assign(accepted=decisions).set_index("source_key")
+    admitted, excluded = [], []
+    for path, key in zip(paths, keys):
+        row = indexed.loc[key] if key in indexed.index else None
+        valid = (
+            row is not None
+            and row.screening_signature == expected
+            and row.source_sha256 == source_digest(path)
+            and row.reserved_tail_rows == config["data"]["horizon"]
+        )
+        if valid and bool(row.accepted):
+            admitted.append(path)
+        else:
+            excluded.append(
+                {
+                    "source": key,
+                    "reason": f"{label} error more than tolerance worse than naive"
+                    if valid and row.status == "ok"
+                    else "missing, stale or failed screening",
+                }
+            )
+    audit = {
+        "enabled": True,
+        "engine": engine,
+        "admission_metric": "mae" if engine == "chronos2" else "mase",
+        "max_relative_degradation": tolerance,
+        "report": str(report),
+        "report_sha256": file_digest(report),
+        "screening_signature": expected,
+        "source_selection": source_selection(config),
+        "source_count": len(paths),
+        "admitted_count": len(admitted),
+        "undefined_mase_retained": int((scores.mase_scale.eq(0) & decisions).sum()),
+        "excluded": excluded,
+    }
+    write_json(location(config, "processed") / "validation_selection.json", audit)
+    logger.info(
+        "{} selection: {} admitted / {} candidates", label, len(admitted), len(paths)
+    )
+    if not admitted:
+        raise ValueError(
+            f"No datasets passed {label} screening; inspect validation_selection.json"
+        )
+    return admitted, audit
+
+
 def screening_signature(config):
     """Separate screening settings from training/embedding hyperparameters."""
     policy = {
         k: v
         for k, v in config["validation"].items()
-        if k not in ("enabled", "metrics_path", "workers", "run_folders")
+        if k not in ("enabled", "metrics_path", "workers", "run_folders", "auto_run")
     }
     content = {
         "validation": policy,
         "seed": config["seed"],
         "reserved_tail_rows": config["data"]["horizon"],
-        "schema": 3,
-        "admission_metric": "mae",
+        "schema": 5
+        if policy.get("engine") == "chronos2"
+        else 4
+        if policy.get("engine", "chronos_bolt") == "chronos_bolt"
+        else 3,
+        "admission_metric": "mase"
+        if policy.get("engine", "chronos_bolt") == "chronos_bolt"
+        else "mae",
     }
+    if policy.get("engine") == "chronos2":
+        content["input_roles"] = {
+            key: config["data"][key]
+            for key in (
+                "targets",
+                "time_column",
+                "past_covariates",
+                "known_covariates",
+                "excluded_column_patterns",
+            )
+        }
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
@@ -689,35 +990,79 @@ def transform(config):
 
 
 def transform_next_patch(config):
-    """Reserve the final full patch; train every earlier next-patch transition."""
+    """Build causal transitions using full tables or the legacy reserved-tail policy."""
     d, p = config["data"], config["model"]["patch_size"]
-    if d["horizon"] != p or d["context_length"] != config["model"]["context_length"]:
+    policy = d.get("validation_policy", "reserved_tail")
+    if policy not in ("reserved_tail", "sampled_training_origins"):
+        raise ValueError("Unknown data.validation_policy")
+    validation_patches = d["horizon"] // p
+    if (
+        d["horizon"] % p
+        or validation_patches < 1
+        or validation_patches > config["model"].get("output_patches", 1)
+        or d["context_length"] != config["model"]["context_length"]
+    ):
         raise ValueError(
-            "Next-patch evaluation requires horizon=patch_size and matching context limits"
+            "Next-patch validation requires whole output patches and matching context limits"
         )
     if d["known_covariates"]:
         raise ValueError(
             "Next-patch objective currently uses observed, time-aligned covariates only"
         )
-    max_tokens = d["context_length"] // p
     paths = discover_source_tables(config)
     paths, selection = validated_sources(config, paths)
     if d["max_tables"] is not None:
         paths = paths[: d["max_tables"]]
     if not paths:
         raise ValueError("No source tables")
-    records, manifest, excluded_tables = [], [], selection["excluded"]
-    for index, path in enumerate(paths):
-        with timed(f"load/split full series {index + 1}/{len(paths)} {path}"):
+    implementation = (
+        file_digest(Path(__file__))
+        + file_digest(Path(__file__).with_name("transform_progress.py"))
+        + file_digest(Path(__file__).with_name("sharded_records.py"))
+    )
+    with ShardedTransformCheckpoint(
+        location(config, "processed"),
+        signature(config),
+        paths,
+        location(config, "raw"),
+        implementation,
+        options=config.get("transform", {}),
+    ) as checkpoint:
+        return _transform_next_patch_tables(config, paths, selection, checkpoint)
+
+
+def _transform_next_patch_tables(config, paths, selection, checkpoint):
+    d, p = config["data"], config["model"]["patch_size"]
+    policy = d.get("validation_policy", "reserved_tail")
+    full_training = policy == "sampled_training_origins"
+    validation_patches = d["horizon"] // p
+    max_tokens = d["context_length"] // p
+    checkpoint.restore()
+    initial = checkpoint.state["completed_tables"]
+    progress = TransformProgress("Transform", len(paths), initial)
+
+    def report_progress(completed):
+        checkpoint.save_progress(completed)
+        progress.update(completed)
+
+    for index in range(initial, len(paths)):
+        path = paths[index]
+        with timed(
+            f"load/split full series {index + 1}/{len(paths)} {path}", level="DEBUG"
+        ):
             frame = pd.read_parquet(path)
-            if len(frame) < max(48, 3 * p):
+            minimum = max(48, 2 * p if full_training else (validation_patches + 2) * p)
+            if len(frame) < minimum:
                 reason = (
-                    f"need at least {max(48, 3 * p)} timesteps (three complete tokens)"
+                    f"need at least {minimum} timesteps for causal full-table training"
+                    if full_training
+                    else f"need at least {minimum} timesteps (two training tokens plus {validation_patches} validation tokens)"
                 )
-                excluded_tables.append({"source": str(path), "reason": reason})
+                checkpoint.append_excluded({"source": str(path), "reason": reason})
                 logger.warning(
                     "Skipping short table {} rows={}: {}", path, len(frame), reason
                 )
+                report_progress(index + 1)
                 continue
             time = frame[d["time_column"]]
             if (
@@ -745,9 +1090,13 @@ def transform_next_patch(config):
                 raise ValueError("Explicit roles contain excluded lag columns")
             if np.isinf(frame[columns].to_numpy(dtype=np.float32)).any():
                 raise ValueError(f"Infinity in {path}")
-            cutoff = len(frame) - p
+            evaluation_horizon = (
+                min(d["horizon"], len(frame) - 2 * p) if full_training else d["horizon"]
+            )
+            cutoff = len(frame) - evaluation_horizon
+            training_stop = len(frame) if full_training else cutoff
             left_pad = (-len(frame)) % p
-            train_tokens = (cutoff + left_pad) // p
+            train_tokens = (training_stop + left_pad) // p
             source = (
                 path.relative_to(ROOT).as_posix()
                 if path.is_relative_to(ROOT)
@@ -761,6 +1110,8 @@ def transform_next_patch(config):
                 "source_sha256": file_digest(path),
                 "source_rows": len(frame),
                 "evaluation_cutoff": cutoff,
+                "validation_policy": policy,
+                "training_stop": training_stop,
                 "targets": d["targets"],
                 "excluded_columns": excluded,
                 "variable_names": columns,
@@ -768,12 +1119,14 @@ def transform_next_patch(config):
                 "left_padding_points": left_pad,
                 "training_transitions": train_tokens - 1,
             }
-            logger.info(
-                "Table={} rows={} variables={} train_transitions={} held_out=[{}, {}) excluded={}",
+            logger.debug(
+                "Table={} rows={} variables={} train_transitions={} training_stop={} policy={} evaluation_preview=[{}, {}) excluded={}",
                 index,
                 len(frame),
                 len(columns),
                 train_tokens - 1,
+                training_stop,
+                policy,
                 cutoff,
                 len(frame),
                 excluded,
@@ -782,7 +1135,7 @@ def transform_next_patch(config):
             # share one patch as context, never duplicate supervised transitions.
             for token_start in range(0, train_tokens - 1, max_tokens):
                 start = max(0, token_start * p - left_pad)
-                stop = min(cutoff, (token_start + max_tokens + 1) * p - left_pad)
+                stop = min(training_stop, (token_start + max_tokens + 1) * p - left_pad)
                 batch = {
                     "context": torch.tensor(
                         frame[d["targets"]]
@@ -808,27 +1161,26 @@ def transform_next_patch(config):
                     "cutoff": stop,
                     "token_start": token_start,
                 }
-                records.append(record)
-            batch = frame_window(
-                frame,
-                cutoff=cutoff,
-                context_length=min(cutoff, d["context_length"]),
-                horizon=p,
-                targets=d["targets"],
-                past_covariates=past,
-            )
-            records.append(
-                {
-                    **metadata,
-                    "id": f"table_{index:03d}_evaluation_{cutoff}",
-                    "split": "evaluation",
-                    "batch": batch,
-                    "cutoff": cutoff,
-                    "context_rows": [max(0, cutoff - d["context_length"]), cutoff],
-                    "label_rows": [cutoff, len(frame)],
-                }
-            )
-            manifest.append(metadata)
+                checkpoint.append_record(record)
+            evaluation_record = {
+                **metadata,
+                "id": f"table_{index:03d}_evaluation_{cutoff}",
+                "split": "evaluation",
+                "cutoff": cutoff,
+                "context_rows": [max(0, cutoff - d["context_length"]), cutoff],
+                "label_rows": [cutoff, len(frame)],
+            }
+            if not full_training:
+                evaluation_record["batch"] = frame_window(
+                    frame,
+                    cutoff=cutoff,
+                    context_length=min(cutoff, d["context_length"]),
+                    horizon=evaluation_horizon,
+                    targets=d["targets"],
+                    past_covariates=past,
+                )
+            checkpoint.append_record(evaluation_record)
+            checkpoint.append_table(metadata)
             if d["export_processed_tables"]:
                 directory = location(config, "processed")
                 directory.mkdir(parents=True, exist_ok=True)
@@ -837,39 +1189,89 @@ def transform_next_patch(config):
                     index=False,
                     compression="zstd",
                 )
-    if not manifest:
+        report_progress(index + 1)
+    checkpoint.save_progress(len(paths), force=True)
+    if not checkpoint.state["table_count"]:
         raise ValueError(
-            "No admitted datasets have at least three full tokens (48 timesteps minimum)"
+            "No admitted datasets meet the selected full-table/validation-tail length policy"
         )
     payload = {
-        "signature": signature(config),
-        "records": records,
+        **checkpoint.artifact_index(),
         "objective": "next_patch",
         "source_selection": source_selection(config),
     }
-    save_artifact(location(config, "processed") / "windows.pt", payload)
-    write_json(
-        location(config, "processed") / "manifest.json",
-        {
-            "config": config,
-            "source_selection": source_selection(config),
-            "tables": manifest,
-            "table_count": len(manifest),
-            "validation": selection,
-            "excluded_tables": excluded_tables,
-            "training_transitions": sum(t["training_transitions"] for t in manifest),
-            "split_rule": "right-aligned patches; final full patch held out; all earlier next-patch pairs trained",
-        },
+    checkpoint.status("finalizing")
+    logger.info(
+        "All tables checkpointed. Publishing shard index; no corpus-sized merge."
     )
-    return payload
+    atomic_write(
+        location(config, "processed") / "windows.pt",
+        lambda stream: torch.save(payload, stream),
+    )
+    summary = {
+        "config": config,
+        "source_selection": source_selection(config),
+        "format": "sharded_windows_v1",
+        "table_count": checkpoint.state["table_count"],
+        "validation": selection,
+        "training_transitions": checkpoint.state["training_transitions"],
+        "split_rule": (
+            "right-aligned patches; full training-table labels; validation tables reserved by trainer before any gradient updates"
+            if full_training
+            else f"right-aligned patches; final {validation_patches} full patches held out; all earlier causal next-patch pairs trained"
+        ),
+    }
+    atomic_write(
+        location(config, "processed") / "manifest.json",
+        lambda stream: checkpoint.write_manifest(
+            stream, summary, selection["excluded"]
+        ),
+    )
+    checkpoint.status("complete")
+    logger.success(
+        "Transform complete: {} tables, {} records in {} shards",
+        checkpoint.state["table_count"],
+        checkpoint.state["record_count"],
+        len(checkpoint.shards),
+    )
+    from sharded_records import ShardedRecords
+
+    return {
+        **payload,
+        "records": ShardedRecords(payload, location(config, "processed")),
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/config.json"))
+    parser.add_argument(
+        "--source-manifest", help="Run-local native source index passed to WSL"
+    )
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.source_manifest:
+        os.environ["BASIN_SOURCE_MANIFEST"] = str(ROOT / args.source_manifest)
     with run_context(config, "transform"):
+        if config.get("validation", {}).get("enabled") and config["validation"].get(
+            "engine", "chronos_bolt"
+        ) in ("chronos2", "chronos_bolt"):
+            sys.path.insert(0, str(ROOT / "src/05_model_training"))
+            from train import launch_wsl
+
+            extra_args = ()
+            if os.name == "nt":
+                manifest = (
+                    Path(os.environ["BASIN_SOURCE_MANIFEST"])
+                    if args.source_manifest
+                    else write_source_manifest(config)
+                )
+                extra_args = (
+                    "--source-manifest",
+                    manifest.relative_to(ROOT).as_posix(),
+                )
+            if launch_wsl(__file__, args.config, extra_args=extra_args):
+                return
         with timed("TRANSFORM stage"):
             transform(config)
 

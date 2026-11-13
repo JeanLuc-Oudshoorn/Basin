@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 
 @torch.inference_mode()
-def forecast_contexts(model, contexts, batch_size=5):
+def forecast_contexts(model, contexts, batch_size=5, *, prediction_patches=1):
     """Yield CPU quantiles in input order for contexts with matching variable roles.
 
     Context tensors are prepared on CPU. Padding is on the right after each
@@ -22,6 +22,26 @@ def forecast_contexts(model, contexts, batch_size=5):
     was_training = model.training
     model.eval()
     try:
+        if (
+            isinstance(prediction_patches, bool)
+            or not isinstance(prediction_patches, int)
+            or prediction_patches < 1
+        ):
+            raise ValueError("prediction_patches must be a positive integer")
+        if prediction_patches > model.config.output_patches:
+            # Archived one-patch models must roll out for the same requested
+            # horizon; never silently change the benchmark request for them.
+            for context in contexts:
+                inputs = {k: v.to(device) for k, v in context.items() if v is not None}
+                yield (
+                    model.forecast(
+                        horizon=prediction_patches * model.config.patch_size, **inputs
+                    )
+                    .quantiles[0]
+                    .float()
+                    .cpu()
+                )
+            return
         for start in range(0, len(contexts), batch_size):
             chunk = contexts[start : start + batch_size]
             examples = [
@@ -37,6 +57,7 @@ def forecast_contexts(model, contexts, batch_size=5):
             prepared = dict(
                 examples[0], b=len(chunk), tokens=n, padded_tokens=((n + 15) // 16) * 16
             )
+            prepared["prediction_patches"] = prediction_patches
             for name, fill in (("features", 0), ("loc", 0), ("scale", 1)):
                 prepared[name] = torch.cat(
                     [
@@ -51,8 +72,12 @@ def forecast_contexts(model, contexts, batch_size=5):
                 k: v.to(device) if isinstance(v, torch.Tensor) else v
                 for k, v in prepared.items()
             }
-            output = model.forward_encoded(model.encode_tokens(prepared), prepared)
-            quantiles = output.quantiles.float().cpu()
+            engine = getattr(model, "fast_inference", None)
+            if engine is not None:
+                quantiles = engine.quantiles(prepared).float().cpu()
+            else:
+                output = model.forward_encoded(model.encode_tokens(prepared), prepared)
+                quantiles = output.quantiles.float().cpu()
             if not torch.isfinite(quantiles).all():
                 raise FloatingPointError("Nonfinite forecast quantiles")
             for value in quantiles:

@@ -1,21 +1,103 @@
 # Basin
 
-Basin is a time-series foundation model project targeting approximately 450
+Basin is a time-series foundation model project currently configured at approximately 500
 million parameters, built on RWKV-7. The repository includes a fused CUDA training
 backbone, synthetic data generation, and a patch-based multivariate forecasting
-architecture with an end-to-end training smoke test. Large-scale pretraining is
-future work. See [the forecasting guide](docs/forecasting/FORECASTING.md).
+architecture with an end-to-end training smoke test. Training supports sharded
+corpora and resumable timed checkpoints. See [the forecasting guide](docs/forecasting/FORECASTING.md).
 
-The default trainer processes up to eight compatible windows per weight update,
-validates all training tables' final tokens once per epoch, and stops after one
-epoch without validation-loss improvement. It saves resumable checkpoints after
-each epoch and automatically continues from the latest checkpoint on restart.
-It restores the best weights before testing the reserved tables. See the
-[checkpoint audit](docs/audits/2026-10-28/epoch_checkpoints/REPORT.md).
+The active configuration has 28 layers and 500,056,352 total parameters,
+and predicts up to 64 timesteps per
+backbone pass, with CUDA graph replay enabled for forecasting. The new direct
+forecast head requires retraining. Four lead losses use weights 80%, 16%, 3%, 1%.
+Longer requests roll forward in blocks of at most 64 points. See the
+[short-horizon training and migration guide](docs/model_training/SHORT_HORIZON_TRAINING.md)
+and [inference benchmark](docs/time_benchmark/fast_inference/REPORT.md).
+
+The default trainer uses full training tables, with no reserved validation tail.
+Every hour of active training it saves a resumable checkpoint; every four hours it validates
+25,000 fixed reserved validation tables at five origins each (125,000 forecasts),
+using Basin only. Training, validation and test tables are disjoint: no window
+from a validation table enters gradient training. Originals with coarse or
+sign-inverted copies and their copies are training-only. Every forecast spans
+four tokens with 80/16/3/1 lead weights.
+Checkpoints retain optimizer moments/settings, scheduler and RNG states, plus
+the exact shuffled batch cursor for continuation within an epoch.
+For large sharded corpora, `training.storage_locality=true` visits each shard
+in one shuffled section per epoch and shuffles tables within compatible shape
+buckets. Compact record handles and reusable shape plans reduce startup memory
+and repeated data reads. See the
+[million-table pipeline review](docs/audits/2026-11-08/pipeline_scaling.md).
+`training.max_run_hours` sets a per-invocation soft duration limit (`null` means
+unlimited); the trainer saves at a safe optimizer boundary before exiting.
+Early-stopping and scheduler patience use validation checks rather than epochs.
+See the [hourly training guide](docs/model_training/HOURLY_TRAINING.md) for settings,
+timing semantics, migration, validation selection and restart behavior.
 Compiled cross-variable attention is now enabled for training through
 `training.compile_variate`, with about 17% higher measured update throughput.
 See the [follow-up performance audit](docs/audits/2026-10-28/training_speed_round2/REPORT.md)
 for benchmark limits, compilation warmup and verification.
+
+Training uses physical microbatches of up to eight tables, bounded by 3,072
+padded variable-tokens, with a 1,792-token activation budget. The
+[November 8 throughput benchmark](docs/time_benchmark/TRAINING_THROUGHPUT_2026-11-08.md)
+measured approximately 8% higher throughput on recorded training batches and
+verified all 48 length/covariate-count buckets without OOM retries. Default logs
+show epoch progress/ETA, memory and preparation/model-update timings.
+Bounded training CUDA replay remains optional, but is
+disabled by default after capture-inclusive mixed-data tests. See the
+[training schedule benchmark](docs/time_benchmark/training_graph_schedule/REPORT.md)
+for measured update times, memory use, numerical checks and replay settings.
+
+## Repository and model outputs
+
+`configs/config.json` selects the active model and its artifact paths.
+`configs/legacy_447m.json` selects the archived 447M model. Pipeline stages write
+to the following layout (data artifacts and model files appear when their stage runs):
+
+```text
+configs/
+  config.json                     # Default model configuration
+  legacy_447m.json                 # Archived 447M configuration
+src/
+  01_data_generation/
+  02_data_validation/
+  03_transforming_input_data/
+  04_creating_embeddings/
+  05_model_training/
+  06_holdout_test/
+  07_forecasting/
+data/
+  01_generated/YYYY-MM-DD/.../data.parquet
+  02_processed/
+    model/windows.pt              # Default model's processed windows
+    447m_model/                   # Archived model's processed artifacts
+  03_embedded/
+    model/embeddings.pt            # Default model's lazy patch index
+    447m_model/                   # Archived model's embedding index
+results/
+  model/
+    training/                     # model.pt, resumable timed checkpoint and metrics
+    holdout_test/                 # Out-of-sample metrics, predictions and plots
+    forecasts/                    # Forecast-stage outputs
+  447m_model/
+    training/
+    holdout_test/
+    forecasts/
+logs/                             # Timestamped logs and training JSONL journals
+docs/                             # Architecture, benchmark reports and audit trail
+```
+
+The default exported model is `results/model/training/model.pt`; resumable training
+state is `results/model/training/latest_checkpoint.pt`. Holdout evaluation reads
+the exported model and writes to `results/model/holdout_test`. The general
+forecasting stage writes to `results/model/forecasts`; when it delegates to the
+holdout evaluator, it uses the holdout directory. Paths remain configurable.
+
+The folder rename preserves existing binary data and checkpoint contents. It does
+not convert the archived 447M weights into the default 395M architecture. The
+[path migration audit](docs/audits/2026-10-31/model_folder_names/REPORT.md) records
+the directory changes and text-reference updates.
 
 ## Development checks
 
@@ -315,12 +397,100 @@ growing amplitude, and smoothly changing cycle lengths. Phase integrates the
 varying frequency to avoid artificial discontinuities. Periods are limited
 relative to context length so an incomplete cycle less often resembles a ramp.
 
-`SWITCHING_PROBABILITY=0.3` adds a binary operating-state covariate, visible or
+`SWITCHING_PROBABILITY` adds a binary operating-state covariate, visible or
 hidden, with sampled on/off dwell durations. Shutdown mode sets the complete
 outcome exactly to zero or a sampled value during outages, then blends back to
 the evolving underlying process over a sampled restart interval. Reset mode
 resets an accumulated ramp at each state transition, creating repeating
 charging/discharging or sawtooth-like shapes. These controls appear in the DAG.
+
+`SWITCH_PROFILE_WEIGHTS` mixes ordinary alternating operation (weight 0.4),
+long-dwell operation (0.5), and a single scheduled operating interval (0.1).
+Long outages can span most or all of the recorded context; the initial state is
+also sampled. These are duration ranges, rather than a fixed periodic schedule.
+
+`PROCESS_EPISODE_PROBABILITY` independently selects a sustained process run.
+New episodes use an explicit exogenous `formula` node in the SCM with a saved
+process program, rather than a binary command followed by a fixed hump. Its
+equation follows sampled setpoint commands through finite causal transitions.
+The outcome's saved gating equation uses the delayed driver value; its measured
+result enters outcome history before subsequent rows read their lags. Source
+nodes can also influence other covariates through the usual DAG edges. No
+finished observations are reshaped to create the process run.
+
+Idle-before and idle-after durations have independent sampled weights, including
+near-zero periods. Rise and release durations are drawn independently across a
+wide range; either can be much faster than the other. Each transition separately
+chooses linear, cosine, smoothstep, power, or exponential-release response.
+The finite release can have a long tail and still reach idle exactly.
+`PROCESS_MULTILEVEL_PROBABILITY=0.55` adds intermediate operating setpoints to
+episodes, with independently sampled transitions and dwell periods; rapid new
+commands can interrupt a ramp. `PROCESS_PRIMING_PROBABILITY=0.30` adds small,
+saved priming pulses during pre-start idle when enough idle time is available.
+All durations and levels are sampled before observations, not inferred from
+the generated trajectory. Active variation still includes original parent
+effects, oscillations, seasonality, and innovations; idle noise can be zero or
+small. Screening uses the saved driver shape, without fitting a new schedule.
+These options retain the runner's configured episode frequency and operate even
+when `SWITCHING_PROBABILITY=0`. Existing saved binary-response SCMs replay using
+their original equations.
+
+`FORMULA_COVARIATE_PROBABILITY=0.08` selects formulaic exogenous sources for
+eligible additional covariate slots after the first continuous process.
+Families are ramps, powers, sigmoid transitions, Gaussian bumps, damped waves,
+chirps (changing frequency), sawtooths, triangles, and state-machine programs.
+Sampled amplitude, offset, timing, shape and optional noise law are saved in each
+node. The usual `NOISE_FREE_COVARIATE_PROBABILITY` can disable private noise;
+otherwise the existing noise families supply small innovations relative to the
+formula amplitude. Formula sources can be hidden or visible under the Poisson
+visibility sampler and can drive other nodes or the outcome. Their source
+equations depend only on the clock and their own innovations, never future
+observations. `PRIOR_RANGES` exposes the new `process_*` and `formula_*` ranges.
+
+Run `python src/01_data_generation/preview_process_drivers.py` to create
+`results/data_generation/process_drivers.png` (actual SCM outcomes),
+`formula_sources.png` (formulaic source examples), and `process_drivers.json`
+(the corresponding full SCMs). Tests in `test_process_drivers.py` cover
+asymmetry, multiple settings, idle boundaries, optional noise, causal prefixes,
+graph connections, visibility invariance and exact replay.
+
+`DISCRETE_COVARIATE_PROBABILITY=0.25` replaces eligible additional source slots
+after the first continuous covariate with discrete exogenous inputs.
+`DISCRETE_WEIGHTS` selects independent Bernoulli indicators (0.35), persistent
+binary Markov indicators (0.35), or multi-state Markov sources (0.30). Markov
+sources have sampled levels, transition matrices, initial states, and dwell-time
+scales. They emit exact discrete values without continuous noise, can influence
+later covariates or the outcome, and follow the usual visibility sampling.
+
+`SENSOR_BOUNDS_PROBABILITY=0.01` independently adds a hard floor, ceiling, or both
+to each continuous covariate and the outcome. Bounds are sampled in the recorded
+units from SCM scale parameters before simulation, never fitted to observed
+quantiles. Capped measurements feed downstream equations and future lags. A
+bound may remain inactive if the process never reaches it. Discrete sources
+retain their exact categories.
+
+`VISIBLE_COVARIATE_LAMBDA=1.3` draws the number of visible covariates from a
+Poisson distribution, then chooses that many source nodes uniformly without
+replacement. Counts above the number of available sources are capped, rather
+than redrawn. All other covariates remain latent in the SCM. Zero visible
+covariates produces a strictly univariate table containing only `time_index`
+and `outcome`, while retaining the full range of latent causal mechanisms.
+Before capping, probabilities for 0/1/2/3 visible covariates are approximately
+27.3% / 35.4% / 23.0% / 10.0%; larger counts become progressively rarer.
+There is no per-source hiding probability or enforced univariate batch quota.
+Finite batches fluctuate naturally. Set lambda to zero for entirely univariate
+generation. For controlled comparisons, `sample_model(visible_covariate_count=N)`
+overrides the count for one model. The saved SCM records the count sampling
+parameters and each node's visibility; replay uses the saved flags unchanged.
+
+These probabilities and weights are editable at the top of
+`src/01_data_generation/generate_operational_data.py`; duration, amplitude,
+transition, and bound ranges can be overridden through `PRIOR_RANGES`. Screening may
+change the proportions in accepted tables. The saved SCM contains every new
+mechanism, and existing saved SCMs retain their previous replay behavior.
+For a compact illustrated gallery, run
+`python src/01_data_generation/preview_process_mechanisms.py`. It writes
+`results/data_generation/process_mechanisms.png` and the underlying example SCMs.
 
 Noise laws include Gaussian, Student-t, Laplace, uniform, lognormal, Poisson,
 beta, Weibull, rounding errors, 1D Perlin noise, pink noise, and brown/red noise. `NOISE_WEIGHTS` controls
@@ -403,16 +573,88 @@ and `python -m unittest discover -s tests -p test_effect_mechanisms.py`.
 
 Generation pre-resolves parent buffers and lag aliases and prepares fixed joint
 map arrays once per simulation. Scalar clipping avoids repeated NumPy array
-dispatch. These changes retain the arithmetic and RNG draw order. Plot rendering
-is independent of simulation: `RENDER_WORKERS=None` automatically uses up to four
+dispatch. These changes retain the arithmetic and RNG draw order.
+
+The runner now sets `GENERATION_WORKERS=None`, automatically using up to eight
+processes (half the available logical CPUs). Each process samples, screens,
+simulates, and writes complete tables, including any enabled plots. This speeds
+up runs even when plots and SCM JSON exports are disabled. `GENERATION_BATCH_SIZE=16`
+amortizes task dispatch, with at most twice the worker count of queued batches;
+frames and models stay in workers. Arrow threads are limited per worker to
+avoid multiplying its thread pools. Tables are returned in their original order.
+
+Parallel generation uses independent per-table RNG seeds and the same equation
+sampling, simulation arithmetic, trend quotas and rejection criteria. A fixed
+seed produces the same data and SCMs across parallel worker counts and batch
+sizes, although its table sequence differs from the older sequential RNG stream.
+Set `GENERATION_WORKERS=1` to preserve that older stream exactly. The generator
+class defaults to this compatible sequential mode; the runner enables automatic
+parallelism. Seeded mode falls back to in-process work when spawning is unavailable
+or there is only one batch. Keep the main guard for custom Windows entry points.
+
+Console progress reports completed tables, percentage, elapsed time, tables per
+second, and ETA, initially shown as `estimating`. `PROGRESS_INTERVAL=1.0` limits
+console updates to once per second, avoiding millions of print operations.
+Throughput and ETA include startup, screening, writes and requested image
+rendering; batches count only after their files are complete. Estimates become
+more stable after several batches and are approximate for variable-length tables.
+
+`COARSE_COPY_PROBABILITY=0.03` gives each accepted original with **more than 512
+rows** a 3% chance of one extra, less granular table. A window size is sampled
+uniformly from 2, 3, 4, 5, and one zero-based offset is sampled inside that
+window. The same offset is reused across every non-overlapping window and every
+column, including all visible covariates. This selects observations without
+averaging or filtering. Incomplete trailing windows are dropped, and the copy's
+`time_index` starts again at zero with unit steps.
+
+The original remains unchanged. The copy is a sibling folder named
+`<original>_coarse_<window>_<offset>`, containing `data.parquet` and an always-saved
+`provenance.json` linking the source table and selection parameters. If enabled,
+SCM JSON and plots are saved too. The saved SCM retains the original equations
+and records the observation-selection step; replay runs at the original sample
+rate before thinning, and the DAG labels its lags in original sample intervals.
+The copy records its own linear trend score without claiming to have passed the
+original trend-profile screen. Copies are not recursively augmented.
+
+Selection uses a separate deterministic RNG, so enabling this feature changes
+neither original tables nor subsequent SCM sampling. `NUM_TABLES` still counts
+original SCMs; returned paths and the runner's final saved-table count include
+extras. Console progress reports `+N coarse copies` separately. Set the probability
+to zero to disable augmentation. Run
+`python -m unittest discover -s tests -p test_coarse_copies.py` for alignment,
+replay, provenance, RNG isolation and multiprocessing checks.
+
+`SIGN_INVERSION_PROBABILITY=0.03` independently gives each original table a 3%
+chance of a mirrored sibling named `<original>_sign_inverted`. Every recorded
+value in the outcome and visible covariates is multiplied by -1, including
+binary/discrete covariates; `time_index`, row order, and row count are unchanged.
+The original realization and its latent equations are retained. An observation
+transform in the optional saved SCM makes replay reproduce the mirror exactly;
+the optional DAG labels itself as showing source equations before inversion.
+An always-saved `provenance.json` links back to the original even without SCM
+export. Optional series plots show the reflected data.
+
+Mirroring uses a separate deterministic RNG from both SCM sampling and coarse
+copy selection. It can coexist with a coarse copy of the same original, but
+neither augmentation is recursively applied to copies. `NUM_TABLES` still means
+original SCMs, and the console counts sign-inverted copies separately from
+coarse copies. Set the probability to zero to disable mirroring. Centering and
+scaling do not generally erase a sign inversion: for mean/std normalization,
+the normalized mirrored series is the negative of the normalized original.
+Run `python -m unittest discover -s tests -p test_sign_inversion.py` to verify
+value/clock alignment, RNG isolation, replay, exports and parallel determinism.
+
+In sequential generation, plot rendering is independent of simulation:
+`RENDER_WORKERS=None` automatically uses up to four
 processes for batches of at least four tables. Set it to `1` for serial rendering,
 or an explicit positive count. Interactive sessions without an importable main
 file fall back to serial rendering. Queued work is bounded, worker errors are
 propagated, and `generate()` waits for all images before returning. Keep the main
-guard when launching generation from a custom script on Windows.
+guard when launching generation from a custom script on Windows. Full generation
+workers render their own plots and do not create nested rendering pools.
 
 Run `python src/01_data_generation/benchmark_generation.py` to benchmark serial
-and parallel generation with both plots enabled and verify exact data/model/PNG
+and parallel rendering with both plots enabled and verify exact data/model/PNG
 equality. Its top-level settings control repetitions and batch size. Optionally
 point `REFERENCE_SOURCE` at an archived generator source directory to compare
 the prior implementation, allowing only removal of exported lag columns and
@@ -483,14 +725,52 @@ parameters are saved in `scm.json`; these are structural equations evaluated
 at each timestamp, with no post-hoc correction or dependence on future samples.
 Older SCMs without the new `fourier` field retain their original seasonal equations.
 
-Run `python src/data_generation/preview_fourier_seasons.py` for a gallery of
+These finite expansions are Fourier **partial sums**. A square wave, for
+example, uses `(4/pi) * sum(sin(k*phase)/k)` over odd orders `k=1,3,5,...`.
+Six nonzero terms therefore use orders 1, 3, 5, 7, 9 and 11. The evaluator
+already supports these exact coefficients. The sampled `pulse` family varies
+the duty cycle, smoothing and coefficients, producing a wider range of
+square-like operational cycles rather than only textbook 50% duty waves.
+Increasing the harmonic count sharpens transitions subject to the sampling
+limit; finite sums can overshoot near discontinuities (Gibbs ringing).
+
+Run `python src/01_data_generation/preview_fourier_partial_sums.py` to compare
+one, two, three and six terms, their component waves, and the amplitude spectrum.
+It writes `results/01_data_generation/fourier_partial_sums.png` and the saved
+seasonal equations in `fourier_partial_sums.json`. This demonstration uses
+textbook amplitudes and does not change the generator's sampling distribution.
+
+Run `python src/01_data_generation/preview_fourier_seasons.py` for a gallery of
 isolated seasonal shapes and their saved specifications under
-`results/data_generation/fourier_seasons.png` and `fourier_seasons.json`.
+`results/01_data_generation/fourier_seasons.png` and `fourier_seasons.json`.
 This broadens the seasonal prior; it does not establish coverage of every
 real-world operational process, which still requires validation against data
 from the domains of interest.
 
-## Prophet validation
+## Data admission screening
+
+`configs/config.json` currently sets **`validation.enabled=false`** to skip
+predictive screening for large cohorts. Transform admits all selected tables,
+while retaining its normal data and sequence-length checks. Running the validator
+in this mode exits successfully without forecasting or scanning tables.
+Set `validation.enabled=true` to restore screening. `validation.auto_run=false`
+only disables automatic screening runs; it does not bypass the admission gate.
+
+The default Stage 02 filter is **Chronos-2 Small with covariates versus naive**.
+A table passes when its median forecast MAE is no more than **15% worse** than
+last-observation carry-forward (`validation.max_relative_degradation=0.15`).
+All eligible historical covariates selected by the training configuration are
+included, with future values supplied only for explicitly known covariates.
+The transformer automatically runs screening when reports are missing or stale,
+including previous Bolt/Prophet reports. The pinned 28M model is loaded once and tables are batched;
+its cache stays under `.cache/huggingface` on the project drive.
+See [Chronos-2 screening](docs/data_validation/CHRONOS2_SCREENING.md) for
+the temporal split, configuration, admission rule and outputs.
+
+### Legacy Prophet validation
+
+The following documents the retained compatibility mode
+`validation.engine="prophet"`; it is not the default admission filter.
 
 Install the validation dependencies with `python -m pip install -e ".[validation]"`.
 Configure `validation` and `data.generated_dates` in `configs/config.json`, then run:
@@ -646,6 +926,51 @@ uv run python src/05_model_training/train.py
 uv run python src/06_holdout_test/holdout_test.py
 ```
 
+See the [transformation guide](docs/transformation/README.md) for input selection,
+causal training records, evaluation policies, outputs and checkpoint recovery.
+The [embedding preparation guide](docs/embeddings/README.md) explains bounded
+inspection batches, progress bars and resumable metadata indexing in `embed.py`.
+
+Next-patch transformation resumes automatically when the same command is rerun.
+The console shows a progress bar, completed/total tables, percentage, tables per
+second, elapsed time and ETA. It updates every 100 tables, at least every five
+seconds when a table finishes, and at completion. Source-inventory checking and
+checkpoint restoration have separate bars; progress counts tables rather than rows.
+
+The checkpoint cadence is configured independently of progress logging:
+
+```json
+"transform": {
+  "batch_size_tables": 1000,
+  "batch_memory_limit_mb": 64,
+  "checkpoint_every_tables": 100000,
+  "checkpoint_interval_seconds": null
+}
+```
+
+By default, completed tables are checkpointed every 100,000 tables and after the
+final table, with no time trigger. Set either option to `null` to disable that
+trigger, or set a positive table count/time in seconds. When both are enabled,
+whichever comes first triggers a save (checked between tables). Changing these
+intervals does not change the dataset signature. A forced exit can lose
+only work since the last saved checkpoint; an unfinished table is processed again.
+Checkpoints live under
+`data/02_processed/model/.transform_checkpoints/<identity>/` with an inspectable
+`progress.json` and checksummed tensor batches. Restarting checks source names,
+sizes and modification times and verifies saved shards without loading their tensors.
+Changing the source inventory, data/model configuration or transform implementation
+uses a separate checkpoint directory. Keep source tables unchanged during a run.
+
+Transformation spills buffers after 1,000 tables or approximately 64 MiB of tensor
+data, independently of checkpoint frequency. The final `windows.pt` is a small
+shard index, published atomically without merging the corpus into RAM. Embed and
+training read shards on demand through the artifact loader; older single-file
+artifacts remain supported. The referenced `batch_*.pt` files in the checkpoint
+directory are now the dataset itself and **must be kept** after completion.
+The largest source table is still read in full, and source/record metadata still
+uses memory. This resume mechanism covers next-patch transformation;
+optional Chronos/Prophet screening remains a separate upstream phase.
+
 Training ends after saving the model; holdout testing is a separate stage.
 General forecasting lives under `src/07_forecasting/forecast.py`. GPU stages
 launched on Windows automatically use the configured WSL CUDA environment.
@@ -655,7 +980,7 @@ table, configured by `holdout.percentiles`, with table-level progress and ETA.
 Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
 slider and model toggles. Regenerate them from existing saved predictions with
 `uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
-Results go to `results/next_patch_300m_validated/holdout_test` by default
+Results go to `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
 exported `paths.training/model.pt` and its saved test split.
 Choose comparison models with `holdout.benchmark_models` (default
@@ -702,14 +1027,14 @@ training. These counts describe distinct observed patches, rather than equality
 of continuous embedding vectors. Kernel padding and entirely unobserved patches
 are excluded; partly observed patches retain their masks.
 
-Counts use the normal trainer's actual split: training windows on training
-tables, final-patch validation on those same tables, and rolling forecasts on
-separate test tables. Held-out-table training windows are excluded. Test counts
+Counts use the normal trainer's actual split: full training windows on training
+tables, five-origin validation on reserved validation tables, and rolling forecasts
+on separate test tables. Held-out-table training windows are excluded. Test counts
 cover the selected holdout origins, capped contexts, and the final partial target patch,
 rather than only the final window saved by embedding. Repeated rolling context
 use is counted analytically, without running forecasts. JSON also records split
-overlaps and validation/test content not seen in training. Training/validation
-input overlap is expected because they share historical context.
+overlaps and validation/test content not seen in training. Source-table overlap
+between splits must be zero; identical numeric content can occur in distinct tables.
 
 The CPU-only parameter count follows the current vendored RWKV-7 architecture.
 The trainer updates the ratios with its measured parameter count after model
@@ -724,12 +1049,12 @@ Exact uniqueness does not establish statistical independence or sufficient data:
 near-identical or noisy patches can all have different contents. The report
 provides descriptive ratios without imposing a sufficiency threshold.
 
-The default configuration now runs a 447.5M-parameter causal next-patch model
+The default configuration now runs a 394.9M-parameter causal next-patch model
 with 16-point patches, width 1,024, and a 2,048-point history cap. See the earlier
 [301.8M-parameter, 100-table experiment and baseline comparison](docs/audits/2026-10-24/next_patch_300m/REPORT.md).
 
-The current default admits only tables where pre-test multivariate Prophet MAE
-is no greater than last-observation MAE. The earlier strict univariate-or-multivariate
+The earlier admission policy used pre-test multivariate Prophet MAE
+compared with last-observation MAE. The earlier strict univariate-or-multivariate
 policy is documented in the historical
 [learnability gate and embedding audit](docs/audits/2026-10-24/learnability_gate/REPORT.md).
 
@@ -740,11 +1065,12 @@ events. See the [JSONL format and verification audit](docs/audits/2026-10-25/tra
 Training now bounds GPU execution separately from the optimizer batch. Defaults
 in `configs/config.json` retain `batch_size=8` and
 `gradient_accumulation_steps=1`, but split each update into physical microbatches
-of at most four tables (`microbatch_size=4`) and 1,536 padded variable-patches
+of at most eight tables (`microbatch_size=8`) and 1,536 padded variable-patches
 (`microbatch_token_limit=1536`). For example, eight tables with eight variables
 and 128 patches each run as eight single-table forward/backward passes, followed
-by one optimizer update. Losses are weighted by observed target points. Context,
-table order, padding, validation coverage and epoch checkpoint identity are preserved.
+by one optimizer update. Losses are weighted by observed target points. Physical
+microbatching preserves context, padding, validation coverage and the chosen
+batch schedule.
 
 `cuda_memory_limit_gib=8.0` caps PyTorch's CUDA allocator, including its cache,
 at the smaller of 8 GiB and 80% of device capacity. CUDA libraries and desktop
@@ -754,3 +1080,28 @@ bound. Each execution limit accepts `null` to disable that limit; a token budget
 always permits at least one table and does not truncate its sequence. These
 settings apply when the next training worker starts. See the
 [VRAM investigation and benchmarks](docs/audits/2026-10-28/vram_budget/REPORT.md).
+
+Training replay is available with `training_cuda_graphs=true`, but disabled by
+default: the measured larger-microbatch execution was faster without replay.
+Inference graph replay remains enabled. The training replay implementation uses
+a schedule intended to amortize capture costs.
+`training.shape_run_batches=128` shuffles runs of up to 128 batches from the
+same variable-role/length bucket. Tables are shuffled within buckets each epoch;
+observations inside each table remain chronological. Batch membership and epoch
+coverage are preserved, but optimizer update order changes. The setting is part
+of checkpoint identity: continue an older checkpoint with `shape_run_batches=1`,
+or use `resume=false` to start training with the new order.
+
+`training_graph_min_reuse=8` requires eight consecutive optimizer updates using
+a shape before capturing it; accumulation microbatches count only once per
+update. `training_graph_max_tokens=32` limits capture to short contexts (up to
+512 input observations at patch size 16). Existing cached profiles replay
+immediately; other shapes use compiled execution. Set the limit to `null` to
+experiment with all lengths. The two-profile/1.5 GiB graph cache and 8 GiB CUDA
+allocator limits still apply. See the
+[capture-inclusive schedule benchmark](docs/time_benchmark/training_graph_schedule/REPORT.md)
+for total-update timings, correctness checks and limits of the measurement.
+
+## Reproducing the pipeline
+
+The repository contains pipeline code, configurations, dependency locks, tests, experiment scripts and narrative audit reports. Generated datasets, model weights, numeric audit artifacts, caches and run outputs remain local and are not committed. Follow the stage commands above to regenerate these artifacts. Historical reports may link to local evidence files intentionally excluded from Git.

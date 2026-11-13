@@ -71,18 +71,24 @@ def journal_progress(journal, plan, tail_bytes=2 * 1024 * 1024):
             message = "Run complete"
         return {**result, "message": message}
     last = updates[-1]
-    total = last.get("epoch_total_updates", plan["updates_per_epoch"])
+    total = last.get(
+        "epoch_total_updates", last.get("epoch_updates", plan["updates_per_epoch"])
+    )
     epoch = last["epoch"]
     step = last["global_step"]
     local = last.get("epoch_update", step - (epoch - 1) * total)
     rate = last.get("epoch_updates_per_second")
+    if rate is None and last.get("epoch_elapsed_seconds", 0) > 0:
+        rate = local / last["epoch_elapsed_seconds"]
     if rate is None:
         same_epoch = [e for e in updates if e["epoch"] == epoch]
         if len(same_epoch) > 1:
             first = same_epoch[0]
             elapsed = last["elapsed_seconds"] - first["elapsed_seconds"]
             rate = (step - first["global_step"]) / elapsed if elapsed > 0 else None
-    eta = max(0, total - local) / rate if rate else None
+    eta = last.get("epoch_eta_seconds")
+    if eta is None:
+        eta = max(0, total - local) / rate if rate else None
     result = {
         **result,
         "epoch": epoch,

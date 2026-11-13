@@ -1,6 +1,7 @@
-"""Dataset isolation and full last-token validation for the normal trainer."""
+"""Dataset isolation and full reserved-tail validation for the normal trainer."""
 
 import hashlib
+import heapq
 import math
 from time import perf_counter
 
@@ -17,7 +18,9 @@ def rolling_origins(length, patch_size):
     return range(2 * patch_size, length, patch_size)
 
 
-def sampled_origins(length, patch_size, percentiles=(1, 25, 50, 75, 99)):
+def sampled_origins(
+    length, patch_size, percentiles=(1, 25, 50, 75, 99), *, prediction_patches=1
+):
     """Nearest eligible patch starts to row percentiles, with forced endpoints.
 
     Ties choose the earlier origin. Reserve distinct origins for later cases;
@@ -36,7 +39,23 @@ def sampled_origins(length, patch_size, percentiles=(1, 25, 50, 75, 99)):
         or any(a >= b for a, b in zip(percentiles, percentiles[1:]))
     ):
         raise ValueError("Holdout percentiles must increase from 1 to 99")
-    eligible = list(rolling_origins(length, patch_size))
+    if (
+        isinstance(prediction_patches, bool)
+        or not isinstance(prediction_patches, int)
+        or prediction_patches < 1
+    ):
+        raise ValueError("prediction_patches must be a positive integer")
+    # Preserve patch-aligned starts and two context patches, while reserving
+    # the entire requested future block (including when length is not aligned).
+    eligible = (
+        list(
+            range(
+                2 * patch_size, length - prediction_patches * patch_size + 1, patch_size
+            )
+        )
+        if prediction_patches > 1
+        else list(rolling_origins(length, patch_size))
+    )
     if len(eligible) <= len(percentiles):
         return eligible
     indices = [0]
@@ -54,42 +73,110 @@ def sampled_origins(length, patch_size, percentiles=(1, 25, 50, 75, 99)):
 
 def split_datasets(records, config):
     """Split whole admitted sources, never windows from the same source."""
+    from augmentation_families import POLICY, excluded_evaluation_sources
+
     patch = config["model"]["patch_size"]
     minimum = max(48, 3 * patch)
     fraction = config["training"].get("holdout_fraction", 0.1)
     if isinstance(fraction, bool) or not 0 < fraction < 1:
         raise ValueError("training.holdout_fraction must be between zero and one")
-    sources = sorted({r["source"] for r in records if r["source_rows"] >= minimum})
+    logger.info(
+        "Split startup: scanning {:,} record metadata entries for eligible sources",
+        len(records),
+    )
+    keys, hashes, source_rows, short_sources = {}, {}, {}, set()
+    for record in records:
+        source = record["source"]
+        if record["source_rows"] >= minimum:
+            keys[source] = record.get("source_key", source)
+            hashes[source] = record["source_sha256"]
+            source_rows[source] = record["source_rows"]
+        else:
+            short_sources.add(source)
+    sources = keys.keys()
     if len(sources) < 2:
         raise ValueError(
             f"Need at least two admitted datasets with >= {minimum} timesteps"
         )
     # Hash ranking is independent of input/window order and Python hash randomization.
-    keys = {r["source"]: r.get("source_key", r["source"]) for r in records}
-    ranked = sorted(
-        sources,
+    logger.info(
+        "Split startup: screening augmentation families for {:,} sources", len(sources)
+    )
+    family_sources = excluded_evaluation_sources(sources)
+    independent_sources = set(sources)
+    independent_sources.difference_update(family_sources)
+    independent_eligible_count = len(independent_sources)
+    if len(independent_sources) < 2:
+        raise ValueError(
+            "Need at least two independent datasets for validation/test; augmentation families are training-only"
+        )
+    count = min(
+        len(independent_sources) - 1, math.ceil(len(independent_sources) * fraction)
+    )
+    logger.info(
+        "Split startup: selecting {:,} test tables from {:,} independent sources using bounded ranking",
+        count,
+        len(independent_sources),
+    )
+    ranked = heapq.nsmallest(
+        count,
+        independent_sources,
         key=lambda s: (
             hashlib.sha256(f"{config['seed']}:{keys[s]}".encode()).hexdigest(),
             s,
         ),
     )
-    count = min(len(sources) - 1, math.ceil(len(sources) * fraction))
-    test_sources = set(ranked[:count])
-    train_sources = set(sources) - test_sources
-    train = [
-        r for r in records if r["source"] in train_sources and r["split"] == "train"
-    ]
-    validation = [
-        r
-        for r in records
-        if r["source"] in train_sources and r["split"] == "evaluation"
-    ]
-    test = [
-        r for r in records if r["source"] in test_sources and r["split"] == "evaluation"
-    ]
+    test_sources = set(ranked)
+    train_sources = set(sources)
+    train_sources.difference_update(test_sources)
+    independent_sources.difference_update(test_sources)
+    independent_train_sources = independent_sources
+    sampled = config["data"].get("validation_policy") == "sampled_training_origins"
+    validation_sources = independent_train_sources
+    if sampled:
+        from rolling_validation import select_validation_tables
+
+        logger.info(
+            "Split startup: selecting reserved validation table IDs before materializing windows"
+        )
+        selected, validation_eligible_count, _, _, _ = select_validation_tables(
+            (
+                {"source": s, "source_key": keys[s], "source_rows": source_rows[s]}
+                for s in independent_train_sources
+            ),
+            config,
+            max_tables=len(train_sources) - 1,
+        )
+        validation_sources = {r["source"] for r in selected}
+        train_sources -= validation_sources
+    del source_rows, independent_train_sources, ranked, independent_sources
+    logger.info(
+        "Split startup: selecting training/evaluation windows from metadata (no embeddings computed)"
+    )
+    from sharded_records import EncodedRecords, RecordSelection
+
+    compact = isinstance(records, EncodedRecords)
+    train = RecordSelection(records) if compact else []
+    validation, test = [], []
+    missing_train_sources = set(train_sources)
+    for position, record in enumerate(records):
+        source = record["source"]
+        if record["split"] == "train" and source in train_sources:
+            if compact:
+                train.indices.append(position)
+            else:
+                train.append(record)
+            missing_train_sources.discard(source)
+        elif record["split"] == "evaluation":
+            if source in validation_sources:
+                validation.append(record)
+            elif source in test_sources:
+                test.append(record)
+    if missing_train_sources:
+        raise ValueError("Missing training records; rerun transform and embed")
+    del missing_train_sources
     for name, group, expected in (
-        ("training", train, train_sources),
-        ("validation", validation, train_sources),
+        ("validation", validation, validation_sources),
         ("test", test, test_sources),
     ):
         if {r["source"] for r in group} != expected:
@@ -109,14 +196,41 @@ def split_datasets(records, config):
         "train_windows": len(train),
         "train_sources": sorted(train_sources),
         "test_sources": sorted(test_sources),
-        "source_keys": {s: keys[s] for s in sources},
-        "source_sha256": {r["source"]: r["source_sha256"] for r in validation + test},
-        "excluded_short_sources": sorted(
-            {r["source"] for r in records if r["source_rows"] < minimum}
-        ),
-        "validation": "last full token of each training table; never used as a gradient label",
+        "source_keys": keys,
+        "source_sha256": hashes,
+        "evaluation_family_policy": POLICY,
+        "evaluation_excluded_family_sources": sorted(family_sources),
+        "evaluation_excluded_family_tables": len(family_sources),
+        "independent_eligible_tables": independent_eligible_count,
+        "test_fraction_denominator": "independent_eligible_tables",
+        "excluded_short_sources": sorted(short_sources),
+        "validation": f"last {config['data']['horizon'] // patch} full tokens of each training table; never used as gradient labels",
         "test": "after final optimizer update only; expanding actual context from two tokens",
     }
+    if sampled:
+        from rolling_validation import select_validation_origins
+
+        logger.info("Split startup: reserving dataset-disjoint validation tables")
+        validation, sampling = select_validation_origins(validation, config)
+        sampling["eligible_tables"] = validation_eligible_count
+        validation_sources = {r["source"] for r in validation}
+        if (
+            not train
+            or train_sources & validation_sources
+            or test_sources & validation_sources
+        ):
+            raise ValueError(
+                "Training, validation and test tables must be nonempty and disjoint"
+            )
+        audit["schema"] = 3
+        audit["validation_split_policy"] = "dataset_disjoint_v1"
+        audit["validation_sources"] = sorted(validation_sources)
+        audit["validation_tables"] = len(validation_sources)
+        audit["actual_validation_fraction"] = len(validation_sources) / len(sources)
+        audit["validation"] = (
+            "dataset-disjoint: fixed reserved tables at five complete four-token forecast origins; no windows or labels from these tables enter gradient training"
+        )
+        audit["validation_sampling"] = sampling
     logger.info(
         "Dataset split: seed={} eligible={} train_tables={} test_tables={} train_windows={} excluded_short={}",
         config["seed"],
@@ -131,7 +245,7 @@ def split_datasets(records, config):
 
 @torch.inference_mode()
 def validate(model, records, batch_size=1):
-    """Point-weighted normalized pinball loss over every training-table final token."""
+    """Weighted normalized pinball over every training table's reserved tail."""
     if (
         batch_size > 1
         and getattr(getattr(model, "config", None), "objective", None) == "next_patch"
@@ -141,7 +255,7 @@ def validate(model, records, batch_size=1):
     device = next(model.parameters()).device
     was_training = model.training
     model.eval()
-    loss_sum = squared_sum = 0.0
+    loss_sum = squared_sum = loss_weight = 0.0
     points = 0
     tables = []
     try:
@@ -160,7 +274,13 @@ def validate(model, records, batch_size=1):
             count = int(valid.sum())
             sse = float((output.point[valid] - labels[valid]).float().square().sum())
             loss = float(output.loss)
-            loss_sum += loss * count
+            mass = (
+                float(output.loss_mass.sum())
+                if getattr(output, "loss_mass", None) is not None
+                else count
+            )
+            loss_sum += loss * mass
+            loss_weight += mass
             squared_sum += sse
             points += count
             tables.append(
@@ -192,7 +312,7 @@ def validate(model, records, batch_size=1):
     if not points:
         raise ValueError("No validation labels")
     result = {
-        "loss": loss_sum / points,
+        "loss": loss_sum / loss_weight,
         "rmse": math.sqrt(squared_sum / points),
         "points": points,
         "tables": tables,
@@ -217,7 +337,7 @@ def validate_batched(model, records, batch_size):
     was_training = model.training
     model.eval()
     tables = []
-    loss_sum = squared_sum = 0.0
+    loss_sum = squared_sum = loss_weight = 0.0
     points = completed = 0
     report_at = 1000
     try:
@@ -239,6 +359,9 @@ def validate_batched(model, records, batch_size):
                 labels=None,
                 last_token_indices=torch.tensor(indices),
                 observed_points=int(torch.isfinite(labels).sum()),
+                prediction_patches=math.ceil(
+                    labels.shape[-1] / model.config.patch_size
+                ),
             )
             prepared = {
                 k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -252,18 +375,26 @@ def validate_batched(model, records, batch_size):
             counts = valid.flatten(1).sum(1)
             errors = torch.where(valid, output.point - labels, 0).float()
             sses = errors.square().flatten(1).sum(1)
+            masses = (
+                output.loss_mass
+                if getattr(output, "loss_mass", None) is not None
+                else counts.float()
+            )
             metrics = (
-                torch.stack([output.per_sample_loss, sses, counts.float()], dim=1)
+                torch.stack(
+                    [output.per_sample_loss, sses, counts.float(), masses], dim=1
+                )
                 .cpu()
                 .tolist()
             )
-            for record, (loss, sse, count) in zip(group, metrics):
+            for record, (loss, sse, count, mass) in zip(group, metrics):
                 if count < 1 or not math.isfinite(loss) or not math.isfinite(sse):
                     raise FloatingPointError(
                         f"Invalid validation metrics: {record['source']}"
                     )
                 count = int(count)
-                loss_sum += loss * count
+                loss_sum += loss * mass
+                loss_weight += mass
                 squared_sum += sse
                 points += count
                 tables.append(
@@ -297,7 +428,7 @@ def validate_batched(model, records, batch_size):
     if not points:
         raise ValueError("No validation labels")
     result = {
-        "loss": loss_sum / points,
+        "loss": loss_sum / loss_weight,
         "rmse": math.sqrt(squared_sum / points),
         "points": points,
         "tables": tables,

@@ -12,7 +12,7 @@ uv run python src/06_holdout_test/holdout_test.py
 Training saves the model and exits; it does not run that test automatically.
 The holdout stage selects `paths.training/model.pt` and the split stored in it,
 and writes to `paths.holdout_test` (default
-`results/next_patch_300m_validated/holdout_test`). It compares RWKV, Prophet and
+`results/model/holdout_test`). It compares RWKV, Prophet and
 last-observation carry-forward at up to five origins per test table.
 
 For compatibility, calling `forecast.py` with a modern checkpoint containing a

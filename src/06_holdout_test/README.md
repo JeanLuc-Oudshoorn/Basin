@@ -6,25 +6,220 @@ Run from the repository root:
 uv run python src/06_holdout_test/holdout_test.py
 ```
 
-This automatically loads `paths.training/model.pt`, the latest model exported
-by training (using that run's best validation weights). It replays the test split
-stored in that model and verifies the embedding and source checksums. It does
+This automatically loads `paths.training/model.pt`, or `latest_checkpoint.pt`
+in that directory if the recovery checkpoint is newer or no export exists.
+The recovery checkpoint uses its saved `best_state_dict` (best validation weights),
+with the original `dataset_split.json` beside it. Its model/data signature must
+match the configuration. Recovery loading reads that split JSON, which can be
+large; it does not load training windows or resume the optimizer.
+
+Startup now streams the large split into a compact, reusable cache under
+`training/.holdout_split_cache`. Training/validation overlap checks use sorted
+128-bit source fingerprints instead of retaining millions of path strings.
+Changing the split invalidates the cache. A fingerprint collision can only
+reject an independent source; it cannot permit an actual overlap.
+
+Raw augmentation-family checks are cached under `.cache/holdout_lineage`, with
+invalidation when scanned directories change. Header reads use eight workers
+and cache schema/row counts under `.cache/holdout_schemas`, keyed by the saved
+source SHA256 and column policy. Actual source-file SHA256 checks still run
+before evaluating each table. Startup progress is logged during cold reads.
+
+Recovery provenance fingerprints the selected model tensors only, excluding
+optimizer state. `model_used.json` records `evaluated_weights_sha256` and an
+explicit scope; `checkpoint_sha256` is null for this recovery mode. Full
+exported model files still receive a complete-file SHA256. Checksums are reused
+only while artifact size and timestamps are unchanged. This avoids rereading
+an 8 GB optimizer checkpoint just to identify a 1 GB inference model.
+
+Checkpoint loading constructs the module on the meta device before restoring
+all saved tensors, avoiding redundant random CPU initialization. Architecture,
+weights, sampling, graph admission, forecast timing boundaries and scores are
+unchanged. The first use of an uncached corpus still needs a streaming split
+pass and a directory scan; subsequent launches reuse those results. These
+changes affect new invocations, not a process already running older code.
+Set `holdout.checkpoint` to a repository-relative or absolute checkpoint path
+to pin a particular export or recovery checkpoint.
+
+It replays the test split
+stored in that model and verifies the checkpoint and selected source checksums. It does
 not train or draw a new split. `train.py` now stops after saving its artifacts.
 
-The default output is `results/next_patch_300m_validated/holdout_test`, configured
+`data.generated_dates` selects data when preparing/training a model; changing it
+does not replace a checkpoint's saved holdout sources. An old `model.pt` can
+therefore still refer to deleted date folders. The automatic recovery selection
+allows evaluation of the current run before training finishes, using its own
+saved holdout sources and checksums. `model_used.json` records the chosen
+checkpoint, weight field, best step, and recovery split path/checksum.
+
+To evaluate the archived 447M weights on the **current model's holdout data**:
+
+```powershell
+uv run python .\src\06_holdout_test\holdout_test.py --config .\configs\holdout_447m_current.json
+```
+
+This configuration loads weights from `results/447m_model/training/model.pt`
+and takes the saved holdout split from `results/model/training/model.pt`, using
+`holdout.split_checkpoint`. It enables inference CUDA graph replay, samples 2%
+with seed 7, and compares against naive, Chronos-2 and Timestral. Set
+`holdout.sample_percent` in this configuration to change coverage. Matching the
+percentage and seed in the normal configuration selects the same tables.
+
+Results go to `results/447m_model/holdout_test/current_holdout`, including
+`test_metrics.json`, interactive plots and `model_used.json`. Existing default
+model results and the archived model's original holdout results are preserved.
+Both checkpoint paths and hashes are recorded. The evaluated model's saved
+column policy is used, and any overlap between the selected split's full
+holdout and the evaluated model's recorded training sources is rejected before
+sampling. Source checksums from the split checkpoint are verified as usual.
+No old raw datasets, embedding artifacts or retraining are required. Omit
+`holdout.split_checkpoint` to retain the normal model-owned split behavior.
+
+Startup reads the checkpoint once using memory mapping, samples its saved test
+sources, and reads only the selected Parquet schemas. It uses the checkpoint's
+original target/covariate policy, independently of today's data admission filter.
+It no longer loads `embeddings.pt` or `windows.pt`, hashes the training corpus,
+or materializes records for every training table. Both those upstream artifacts
+can be absent when running the holdout test. Weights are passed directly to the
+model loader without rereading the checkpoint. Startup phase durations are logged;
+model construction, GPU transfer and benchmark model initialization still take time.
+See the [startup and screening audit](../../docs/audits/2026-10-30/bolt_screening_startup/REPORT.md).
+
+Each new run clears generated outputs in its configured directory before
+writing the new model identity: old metrics, prediction files, request timings,
+and forecast/error/latency plots are removed. Files from tables/targets not
+selected in the new run cannot remain stale. User notes and subdirectories
+are preserved; no automatic archive is made. Cleanup is logged.
+
+The default output is `results/model/holdout_test`, configured
 by `paths.holdout_test`. It contains metrics JSON, prediction parquet files,
 interactive Plotly HTML plots, live progress/ETA and `model_used.json` recording the model's
 checksum and selected epoch. Ordinary logs and a timestamped JSONL journal are
 written under `logs/`, including when Windows routes execution to WSL.
 
-Each test table contributes up to five one-token forecasts at the configured
+Each test table contributes up to five forecasts at the configured
 origins, comparing RWKV, Prophet and last-observation carry-forward. All protocol
 settings remain under `holdout` in `configs/config.json`.
+Every method forecasts four tokens (64 timesteps) at every selected origin.
+The four `model.horizon_loss_weights` coefficients (80%/16%/3%/1%) weight the
+consecutive token errors. Every origin now reserves four complete future tokens.
+The final patch-aligned origin is `floor((N-64)/16)*16`. Tables need at least
+96 points (32 context + 64 future); shorter saved holdout tables are skipped and
+counted explicitly. All 64 predictions are plotted and scored against real
+actuals; masking is needed only for genuine missing data.
+See the [full short-horizon protocol](../../docs/forecasting/SHORT_HORIZON_FORECASTING.md)
+for boundary handling, per-horizon metrics and interpretation. This replaces
+the previous sampled-horizon protocol. Legacy `horizon_probabilities` and
+`horizon_seed` settings are ignored by evaluation.
 `holdout.benchmark_models` selects comparisons (RWKV is always included):
 `["prophet", "naive", "chronos"]` by default; add `"timestral"` to include it.
 `holdout.sample_percent` defaults to 100; set it to e.g. 1 for a seeded 1% sample
 of the saved holdout tables. `sample_selection.json` records the selected sources.
 All models use those same sources, origins and historical context.
+
+The leading accuracy metric is **MASE** (`primary_metric="mase"`). For each
+target and origin, the denominator is the mean absolute lag-`m` difference in
+the historical target context, with `holdout.mase_seasonality=1` by default.
+MASE is the mean absolute forecast error divided by that scale. Only finite
+historical pairs enter the scale; future observations never enter it. The
+history uses the same context cap as the models. Configure a different `m`
+only when a common seasonal period is appropriate for the evaluated tables.
+The default does not assume that every generated table has period 16.
+
+`pooled.<model>.mase` averages scaled absolute errors using the configured lead
+weights, with equal total weight per origin and target. The scale is
+saved as `mase_scale` in the prediction parquet files, with per-origin and
+per-table MASE in separate `origin_metrics.json` and `table_metrics.json` files.
+`test_metrics.json` retains aggregates and detail-file links only.
+Constant or insufficient histories have
+undefined MASE: the JSON score is `null` when no valid points remain, with
+`mase_observations` and `mase_undefined_observations` reporting coverage. No
+epsilon or replacement denominator is used. RMSE, MAE, normalized RMSE and
+RWKV pinball loss remain secondary metrics. MASE below 1 beats the historical
+one-step naive MAE used for scaling; it does not necessarily beat the naive
+baseline's out-of-sample, 16-step patch forecast.
+
+The additional `table_summary.models.<model>.<metric>` reports `mean`, `median`,
+`p10` and `p90` across **per-table** scores, with each table weighted equally.
+This covers MASE, RMSE, MAE, normalized RMSE and RWKV normalized pinball.
+Undefined/nonfinite scores are omitted and explicitly counted as
+`undefined_tables`, alongside `valid_tables`. Percentiles use linear
+interpolation. A mean of table RMSEs is a different statistic from pooled RMSE;
+pooled RMSE takes the square root after weighted squared-error aggregation.
+The leaderboard exposes the table MASE mean, median, p10 and p90 directly,
+alongside pooled weighted MASE and `median_absolute_scaled_error` across points.
+
+Every completed run also writes `error_distributions.html`: interactive,
+overlaid Gaussian kernel densities with distinct colors and transparent fills
+for all selected models. Each table contributes one score. By default, KDE is
+estimated in `log(1 + error)` space to show both ordinary errors and extreme
+tails without dropping or clipping cases. The axis label states this transform;
+hover displays the original error. Areas under each model's density equal one
+(approximately on the finite plotting grid). Density values are in transformed
+space, not density per raw-error unit. Constant samples appear as labeled
+markers rather than an invented smooth density. Raw JSON metrics and summary
+percentiles always stay on the original metric scale.
+
+Configure `plot.error_distribution` with `enabled` (default true), `axis`
+(`"log1p"` or `"linear"`) and `grid_points` (default 512, minimum 32).
+To add these summaries and plots to an already completed run, without rerunning
+any forecasts or loading models:
+
+```powershell
+uv run python .\src\06_holdout_test\error_distribution.py
+uv run python .\src\06_holdout_test\error_distribution.py --config .\configs\holdout_447m_current.json
+```
+
+This moves embedded detail lists into separate JSON files, updates aggregate
+fields and writes error and latency distribution plots. Stored forecasts and pooled scores remain
+unchanged.
+
+Every model is also measured for **end-to-end local request latency**. A
+request contains one table at one origin, all its targets and past covariates,
+and asks for four patches (64 timesteps). Every model uses that same horizon, including
+with four complete future tokens available for scoring. Requests run
+serially with batch size 1, and their model order rotates across origins.
+This replaces the old holdout `inference_batch_size` setting; training and
+validation batching are unaffected.
+
+Timing starts with the historical CPU request payload already constructed,
+includes adapter preprocessing/tokenization, device transfers and forecasting,
+and ends with the forecast available on CPU. GPU requests synchronize their
+device before and after timing. Prophet timing includes all covariate and
+target fits needed for the request. Downloads, model loading, parquet reads,
+shared dataframe/tensor payload construction, scoring, plotting and file writes
+are excluded. Model loading is reported separately. These are the existing
+model configurations: RWKV emits its configured quantiles, Chronos requests a
+median and Timestral returns its default forecast distribution. Parameter count,
+parameter dtype and device are reported rather than assuming equal model sizes
+or precision. No architecture or model precision was changed for this benchmark.
+
+`holdout.latency.warmup_requests=1` performs one unscored request per model at
+the first origin; `repeats=1` times each subsequent scored request once. Increase
+`repeats` for repeated measurements (only the first scored output enters accuracy
+metrics). All warmup durations are retained separately. Warmup occurs only at
+the first origin, so later shape-specific compilation is included in measured
+latency. Set warmup to 0 to include initial cold-start work in scored latency.
+
+The outputs include:
+
+- `test_metrics.json`: MASE-ranked `leaderboard`, `latency` mean/median/p95/min/max
+  milliseconds, context-length buckets, and `paired_latency` ratios. A paired
+  RWKV/baseline ratio above 1 means RWKV took longer on matching requests.
+- `request_latencies.parquet`: all individual warmup and scored requests, with
+  source, origin, context length, target/covariate counts, order and repeat.
+- `request_latencies.jsonl`: the same raw timings appended after each completed
+  table, preserving completed-table measurements if the run is interrupted.
+- `test_metrics_progress.json`: progress after every table; latency summaries
+  refresh at the INFO progress interval (100 tables by default) and completion.
+
+Run on an otherwise idle GPU to compare latency; concurrent GPU workloads can
+distort timings. This measures serial local request latency, not serving
+throughput under batching or concurrent traffic. New metrics apply on the next
+holdout invocation; an already-running Python process keeps its imported code.
+See the [MASE and latency audit](../../docs/audits/2026-10-30/mase_latency/REPORT.md)
+for definitions, references and verification.
+
 Prophet now uses historical covariates by default (`prophet.use_covariates=true`).
 It forecasts each nonconstant covariate with Prophet, then uses those forecasts
 as regressors for its outcome prediction (`prophet.covariate_forecast="prophet"`).
@@ -69,9 +264,30 @@ metrics and timing use DEBUG; Prophet/Stan fit chatter is suppressed while
 warnings and errors remain visible. The live progress file still updates after
 every table.
 
-An epoch recovery checkpoint (`latest_checkpoint.pt`) serves training resume;
-testing uses the exported `model.pt`. If no export exists, this stage explains
-that training must finish first. Results from earlier evaluations stay in their
+Inference graph coverage is recorded under `rwkv_inference` in final metrics
+and the live progress file. Inspect `replay_coverage`, `fallback_requests`,
+`fallback_reasons`, `cached_profiles` and `capture_seconds` when diagnosing
+latency. The default allows 256 profiles with a tracked 1.5-GiB graph-cache
+budget; it previously allowed only eight, which could silently leave most
+variable/context/horizon combinations uncached. Uncached requests now retain
+the forward-only inference implementation. The timing protocol still includes
+first-use capture costs after the initial warmup, so cold p95 can exceed warm
+p95. Individual capture logs use DEBUG, and saturation emits a warning once
+per reason. See the [cache regression audit](../../docs/audits/2026-11-03/inference_cache/REPORT.md).
+
+`holdout.graph_min_profile_requests=8` admits only recurring profiles for graph
+capture. Planning uses source metadata and the existing deterministic requests;
+it neither makes extra forecasts nor changes the request latency boundary.
+`graph_profile_plan` records estimated coverage. Rare shapes use forward-only
+execution and appear as `low_reuse` fallbacks. Set the threshold to 1 to capture
+every encountered profile that fits the cache limits. This avoids reporting
+good warm medians while spending excessive time capturing rare shapes in a
+small holdout sample.
+
+An epoch recovery checkpoint (`latest_checkpoint.pt`) serves training resume
+and can supply its saved best validation weights for testing before export.
+Testing selects it when newer than `model.pt`, unless `holdout.checkpoint` pins
+a file. Results from earlier evaluations stay in their
 previous directories; rerunning this stage replaces its fixed output filenames.
 
 See [the stage separation audit](../../docs/audits/2026-10-29/separate_holdout_stage/REPORT.md).

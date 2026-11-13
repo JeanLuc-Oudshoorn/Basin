@@ -31,6 +31,7 @@ class GeneratorTests(unittest.TestCase):
             max_covariates=3,
             max_lag=3,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model()
         for node in model["nodes"][1:] + [model["outcome"]]:
@@ -59,6 +60,7 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=4,
             max_covariates=4,
             switching_probability=0,
+            process_episode_probability=0,
             noise_free_covariate_probability=1,
             edge_probability=0,
             delayed_probability=0,
@@ -152,6 +154,45 @@ class GeneratorTests(unittest.TestCase):
                 for j in range(i)
             )
         )
+
+    def test_square_wave_partial_sums_and_six_odd_harmonics(self):
+        # Textbook square-wave partial sums require no new evaluator or family:
+        # sin(theta) + sin(3*theta)/3 + ... is already a saved Fourier equation.
+        time = np.arange(8192) * 96 / 8192
+        phase = 2 * np.pi * time / 96
+        target = np.where(np.sin(phase) >= 0, 1.0, -1.0)
+        errors = []
+        for terms in (1, 2, 3, 6):
+            orders = np.arange(1, 2 * terms, 2)
+            season = {
+                "period": 96,
+                "phase": 0.0,
+                "amplitude": 1.0,
+                "modulation": 0.0,
+                "modulation_period": 96,
+                "fourier": {
+                    "family": "pulse",
+                    "orders": orders.tolist(),
+                    "start": {
+                        "cos": [0.0] * terms,
+                        "sin": (4 / (np.pi * orders)).tolist(),
+                    },
+                },
+            }
+            curve = OperationalSCMGenerator._seasonal([season], time)
+            expected = sum(4 / (np.pi * k) * np.sin(k * phase) for k in orders)
+            np.testing.assert_allclose(curve, expected, atol=1e-14)
+            restored = json.loads(json.dumps(season))
+            np.testing.assert_array_equal(
+                curve, OperationalSCMGenerator._seasonal([restored], time)
+            )
+            errors.append(np.mean((curve - target) ** 2))
+        self.assertTrue(np.all(np.diff(errors) < 0))
+        spectrum = np.fft.rfft(curve) / len(curve)
+        np.testing.assert_allclose(
+            2 * np.abs(spectrum[orders]), 4 / (np.pi * orders), atol=1e-14
+        )
+        np.testing.assert_allclose(spectrum[np.arange(0, 13, 2)], 0, atol=1e-14)
 
     def test_fourier_evolution_prefix_and_known_coefficients(self):
         generator = OperationalSCMGenerator(
@@ -253,7 +294,7 @@ class GeneratorTests(unittest.TestCase):
                 min_rows=2056,
                 max_rows=2056,
                 max_lag=1,
-                hidden_probability=1,
+                visible_covariate_lambda=0,
                 save_scm=False,
                 save_plot=False,
                 save_dag=False,
@@ -301,6 +342,8 @@ class GeneratorTests(unittest.TestCase):
     @staticmethod
     def _quiet_process(spec):
         # Remove unrelated mechanisms to make temporal assertions analytical.
+        if spec.get("kind") in ("bernoulli", "markov"):
+            spec["kind"] = "process"
         spec.update(
             edges=[],
             interaction=0,
@@ -316,10 +359,15 @@ class GeneratorTests(unittest.TestCase):
             heteroskedasticity=0,
             quantization_step=0,
             noise={"kind": "normal", "location": 0, "scale": 0},
+            shock_decay=0,
+            event_mode="reset",
+            event_slope=0,
+            quantization_offset=0,
         )
         spec.update(white_noise_scale=0, outcome_ar_weights=[], event_lag=0)
         spec.pop("level_limit", None)
         spec.pop("operation", None)
+        spec.pop("sensor", None)
         spec.pop("parent_combination", None)
         spec.pop("node_link", None)
         spec.pop("trend", None)
@@ -336,6 +384,7 @@ class GeneratorTests(unittest.TestCase):
             max_covariates=3,
             max_lag=1,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model()
         for spec in model["nodes"][1:] + [model["outcome"]]:
@@ -370,6 +419,7 @@ class GeneratorTests(unittest.TestCase):
             max_covariates=3,
             max_lag=5,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model()
         for spec in model["nodes"][1:] + [model["outcome"]]:
@@ -507,6 +557,8 @@ class GeneratorTests(unittest.TestCase):
         weights = {name: float(name == "perlin") for name in generator.NOISES}
         perlin = OperationalSCMGenerator(
             "unused",
+            discrete_covariate_probability=0,
+            process_episode_probability=0,
             noise_free_covariate_probability=0,
             noise_weights=weights,
             min_rows=100,
@@ -566,6 +618,8 @@ class GeneratorTests(unittest.TestCase):
         weights = {name: float(name == "pink") for name in generator.NOISES}
         pink = OperationalSCMGenerator(
             "unused",
+            discrete_covariate_probability=0,
+            process_episode_probability=0,
             noise_free_covariate_probability=0,
             noise_weights=weights,
             min_rows=30,
@@ -641,6 +695,7 @@ class GeneratorTests(unittest.TestCase):
             generator = OperationalSCMGenerator(
                 directory,
                 seed=43,
+                sign_inversion_probability=0,
                 min_rows=100,
                 max_rows=100,
                 min_covariates=3,
@@ -700,6 +755,7 @@ class GeneratorTests(unittest.TestCase):
             min_rows=100,
             max_rows=100,
             switching_probability=0,
+            process_episode_probability=0,
             multiplicative_trend_probability=1,
         )
         model = generator.sample_model(trend_free=False)
@@ -734,6 +790,7 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=3,
             max_covariates=3,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model(trend_free=True)
         for node in model["nodes"][1:] + [model["outcome"]]:
@@ -770,6 +827,7 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=3,
             max_covariates=3,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model(trend_free=True)
         for node in model["nodes"][1:] + [model["outcome"]]:
@@ -893,6 +951,7 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=3,
             max_covariates=3,
             switching_probability=0,
+            process_episode_probability=0,
         )
         draws = np.array([generator._sample_covariate_lag() for _ in range(10000)])
         self.assertTrue(0.08 < np.mean(draws == 0) < 0.12)
@@ -929,6 +988,7 @@ class GeneratorTests(unittest.TestCase):
         # is not yet available. Keep this valid feedback path supported.
         valid = copy.deepcopy(model)
         valid["nodes"][1]["edges"] = [generator._edge("covariate_02", 10)]
+        valid["nodes"][1].pop("parent_combination", None)
         self.assertTrue(np.isfinite(generator.simulate(valid).to_numpy()).all())
 
     def test_outcome_centered_dag_preserves_explicit_edges(self):
@@ -1005,6 +1065,7 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=3,
             max_covariates=3,
             switching_probability=0,
+            process_episode_probability=0,
         )
         model = generator.sample_model()
         for node in model["nodes"][1:] + [model["outcome"]]:
@@ -1080,6 +1141,7 @@ class GeneratorTests(unittest.TestCase):
             "unused",
             noise_weights=weights,
             switching_probability=0,
+            process_episode_probability=0,
             edge_probability=0,
             delayed_probability=0,
         )
@@ -1179,11 +1241,18 @@ class GeneratorTests(unittest.TestCase):
             min_covariates=4,
             max_covariates=4,
             switching_probability=1,
+            process_episode_probability=0,
             max_lag=5,
         )
         model = generator.sample_model()
         switch = next(n for n in model["nodes"] if n["kind"] == "switch")
-        switch.update(visible=True, on_duration=[6, 6], off_duration=[4, 4])
+        switch.update(
+            visible=True,
+            profile="alternating",
+            initial_on=True,
+            on_duration=[6, 6],
+            off_duration=[4, 4],
+        )
         for node in [n for n in model["nodes"] if n["kind"] == "process"] + [
             model["outcome"]
         ]:

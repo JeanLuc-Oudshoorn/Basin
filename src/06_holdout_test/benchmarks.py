@@ -2,6 +2,7 @@
 
 import hashlib
 import math
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -159,6 +160,7 @@ class FoundationBenchmarks:
                 device,
                 cache,
             )
+            started = perf_counter()
             if name == "chronos":
                 from chronos import Chronos2Pipeline
 
@@ -196,13 +198,16 @@ class FoundationBenchmarks:
                 "point_forecast": "median",
                 "inputs": "historical targets and time-matched past covariates",
                 "authentication": "anonymous token=False",
+                "load_seconds": perf_counter() - started,
             }
             logger.info("Loaded benchmark {} parameters={:,}", name, parameters)
 
     @torch.inference_mode()
-    def predict(self, contexts, horizon):
+    def predict(self, contexts, horizon, *, model_names=None):
         predictions = [{} for _ in contexts]
         for name, model in self.models.items():
+            if model_names is not None and name not in model_names:
+                continue
             if name == "chronos":
                 inputs = []
                 for context in contexts:

@@ -4,19 +4,60 @@ Sampling ranges are priors, not claims about a particular industry. All sampled
 parameters are saved. Evaluation resamples innovations, never the equations.
 """
 
+import copy
 import json
 import math
 import os
 import sys
 import uuid
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import date
 from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+try:
+    from .generation_runtime import (
+        GenerationProgress,
+        coarsen_frame,
+        generate_batch,
+        generate_worker_batch,
+        initialize_worker,
+        invert_frame,
+    )
+except ImportError:
+    from generation_runtime import (
+        GenerationProgress,
+        coarsen_frame,
+        generate_batch,
+        generate_worker_batch,
+        initialize_worker,
+        invert_frame,
+    )
+
+try:
+    from .process_mechanisms import (
+        DISCRETE_KINDS,
+        EXOGENOUS_KINDS,
+        FORMULA_FAMILIES,
+        discrete_path,
+        episode_envelope,
+        formula_path,
+        sensor_reading,
+    )
+except ImportError:
+    from process_mechanisms import (
+        DISCRETE_KINDS,
+        EXOGENOUS_KINDS,
+        FORMULA_FAMILIES,
+        discrete_path,
+        episode_envelope,
+        formula_path,
+        sensor_reading,
+    )
 
 try:
     from .effect_mechanisms import (
@@ -117,6 +158,48 @@ class OperationalSCMGenerator:
         "joint_power": (0.2, 1.8),
         "joint_mlp_weight_scale": (0.3, 1.5),
         "joint_mlp_width": (3, 12),
+        "binary_probability": (0.03, 0.97),
+        "markov_state_count": (3, 6),
+        "markov_dwell_fraction": (0.02, 0.5),
+        "markov_concentration": (0.2, 2.0),
+        "markov_level_scale": (0.5, 10.0),
+        "episode_start_fraction": (0.08, 0.35),
+        "episode_stop_fraction": (0.58, 0.82),
+        "episode_ramp_fraction": (0.05, 0.18),
+        "episode_amplitude": (2.0, 12.0),
+        "episode_detail_fraction": (0.05, 0.35),
+        "episode_noise_fraction": (0.005, 0.08),
+        "episode_idle_noise_fraction": (0.0001, 0.003),
+        "process_idle_fraction": (0.0, 0.8),
+        "process_ramp_fraction": (0.005, 0.5),
+        "process_active_fraction": (0.08, 0.8),
+        "process_level_count": (2, 5),
+        "process_level": (0.2, 1.6),
+        "process_transition_fraction": (0.005, 0.15),
+        "process_curvature": (0.4, 4.0),
+        "process_priming_fraction": (0.005, 0.12),
+        "formula_amplitude": (0.3, 6.0),
+        "formula_offset": (-2.0, 2.0),
+        "formula_power": (0.35, 3.5),
+        "formula_center": (0.1, 0.9),
+        "formula_width_fraction": (0.02, 0.35),
+        "formula_period_fraction": (0.04, 0.7),
+        "formula_decay": (0.2, 8.0),
+        "formula_chirp": (-0.8, 3.0),
+        "formula_noise_fraction": (0.005, 0.15),
+        "sensor_bound_distance": (0.2, 1.5),
+        "switch_long_on_fraction": (0.1, 0.7),
+        "switch_long_off_fraction": (0.2, 1.2),
+    }
+    DEFAULT_DISCRETE_WEIGHTS = {
+        "bernoulli": 0.35,
+        "binary_markov": 0.35,
+        "categorical_markov": 0.30,
+    }
+    DEFAULT_SWITCH_PROFILE_WEIGHTS = {
+        "alternating": 0.4,
+        "long_dwell": 0.5,
+        "single_episode": 0.1,
     }
     BASE_NOISES = (
         "normal",
@@ -263,7 +346,7 @@ class OperationalSCMGenerator:
         max_covariates=18,
         max_lag=192,
         max_lag_count=6,
-        hidden_probability=0.35,
+        visible_covariate_lambda=1.3,
         edge_probability=0.18,
         direct_probability=0.65,
         delayed_probability=0.15,
@@ -273,6 +356,14 @@ class OperationalSCMGenerator:
         trend_free_fraction=0.5,
         residual_history_probability=0.08,
         switching_probability=0.3,
+        process_episode_probability=0.02,
+        process_multilevel_probability=0.55,
+        process_priming_probability=0.30,
+        formula_covariate_probability=0.08,
+        discrete_covariate_probability=0.25,
+        sensor_bounds_probability=0.01,
+        discrete_weights=None,
+        switch_profile_weights=None,
         multiplicative_trend_probability=0.1,
         multiplicative_constant_noise_probability=0.05,
         multiplicative_constant_seasonality_probability=0.05,
@@ -303,6 +394,11 @@ class OperationalSCMGenerator:
         plot_covariates=True,
         save_dag=True,
         render_workers=None,
+        generation_workers=1,
+        generation_batch_size=16,
+        progress_interval=1.0,
+        coarse_copy_probability=0.03,
+        sign_inversion_probability=0.03,
     ):
         settings = locals().copy()
         self._auto_render_workers = render_workers is None
@@ -315,6 +411,19 @@ class OperationalSCMGenerator:
         ):
             raise ValueError("render_workers must be a positive integer or None")
         self.render_workers = render_workers
+        self._seeded_generation = generation_workers != 1
+        if generation_workers is None:
+            generation_workers = min(8, max(1, (os.cpu_count() or 2) // 2))
+        for name, value in (
+            ("generation_workers", generation_workers),
+            ("generation_batch_size", generation_batch_size),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            setattr(self, name, value)
+        if not np.isfinite(progress_interval) or progress_interval <= 0:
+            raise ValueError("progress_interval must be finite and positive")
+        self.progress_interval = float(progress_interval)
         for name in (
             "min_rows",
             "max_rows",
@@ -336,7 +445,6 @@ class OperationalSCMGenerator:
                 "Invalid row/covariate bounds; at least 3 covariates required"
             )
         for name in (
-            "hidden_probability",
             "edge_probability",
             "direct_probability",
             "delayed_probability",
@@ -346,6 +454,14 @@ class OperationalSCMGenerator:
             "trend_free_fraction",
             "residual_history_probability",
             "switching_probability",
+            "process_episode_probability",
+            "process_multilevel_probability",
+            "process_priming_probability",
+            "formula_covariate_probability",
+            "discrete_covariate_probability",
+            "sensor_bounds_probability",
+            "coarse_copy_probability",
+            "sign_inversion_probability",
             "multiplicative_trend_probability",
             "variance_dynamics_probability",
             "multiplicative_constant_noise_probability",
@@ -363,6 +479,13 @@ class OperationalSCMGenerator:
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
             setattr(self, name, settings[name])
+        if (
+            isinstance(visible_covariate_lambda, bool)
+            or not np.isfinite(visible_covariate_lambda)
+            or visible_covariate_lambda < 0
+        ):
+            raise ValueError("visible_covariate_lambda must be finite and nonnegative")
+        self.visible_covariate_lambda = float(visible_covariate_lambda)
         if not np.isfinite(covariate_delay_scale) or covariate_delay_scale <= 0:
             raise ValueError("covariate_delay_scale must be finite and positive")
         self.covariate_delay_scale = float(covariate_delay_scale)
@@ -377,6 +500,12 @@ class OperationalSCMGenerator:
                 parent_combination_weights,
             ),
             ("node_link_weights", self.DEFAULT_NODE_LINK_WEIGHTS, node_link_weights),
+            ("discrete_weights", self.DEFAULT_DISCRETE_WEIGHTS, discrete_weights),
+            (
+                "switch_profile_weights",
+                self.DEFAULT_SWITCH_PROFILE_WEIGHTS,
+                switch_profile_weights,
+            ),
         ):
             weights = dict(defaults)
             for name, weight in (overrides or {}).items():
@@ -408,8 +537,17 @@ class OperationalSCMGenerator:
             ):
                 raise ValueError(f"Invalid bounds for {name}")
             self.priors[name] = tuple(bounds)
-        signed = {"noise_location", "effect_offset", "persistence", "baseline"}
+        signed = {
+            "noise_location",
+            "effect_offset",
+            "persistence",
+            "baseline",
+            "formula_offset",
+            "formula_chirp",
+        }
         for name, (low, high) in self.priors.items():
+            if name == "process_idle_fraction" and 0 <= low <= high < 1:
+                continue
             if name not in signed and low <= 0:
                 raise ValueError(f"{name} bounds must be positive")
         if self.priors["student_df"][0] <= 2:
@@ -426,10 +564,34 @@ class OperationalSCMGenerator:
         ):
             if self.priors[name][1] >= 1:
                 raise ValueError(f"{name} must be below 1")
-        for name in ("effect_delay_steps", "effect_kernel_stages", "joint_mlp_width"):
+        for name in (
+            "effect_delay_steps",
+            "effect_kernel_stages",
+            "joint_mlp_width",
+            "markov_state_count",
+            "process_level_count",
+        ):
             low, high = self.priors[name]
             if int(low) != low or int(high) != high or high > 1024:
                 raise ValueError(f"{name} must have integer bounds within [1, 1024]")
+        if self.priors["markov_state_count"][0] < 3:
+            raise ValueError(
+                "markov_state_count must be at least three; binary chains have their own family"
+            )
+        for name in (
+            "binary_probability",
+            "episode_start_fraction",
+            "episode_stop_fraction",
+            "episode_ramp_fraction",
+            "episode_detail_fraction",
+        ):
+            if self.priors[name][1] >= 1:
+                raise ValueError(f"{name} must be below one")
+        if (
+            self.priors["episode_start_fraction"][1]
+            >= self.priors["episode_stop_fraction"][0]
+        ):
+            raise ValueError("Episode start bounds must precede stop bounds")
         low, high = self.priors["perlin_octaves"]
         if int(low) != low or int(high) != high or low < 1 or high > 16:
             raise ValueError("perlin_octaves must have integer bounds within [1, 16]")
@@ -939,6 +1101,286 @@ class OperationalSCMGenerator:
             "numeric_limit": self.joint_numeric_limit,
         }
 
+    def _sample_discrete(self, name, rows):
+        r = self.rng
+        families = list(self.discrete_weights)
+        weights = np.array(list(self.discrete_weights.values()), float)
+        family = str(r.choice(families, p=weights / weights.sum()))
+        node = {
+            "name": name,
+            "kind": "bernoulli" if family == "bernoulli" else "markov",
+            "visible": False,  # Visibility is assigned jointly after sampling the SCM.
+            "edges": [],
+            "family": family,
+        }
+        if family == "bernoulli":
+            node["probability"] = self._draw("binary_probability")
+            return node
+        low, high = self.priors["markov_state_count"]
+        count = (
+            2 if family == "binary_markov" else int(r.integers(int(low), int(high) + 1))
+        )
+        values = np.arange(count, dtype=float)
+        if count > 2 and r.random() < 0.5:
+            values = np.sort(
+                r.uniform(-1, 1, count) * self._draw("markov_level_scale", log=True)
+            )
+        transition = np.zeros((count, count))
+        for state in range(count):
+            # Independently sampled dwell times and exit destinations create
+            # asymmetric, persistent, non-periodic operating modes.
+            dwell = max(2.0, rows * self._draw("markov_dwell_fraction", log=True))
+            exit_probability = 1 / dwell
+            destinations = np.arange(count) != state
+            transition[state, destinations] = (
+                r.dirichlet(np.full(count - 1, self._draw("markov_concentration")))
+                * exit_probability
+            )
+            transition[state, state] = 1 - exit_probability
+        node.update(
+            values=values.tolist(),
+            transition=transition.tolist(),
+            initial_state=int(r.integers(count)),
+        )
+        return node
+
+    def _sample_switch(self, rows, force_episode=False):
+        r = self.rng
+        profiles = list(self.switch_profile_weights)
+        weights = np.array(list(self.switch_profile_weights.values()), float)
+        profile = (
+            "single_episode"
+            if force_episode
+            else str(r.choice(profiles, p=weights / weights.sum()))
+        )
+        node = {
+            "name": "covariate_01",
+            "kind": "switch",
+            "profile": profile,
+            "visible": False,
+            "edges": [],
+            "initial_on": bool(r.integers(2)),
+        }
+        if profile == "single_episode":
+            node.update(
+                start=int(rows * self._draw("episode_start_fraction")),
+                stop=int(rows * self._draw("episode_stop_fraction")),
+                initial_on=False,
+            )
+        elif profile == "long_dwell":
+            for role in ("on", "off"):
+                duration = max(
+                    2, int(rows * self._draw(f"switch_long_{role}_fraction", log=True))
+                )
+                node[f"{role}_duration"] = [
+                    max(1, duration // 2),
+                    max(2, int(1.5 * duration)),
+                ]
+        else:
+            node.update(
+                on_duration=[20, max(30, min(rows // 2, 200))],
+                off_duration=[5, max(10, min(rows // 5, 80))],
+            )
+        return node
+
+    def _sample_process_driver(self, name, rows):
+        """A sampled exogenous machine program, rather than a binary on/off clock.
+
+        Independent duration weights allow different idle tails and rise/fall
+        ratios. Rescale the whole program BEFORE simulation, never the values.
+        Internal level changes are actual setpoint commands with their own ramps.
+        """
+        r = self.rng
+        before = (
+            self._draw("process_idle_fraction")
+            if r.random() < 0.75
+            else r.uniform(0, 0.015)
+        )
+        after = (
+            self._draw("process_idle_fraction")
+            if r.random() < 0.75
+            else r.uniform(0, 0.015)
+        )
+        weights = np.array(
+            [
+                before,
+                self._draw("process_ramp_fraction", log=True),
+                self._draw("process_active_fraction"),
+                self._draw("process_ramp_fraction", log=True),
+                after,
+            ]
+        )
+        # Reserve at least one observation for rise, active operation and release.
+        lengths = np.floor(weights / weights.sum() * (rows - 3)).astype(int)
+        lengths[[1, 2, 3]] += 1
+        lengths[2] += rows - int(lengths.sum())
+        idle, rise, active, fall, tail = map(int, lengths)
+        start, stop = idle, idle + rise + active
+
+        def command(time, target, steps):
+            return {
+                "start": int(time),
+                "target": float(target),
+                "steps": int(steps),
+                "shape": str(
+                    r.choice(["linear", "smoothstep", "cosine", "power", "release"])
+                ),
+                "curvature": self._draw("process_curvature", log=True),
+            }
+
+        transitions = [command(start, 1.0, rise)]
+        if active > 3 and r.random() < self.process_multilevel_probability:
+            low, high = self.priors["process_level_count"]
+            levels = min(active - 1, int(r.integers(int(low), int(high) + 1)))
+            changes = sorted(
+                r.choice(np.arange(start + rise, stop), size=levels - 1, replace=False)
+            )
+            for time in changes:
+                steps = max(
+                    1, int(rows * self._draw("process_transition_fraction", log=True))
+                )
+                transitions.append(command(time, self._draw("process_level"), steps))
+        transitions.append(command(stop, 0.0, fall))
+        priming = []
+        if start >= 4 and r.random() < self.process_priming_probability:
+            for _ in range(int(r.integers(1, 5))):
+                duration = int(r.integers(2, max(3, min(start, max(3, rows // 20)))))
+                priming.append(
+                    {
+                        "start": int(r.integers(max(1, start - duration + 1))),
+                        "duration": duration,
+                        "amplitude": self._draw("process_priming_fraction"),
+                    }
+                )
+        return {
+            "name": name,
+            "kind": "formula",
+            "family": "process_run",
+            "visible": False,
+            "edges": [],
+            "start": start,
+            "stop": stop,
+            "idle_after": tail,
+            "initial_level": 0.0,
+            "transitions": transitions,
+            "priming": priming,
+            "amplitude": 1.0,
+            "offset": 0.0,
+            "noise_free": True,
+            "noise": {"kind": "normal", "location": 0.0, "scale": 0.0},
+        }
+
+    def _sample_formula(self, name, rows):
+        """Formulaic source plus optional saved innovations, usable in any DAG."""
+        r = self.rng
+        family = str(r.choice(FORMULA_FAMILIES))
+        if family == "state_machine":
+            node = self._sample_process_driver(name, rows)
+            node["family"] = family
+        else:
+            node = {
+                "name": name,
+                "kind": "formula",
+                "family": family,
+                "edges": [],
+                "visible": False,
+                "parameters": {
+                    "duration": rows,
+                    "period": max(
+                        4.0, rows * self._draw("formula_period_fraction", log=True)
+                    ),
+                    "phase": float(r.uniform(-np.pi, np.pi)),
+                    "power": self._draw("formula_power"),
+                    "center": self._draw("formula_center"),
+                    "width": self._draw("formula_width_fraction", log=True),
+                    "decay": self._draw("formula_decay", log=True),
+                    "chirp": self._draw("formula_chirp"),
+                },
+            }
+        node.update(
+            amplitude=self._draw("formula_amplitude", log=True, signed=True),
+            offset=self._draw("formula_offset"),
+            noise_free=bool(r.random() < self.noise_free_covariate_probability),
+        )
+        if family == "chirp":
+            p = node["parameters"]
+            # Keep the fastest recorded carrier below Nyquist, as for Fourier seasons.
+            p["period"] = max(p["period"], 2.25 * (1 + max(0.0, p["chirp"])))
+        noise = self._sample_noise()
+        noise.update(
+            location=0.0,
+            scale=0.0
+            if node["noise_free"]
+            else abs(node["amplitude"])
+            * self._draw("formula_noise_fraction", log=True),
+        )
+        node["noise"] = noise
+        return node
+
+    def _sample_episode(self, outcome, command, rows):
+        lag = min(self._sample_covariate_lag(), max(0, rows - command["stop"] - 2))
+        tail = max(1, int(0.04 * rows))
+        rise = min(
+            int(rows * self._draw("episode_ramp_fraction")),
+            command["stop"] - command["start"],
+        )
+        fall = min(
+            int(rows * self._draw("episode_ramp_fraction")),
+            rows - command["stop"] - lag - tail,
+        )
+        if command.get("kind") == "formula":
+            lag = min(lag, command["idle_after"])
+            rise = command["transitions"][0]["steps"]
+            fall = command["transitions"][-1]["steps"]
+        amplitude = outcome["scale"] * self._draw("episode_amplitude", log=True)
+        return {
+            "schema_version": 2,
+            "mode": "episode",
+            "activity_source": "direct"
+            if command.get("kind") == "formula"
+            else "binary_response",
+            "parent": command["name"],
+            "lag": lag,
+            "idle_value": 0.0 if self.rng.random() < 0.85 else outcome["baseline"],
+            "amplitude": amplitude,
+            "rise_steps": max(1, rise),
+            "fall_steps": max(1, fall),
+            "ramp_shape": str(self.rng.choice(["smoothstep", "cosine", "linear"])),
+            "detail_fraction": self._draw("episode_detail_fraction"),
+            "noise_fraction": self._draw("episode_noise_fraction", log=True)
+            if self.rng.random() < 0.85
+            else 0.0,
+            "seasonal_fraction": self._draw("episode_detail_fraction"),
+            "detail_scale": max(1.0, abs(outcome["baseline"] / outcome["scale"])),
+            "idle_noise_scale": amplitude
+            * self._draw("episode_idle_noise_fraction", log=True)
+            if self.rng.random() < 0.5
+            else 0.0,
+        }
+
+    def _sample_sensor(self, spec, is_outcome):
+        operation = spec.get("operation", {})
+        if operation.get("mode") == "episode":
+            center = operation["idle_value"] + operation["amplitude"] / 2
+            span = operation["amplitude"] / 2
+        else:
+            center = spec["baseline"] if is_outcome else spec["intercept"]
+            span = max(
+                1.0,
+                sum(s["amplitude"] for s in spec["seasons"]) + spec["noise"]["scale"],
+            )
+            if is_outcome:
+                span *= spec["scale"]
+        mode = str(self.rng.choice(["floor", "ceiling", "both"], p=[0.35, 0.35, 0.30]))
+        return {
+            "floor": center - span * self._draw("sensor_bound_distance")
+            if mode != "ceiling"
+            else None,
+            "ceiling": center + span * self._draw("sensor_bound_distance")
+            if mode != "floor"
+            else None,
+        }
+
     @classmethod
     def _effect(cls, edge, value, state=None):
         value = (value - edge["input_offset"]) / edge["input_scale"]
@@ -1060,7 +1502,32 @@ class OperationalSCMGenerator:
         weights = np.asarray(priorities)
         return (weights / weights.sum() * r.uniform(0.1, 0.45)).tolist()
 
-    def sample_model(self, trend_free=None):
+    def _sample_visibility(self, nodes, count=None):
+        """Cap a Poisson count at available sources; choose an unbiased subset.
+
+        Capping (rather than rejection sampling) retains the zero-count mass.
+        Visibility is independent of source type, order and causal importance.
+        An explicit count is useful for controlled comparisons of the same SCM.
+        """
+        if count is None:
+            count = int(self.rng.poisson(self.visible_covariate_lambda))
+        elif isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("visible_covariate_count must be a nonnegative integer")
+        visible = set(
+            self.rng.choice(len(nodes), size=min(count, len(nodes)), replace=False)
+        )
+        for index, node in enumerate(nodes):
+            node["visible"] = index in visible
+        return count
+
+    def sample_model(self, trend_free=None, *, visible_covariate_count=None):
+        """Sample causal equations, then choose which sources are recorded.
+
+        Hiding every source creates a strictly univariate observation without
+        removing latent mechanisms, oscillations, or changes in operating state.
+        The visible count is Poisson distributed, capped at the available sources;
+        there is no univariate batch quota or per-source Bernoulli hiding draw.
+        """
         r = self.rng
         rows = int(r.integers(self.min_rows, self.max_rows + 1))
         trend_free = (
@@ -1076,7 +1543,7 @@ class OperationalSCMGenerator:
                 "name": event,
                 "kind": "event",
                 "edges": [],
-                "visible": bool(r.random() >= self.hidden_probability),
+                "visible": False,
                 "probability": self._draw("event_probability"),
             }
         ]
@@ -1086,18 +1553,13 @@ class OperationalSCMGenerator:
             r.choice(["sparse", "fork", "diamond", "dense"], p=[0.35, 0.35, 0.25, 0.05])
         )
         switch = None
-        if r.random() < self.switching_probability:
+        process_episode = bool(r.random() < self.process_episode_probability)
+        if process_episode or r.random() < self.switching_probability:
             switch = "covariate_01"
             nodes.append(
-                {
-                    "name": switch,
-                    "kind": "switch",
-                    "visible": bool(r.random() >= self.hidden_probability),
-                    "edges": [],
-                    "on_duration": [20, max(30, min(rows // 2, 200))],
-                    "off_duration": [5, max(10, min(rows // 5, 80))],
-                    "initial_on": True,
-                }
+                self._sample_process_driver(switch, rows)
+                if process_episode
+                else self._sample_switch(rows)
             )
 
         def sample_edge(parent, lag=0):
@@ -1107,13 +1569,27 @@ class OperationalSCMGenerator:
             return self._edge(parent, lag, input_domain=domain)
 
         for i in range(len(nodes), count):
+            # Retain at least one continuous process. Additional discrete sources
+            # are genuine SCM inputs and may directly or indirectly drive Y.
+            if (
+                any(n["kind"] == "process" for n in nodes)
+                and r.random() < self.formula_covariate_probability
+            ):
+                nodes.append(self._sample_formula(f"covariate_{i:02d}", rows))
+                continue
+            if (
+                any(n["kind"] == "process" for n in nodes)
+                and r.random() < self.discrete_covariate_probability
+            ):
+                nodes.append(self._sample_discrete(f"covariate_{i:02d}", rows))
+                continue
             node = {
                 "name": f"covariate_{i:02d}",
                 "kind": "process",
                 "domain": "angle"
                 if r.random() < self.angle_covariate_probability
                 else "real",
-                "visible": bool(r.random() >= self.hidden_probability),
+                "visible": False,
                 "edges": [],
                 **self._dynamics(event),
             }
@@ -1123,7 +1599,7 @@ class OperationalSCMGenerator:
                     lag = self._sample_covariate_lag()
                     node["edges"].append(sample_edge(parent["name"], lag))
             # Scaffolds allow deep mediation, shared causes and colliders.
-            # Random extra edges retain diversity; hiding is independently drawn.
+            # Random extra edges retain diversity; visibility is sampled later.
             forced = []
             processes = [n for n in nodes if n["kind"] == "process"]
             if topology == "fork" and len(processes) in (1, 2):
@@ -1142,11 +1618,16 @@ class OperationalSCMGenerator:
                 node["edges"].append(sample_edge(f"outcome_lag_{int(r.choice(lags))}"))
             nodes.append(node)
         processes = [n for n in nodes if n["kind"] == "process"]
-        selected = [n for n in processes if r.random() < self.direct_probability]
+        predictors = [
+            n
+            for n in nodes
+            if n["kind"] in ("process", "formula") or n["kind"] in DISCRETE_KINDS
+        ]
+        selected = [n for n in predictors if r.random() < self.direct_probability]
         # At least two independent inputs when available, selected without a
         # special preference for the last node in topological order.
-        minimum = min(2, len(processes))
-        remaining = [n for n in processes if n not in selected]
+        minimum = min(2, len(predictors))
+        remaining = [n for n in predictors if n not in selected]
         while len(selected) < minimum:
             selected.append(remaining.pop(int(r.integers(len(remaining)))))
         outcome = {
@@ -1232,8 +1713,11 @@ class OperationalSCMGenerator:
                 node["event_lag"] = 0
                 node.pop("ringing", None)
                 node.pop("volatility", None)
-        if switch:
+        if process_episode:
+            outcome["operation"] = self._sample_episode(outcome, nodes[1], rows)
+        elif switch:
             outcome["operation"] = {
+                "schema_version": 2,
                 "parent": switch,
                 "mode": str(r.choice(["shutdown", "reset"], p=[0.7, 0.3])),
                 "lag": self._sample_covariate_lag(),
@@ -1336,11 +1820,27 @@ class OperationalSCMGenerator:
             outcome["trend"] = trend
             for key in ("slope", "slope_walk", "event_slope", "level_jump"):
                 outcome[key] = 0.0
+        for spec in processes + [outcome]:
+            if self.rng.random() < self.sensor_bounds_probability:
+                spec["sensor"] = self._sample_sensor(spec, spec is outcome)
+        # Draw observation randomness first so changing ONLY visibility cannot
+        # change the simulated process, even if subset sampling consumes RNG.
+        observation_seed = int(r.integers(0, 2**63))
+        sampled_visible_count = self._sample_visibility(nodes, visible_covariate_count)
         return {
             "version": 3,
-            "observation_seed": int(r.integers(0, 2**63)),
+            "observation_seed": observation_seed,
             "rows": rows,
             "trend_free": trend_free,
+            "univariate": not any(node["visible"] for node in nodes),
+            "visibility": {
+                "distribution": "poisson"
+                if visible_covariate_count is None
+                else "fixed",
+                "lambda": self.visible_covariate_lambda,
+                "sampled_count": sampled_visible_count,
+                "visible_count": sum(node["visible"] for node in nodes),
+            },
             "burn_in": self.burn_in,
             "lags": lags,
             "lag_roles": lag_roles,
@@ -1356,6 +1856,9 @@ class OperationalSCMGenerator:
             "pairwise_interaction_probability": self.pairwise_interaction_probability,
             "additive_interaction_probability": self.additive_interaction_probability,
             "composite_effect_probability": self.composite_effect_probability,
+            "process_episode": process_episode,
+            "discrete_weights": self.discrete_weights.copy(),
+            "switch_profile_weights": self.switch_profile_weights.copy(),
             "equations": {
                 "process": "x=quantize(intercept+level+seasonal+shock+residual); residual=persistence*previous_residual+forcing+heteroskedastic_noise",
                 "level": "slope+=slope_walk*N(0,1); on event reverse/reset/add event_slope; level+=slope+walk_scale*N(0,1)+event*level_jump",
@@ -1373,6 +1876,10 @@ class OperationalSCMGenerator:
                 "quantization": "offset+step*round((x-offset)/step), bypassed when step=0",
                 "initialization": "States zero except saved slopes; t starts at -burn_in; discard t<0. Outcome-lag edge parents use full normalized historical x internally; exported columns contain only current outcome, time index and visible current covariates.",
                 "graph": "Topological contemporaneous edges plus positive temporal lags. Past values are separate vertices when time is unrolled; innovations are independent.",
+                "episode": "causal finite-rise/fall command envelope; physical y=idle+amplitude*envelope*(1+detail_fraction*tanh(latent/detail_scale)+noise_fraction*tanh(standardized_white_error)+seasonal_fraction*tanh(seasonal))+bounded idle innovation; written to causal history before later rows",
+                "formula_source": "saved clock formula or causal setpoint response plus saved innovation law; no empirical centering or output correction",
+                "sensor": "optional hard floor/ceiling in recorded units; measured values, including clipping, enter causal history",
+                "discrete": "exogenous Bernoulli or saved Markov transition matrix over binary/multi-level values; no added continuous noise",
             },
         }
 
@@ -1593,6 +2100,20 @@ class OperationalSCMGenerator:
             columns.append(t**2)
         if trend.get("event_time") is not None:
             columns.append(np.maximum(0, t - trend["event_time"] / max(1, len(y) - 1)))
+        operation = model["outcome"].get("operation", {})
+        if operation.get("mode") == "episode":
+            # Process humps are structured nonstationary shapes even when both
+            # ends return to idle. Fit the saved causal envelope for screening.
+            source = next(n for n in model["nodes"] if n["name"] == operation["parent"])
+            clock = np.arange(-model["burn_in"], len(y))
+            if operation.get("activity_source") == "direct":
+                activity = formula_path(source, clock - operation.get("lag", 0))
+            else:
+                command = (clock >= source["start"] + operation.get("lag", 0)) & (
+                    clock < source["stop"] + operation.get("lag", 0)
+                )
+                activity = episode_envelope(operation, command)
+            columns.append(activity[model["burn_in"] :])
         design = np.column_stack(columns)
         fitted = design @ np.linalg.lstsq(design, y, rcond=None)[0]
         total = np.sum((y - y.mean()) ** 2)
@@ -1633,6 +2154,28 @@ class OperationalSCMGenerator:
         return values
 
     def simulate(self, model):
+        transform = model.get("observation_transform")
+        if transform:
+            if transform.get("kind") != "sign_inversion":
+                raise ValueError("Unsupported observation transform")
+            source = model.copy()
+            source.pop("observation_transform")
+            # Transform only the observation view; negating inputs inside the
+            # equations would resimulate a different causal realization.
+            return invert_frame(self.simulate(source))
+        selection = model.get("observation_selection")
+        if selection:
+            # The DAG still runs at its ORIGINAL clock rate. Only observations
+            # are thinned; skipping latent updates would change the process.
+            source = model.copy()
+            source.pop("observation_selection")
+            source["rows"] = selection["source_rows"]
+            frame = coarsen_frame(
+                self.simulate(source), selection["window_size"], selection["offset"]
+            )
+            if len(frame) != model["rows"]:
+                raise ValueError("Coarse observation count disagrees with saved SCM")
+            return frame
         if model["version"] == 1:
             try:
                 from .legacy_scm_generator import OperationalSCMGenerator as Legacy
@@ -1663,7 +2206,7 @@ class OperationalSCMGenerator:
         active_nodes = [
             (name, spec)
             for name, spec in zip(names, specs)
-            if spec.get("kind") not in ("event", "switch")
+            if spec.get("kind") not in EXOGENOUS_KINDS
         ]
         # Resolve source buffers, lag aliases and fixed joint-map arrays once.
         # Keep per-row arithmetic and random-draw order identical to replay.
@@ -1691,6 +2234,9 @@ class OperationalSCMGenerator:
                 for event_time in spec.get("forced_event_times", []):
                     history[name][warmup + event_time] = 1
             elif spec.get("kind") == "switch":
+                if spec.get("profile") == "single_episode":
+                    history[name][:] = (time >= spec["start"]) & (time < spec["stop"])
+                    continue
                 # Semi-Markov dwell times create contiguous outages rather than
                 # isolated Bernoulli blips. The node remains binary and can be hidden.
                 position, on = 0, spec["initial_on"]
@@ -1700,6 +2246,12 @@ class OperationalSCMGenerator:
                     history[name][position : position + duration] = int(on)
                     position += duration
                     on = not on
+            elif spec.get("kind") == "formula":
+                history[name][:] = formula_path(spec, time)
+                if spec["noise"]["scale"]:
+                    history[name] += self._noise(r, spec["noise"], length)
+            elif spec.get("kind") in DISCRETE_KINDS:
+                history[name][:] = discrete_path(spec, r, length)
             else:
                 randoms[name] = (
                     self._noise(r, spec["noise"], length),
@@ -1744,6 +2296,31 @@ class OperationalSCMGenerator:
             else np.zeros(length)
         )
         recovery, ramp, previous_on = 1.0, 0.0, True
+        envelopes = {
+            name: (
+                self._delay_values(
+                    history[spec["operation"]["parent"]],
+                    spec["operation"].get("lag", 0),
+                )
+                if spec["operation"].get("activity_source") == "direct"
+                else episode_envelope(
+                    spec["operation"],
+                    self._delay_values(
+                        history[spec["operation"]["parent"]],
+                        spec["operation"].get("lag", 0),
+                    ),
+                )
+            )
+            for name, spec in active_nodes
+            if spec.get("operation", {}).get("mode") == "episode"
+        }
+        outcome_operation = model["outcome"].get("operation", {})
+        measured_outcome = (
+            np.empty(length)
+            if model["outcome"].get("sensor")
+            or outcome_operation.get("schema_version") == 2
+            else None
+        )
 
         def past(name, index):
             return history[name][index] if index >= 0 else 0.0
@@ -1751,6 +2328,7 @@ class OperationalSCMGenerator:
         for i in range(length):
             t = i - warmup
             for name, spec in active_nodes:
+                reading = None
                 noise, walk, slope_walk = randoms[name]
                 event = (
                     past(spec["event_parent"], i - spec.get("event_lag", 0))
@@ -1849,7 +2427,35 @@ class OperationalSCMGenerator:
                 operation = spec.get("operation")
                 if operation:
                     on = bool(past(operation["parent"], i - operation.get("lag", 0)))
-                    if operation["mode"] == "shutdown":
+                    if operation["mode"] == "episode":
+                        activity = envelopes[name][i]
+                        # Preserve visible active-process variation even if a
+                        # large latent offset saturates the parent-detail map.
+                        # These are the existing causal innovations/seasons,
+                        # expressed as saved fractions of process amplitude.
+                        white = (
+                            white_errors[name][i]
+                            / max(spec.get("white_noise_scale", 0), 1e-12)
+                            if name in white_errors
+                            else 0.0
+                        )
+                        texture = operation.get("noise_fraction", 0) * np.tanh(
+                            white
+                        ) + operation.get("seasonal_fraction", 0) * np.tanh(seasonal)
+                        reading = (
+                            operation["idle_value"]
+                            + operation["amplitude"]
+                            * activity
+                            * (
+                                1
+                                + texture
+                                + operation["detail_fraction"]
+                                * np.tanh(value / operation["detail_scale"])
+                            )
+                            + operation["idle_noise_scale"] * np.tanh(innovation)
+                        )
+                        value = (reading - spec["baseline"]) / spec["scale"]
+                    elif operation["mode"] == "shutdown":
                         recovery = (
                             min(1.0, recovery + operation["restart_rate"])
                             if on
@@ -1859,6 +2465,8 @@ class OperationalSCMGenerator:
                             "scale"
                         ]
                         value = flat + recovery * (value - flat)
+                        if not on:
+                            reading = operation["flat_value"]
                     else:
                         # Reset accumulated ramp on each binary transition:
                         # opposite slopes on the two states yield repeating
@@ -1870,11 +2478,28 @@ class OperationalSCMGenerator:
                     previous_on = on
                 if spec.get("domain") == "angle":
                     value = float(np.arctan2(np.sin(value), np.cos(value)))
+                sensor = spec.get("sensor")
+                if name == "outcome" and measured_outcome is not None:
+                    reading = (
+                        spec["baseline"] + spec["scale"] * value
+                        if reading is None
+                        else reading
+                    )
+                    reading = sensor_reading(reading, sensor) if sensor else reading
+                    measured_outcome[i] = reading
+                    # Store the measured value before later rows read its lags.
+                    value = (reading - spec["baseline"]) / spec["scale"]
+                elif sensor:
+                    value = sensor_reading(value, sensor)
                 history[name][i] = value
         outcome = model["outcome"]
-        physical = outcome["baseline"] + outcome["scale"] * history["outcome"]
+        physical = (
+            measured_outcome
+            if measured_outcome is not None
+            else outcome["baseline"] + outcome["scale"] * history["outcome"]
+        )
         operation = outcome.get("operation")
-        if operation and operation["mode"] == "shutdown":
+        if measured_outcome is None and operation and operation["mode"] == "shutdown":
             physical[history[operation["parent"]] == 0] = operation["flat_value"]
         data = {"time_index": np.arange(rows), "outcome": physical[warmup:]}
         for node in model["nodes"]:
@@ -2071,6 +2696,8 @@ class OperationalSCMGenerator:
         for name, spec in [(n["name"], n) for n in model["nodes"]] + [
             ("outcome", model["outcome"])
         ]:
+            if spec.get("kind") in DISCRETE_KINDS + ("formula",) and spec["edges"]:
+                raise ValueError("Discrete and formula source nodes must be exogenous")
             for edge in spec["edges"]:
                 parent, lag = edge["parent"], edge["lag"]
                 if parent.startswith("outcome_lag_"):
@@ -2087,7 +2714,7 @@ class OperationalSCMGenerator:
                     lag += alias_lag
                     parent = "outcome"
                 connect(parent, name, lag, f"w={edge['weight']:.2g}")
-            if spec.get("kind") not in ("event", "switch"):
+            if spec.get("kind") not in EXOGENOUS_KINDS:
                 connect(f"{name} state", name, 1, "state")
                 if spec["event_parent"]:
                     connect(
@@ -2114,7 +2741,7 @@ class OperationalSCMGenerator:
                         spec["ringing"].get("lag", 0),
                         "damped oscillation",
                     )
-            elif spec.get("kind") == "switch":
+            elif spec.get("kind") in ("switch", "markov"):
                 connect(f"{name} state", name, 1, "dwell state")
         for lag, weight in zip(model["lags"], model["outcome"]["ar_weights"]):
             if weight:
@@ -2327,7 +2954,14 @@ class OperationalSCMGenerator:
             xlim=(-4, 4),
             ylim=(-3.8, 3.8),
             aspect="equal",
-            title="Structural causal model: outcome at center\nBold arrows feed Y directly; faint arrows show upstream relationships",
+            title=(
+                "Source SCM: signs before observation inversion\n"
+                if model.get("observation_transform")
+                else "Source SCM: lags in original sample intervals\n"
+                if model.get("observation_selection")
+                else "Structural causal model: outcome at center\n"
+            )
+            + "Bold arrows feed Y directly; faint arrows show upstream relationships",
         )
         figure.text(
             0.5,
@@ -2365,6 +2999,223 @@ class OperationalSCMGenerator:
         figure.savefig(path, dpi=130)
         figure.clear()
 
+    def _sample_accepted_model(self, trend_free, progress=None, completed=0):
+        """Keep the exact original rejection criterion and arithmetic."""
+        for attempt in range(100):
+            if progress:
+                progress.update(completed)
+            model = self.sample_model(trend_free=trend_free)
+            frame = self.simulate(model)
+            score = self.trend_score(frame)
+            strength = self.trend_strength(frame, model)
+            if (trend_free and score <= 0.15) or (not trend_free and strength >= 0.4):
+                break
+        else:
+            raise RuntimeError(
+                "Could not meet trend-profile screening criterion after 100 attempts"
+            )
+        model["quality"] = {
+            "linear_trend_r_squared": score,
+            "screened_trend_free": trend_free,
+            "trend_shape_r_squared": strength,
+            "sampling_attempts": attempt + 1,
+        }
+        return model, frame
+
+    def _write_table(self, model, frame, directory):
+        directory.mkdir(exist_ok=False)
+        frame.to_parquet(
+            directory / "data.parquet",
+            engine="pyarrow",
+            index=False,
+            compression="zstd",
+        )
+        if self.save_scm:
+            (directory / "scm.json").write_text(
+                json.dumps(model, indent=2, allow_nan=False), encoding="utf-8"
+            )
+
+    def _write_coarse_copy(self, model, frame, directory):
+        """Cheap optional extra table, isolated from all simulation RNG draws."""
+        if (
+            len(frame) <= 512
+            or model.get("observation_selection")
+            or model.get("observation_transform")
+            or not self.coarse_copy_probability
+        ):
+            return None
+        # A dedicated seed namespace preserves original outputs, rejection counts,
+        # and subsequent tables when augmentation is enabled or disabled.
+        rng = np.random.default_rng(
+            np.random.SeedSequence([model["observation_seed"], 0xC0A25E])
+        )
+        if rng.random() >= self.coarse_copy_probability:
+            return None
+        window_size = int(rng.integers(2, 6))
+        offset = int(rng.integers(window_size))
+        coarse = coarsen_frame(frame, window_size, offset)
+        selection = {
+            "kind": "fixed_stride",
+            "source_rows": len(frame),
+            "window_size": window_size,
+            "offset": offset,
+            "complete_windows_only": True,
+        }
+        derived = copy.deepcopy(model)
+        derived["rows"] = len(coarse)
+        derived["observation_selection"] = selection
+        # Source screening does not guarantee the thinned view has the same
+        # score. Record that distinction rather than relabeling it as screened.
+        derived["quality"] = {
+            "source_quality": model.get("quality", {}),
+            "screened": False,
+            "linear_trend_r_squared": self.trend_score(coarse),
+        }
+        target = directory.with_name(f"{directory.name}_coarse_{window_size}_{offset}")
+        self._write_table(derived, coarse, target)
+        # Keep lineage even if saving full SCM JSON is disabled in the runner.
+        (target / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "source_table": directory.name,
+                    "observation_selection": selection,
+                    "note": "Same SCM and realization; DAG lags use the source sampling interval.",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _render_plot_job(self, derived, coarse, target)
+        return target
+
+    def _write_sign_inverted_copy(self, model, frame, directory):
+        """Reflect an existing realization without sampling a second SCM."""
+        if (
+            not self.sign_inversion_probability
+            or model.get("observation_selection")
+            or model.get("observation_transform")
+        ):
+            return None
+        # Separate from both the main sampler and coarse-copy selection. Turning
+        # either augmentation on/off must not perturb the other's decisions.
+        rng = np.random.default_rng(
+            np.random.SeedSequence([model["observation_seed"], 0x519A])
+        )
+        if rng.random() >= self.sign_inversion_probability:
+            return None
+        mirrored = invert_frame(frame)
+        derived = copy.deepcopy(model)
+        derived["observation_transform"] = {
+            "kind": "sign_inversion",
+            "exclude": ["time_index"],
+        }
+        derived["quality"] = {
+            "source_quality": model.get("quality", {}),
+            "screened": False,
+            "linear_trend_r_squared": self.trend_score(mirrored),
+        }
+        target = directory.with_name(f"{directory.name}_sign_inverted")
+        self._write_table(derived, mirrored, target)
+        (target / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "source_table": directory.name,
+                    "observation_transform": derived["observation_transform"],
+                    "note": "Same SCM and realization; all recorded values except time_index negated. DAG shows source equations.",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _render_plot_job(self, derived, mirrored, target)
+        return target
+
+    def _write_extra_copies(self, model, frame, directory):
+        # Independently select both views of the original; never copy copies.
+        return [
+            path
+            for path in (
+                self._write_coarse_copy(model, frame, directory),
+                self._write_sign_inverted_copy(model, frame, directory),
+            )
+            if path is not None
+        ]
+
+    def _generate_seeded(self, profiles, dated_dir, run_id):
+        """Parallelize complete tables, with bounded queues and independent RNGs."""
+        count, batch_size = len(profiles), self.generation_batch_size
+        workers = min(self.generation_workers, math.ceil(count / batch_size))
+        main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+        if not main_file or not Path(main_file).is_file():
+            workers = 1  # Spawn requires an importable Python entry point.
+        progress = GenerationProgress(count, workers, self.progress_interval)
+        progress.update(0, force=True)
+        paths = [None] * count
+
+        def batches():
+            for start in range(0, count, batch_size):
+                stop = min(count, start + batch_size)
+                # Generate seeds lazily: never queue millions of tasks or frames.
+                seeds = self.rng.integers(0, 2**63, size=stop - start)
+                yield (
+                    start,
+                    [
+                        (
+                            int(seed),
+                            bool(profiles[index]),
+                            dated_dir / f"table_{run_id}_{index:06d}",
+                        )
+                        for index, seed in zip(range(start, stop), seeds)
+                    ],
+                )
+
+        completed = 0
+        if workers == 1:
+            for start, jobs in batches():
+                result = generate_batch(self, jobs)
+                paths[start : start + len(result)] = result
+                completed += len(result)
+                progress.record_copies(result)
+                progress.update(completed)
+        else:
+            executor = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=get_context("spawn"),
+                initializer=initialize_worker,
+                initargs=(self,),
+            )
+            pending, source = {}, iter(batches())
+            exhausted = False
+            try:
+                while pending or not exhausted:
+                    while not exhausted and len(pending) < 2 * workers:
+                        try:
+                            start, jobs = next(source)
+                        except StopIteration:
+                            exhausted = True
+                        else:
+                            pending[executor.submit(generate_worker_batch, jobs)] = (
+                                start
+                            )
+                    done, _ = wait(
+                        pending,
+                        timeout=min(1.0, self.progress_interval),
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        start = pending.pop(future)
+                        result = future.result()
+                        paths[start : start + len(result)] = result
+                        completed += len(result)
+                        progress.record_copies(result)
+                    # Keep console updates alive during worker startup and long
+                    # batches. Only fully written/rendered tables count as done.
+                    progress.update(completed)
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+        progress.update(count, force=True)
+        return [path for group in paths for path in group]
+
     def generate(self, num_tables=100):
         if (
             isinstance(num_tables, bool)
@@ -2380,6 +3231,8 @@ class OperationalSCMGenerator:
         profiles = [True] * math.ceil(num_tables * self.trend_free_fraction)
         profiles += [False] * (num_tables - len(profiles))
         self.rng.shuffle(profiles)
+        if self._seeded_generation:
+            return self._generate_seeded(profiles, dated_dir, run_id)
         # Sampling, RNG consumption, screening and table order stay serial and
         # unchanged. Only independent image rendering runs in other processes.
         workers = min(self.render_workers, num_tables)
@@ -2397,40 +3250,18 @@ class OperationalSCMGenerator:
             if workers > 1 and (self.save_plot or self.save_dag)
             else None
         )
+        progress = GenerationProgress(
+            num_tables, workers if executor else 1, self.progress_interval
+        )
+        progress.update(0, force=True)
         pending = deque()
         try:
             for index, trend_free in enumerate(profiles):
-                for attempt in range(100):
-                    model = self.sample_model(trend_free=trend_free)
-                    frame = self.simulate(model)
-                    score = self.trend_score(frame)
-                    strength = self.trend_strength(frame, model)
-                    if (trend_free and score <= 0.15) or (
-                        not trend_free and strength >= 0.4
-                    ):
-                        break
-                else:
-                    raise RuntimeError(
-                        "Could not meet trend-profile screening criterion after 100 attempts"
-                    )
-                model["quality"] = {
-                    "linear_trend_r_squared": score,
-                    "screened_trend_free": trend_free,
-                    "trend_shape_r_squared": strength,
-                    "sampling_attempts": attempt + 1,
-                }
-                directory = dated_dir / f"table_{run_id}_{index:06d}"
-                directory.mkdir(exist_ok=False)
-                frame.to_parquet(
-                    directory / "data.parquet",
-                    engine="pyarrow",
-                    index=False,
-                    compression="zstd",
+                model, frame = self._sample_accepted_model(
+                    trend_free, progress, index - len(pending)
                 )
-                if self.save_scm:
-                    (directory / "scm.json").write_text(
-                        json.dumps(model, indent=2, allow_nan=False), encoding="utf-8"
-                    )
+                directory = dated_dir / f"table_{run_id}_{index:06d}"
+                self._write_table(model, frame, directory)
                 if executor:
                     pending.append(
                         executor.submit(_render_plot_job, self, model, frame, directory)
@@ -2440,14 +3271,17 @@ class OperationalSCMGenerator:
                         pending.popleft().result()
                 else:
                     _render_plot_job(self, model, frame, directory)
-                paths.append(directory)
-                print(
-                    f"[{index + 1}/{num_tables}] {directory.name}: {len(frame)} rows, {len(frame.columns)} columns",
-                    flush=True,
-                )
-            for future in pending:
-                future.result()
+                group = [directory] + self._write_extra_copies(model, frame, directory)
+                paths.extend(group)
+                progress.record_copies([group])
+                while pending and pending[0].done():
+                    pending.popleft().result()
+                progress.update(index + 1 - len(pending))
+            while pending:
+                pending.popleft().result()
+                progress.update(num_tables - len(pending))
         finally:
             if executor:
                 executor.shutdown(wait=True, cancel_futures=True)
+        progress.update(num_tables, force=True)
         return paths

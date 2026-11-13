@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--checkpoint-threshold", type=int, default=0)
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--sample", help="Reuse an existing bounded sample cache")
+    parser.add_argument("--preserve-sample-batches", action="store_true")
     parser.add_argument("--direct-attention", action="store_true")
     parser.add_argument("--reentrant-checkpoint", action="store_true")
     parser.add_argument(
@@ -93,6 +94,11 @@ def run_benchmark(args, config):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     logger.add(ROOT / "logs" / f"throughput_{args.case}_{stamp}.log", level="DEBUG")
     sample_path = ROOT / args.sample if args.sample else output / "sample.pt"
+    if args.sample and not sample_path.exists():
+        raise FileNotFoundError(
+            f"Explicit sample cache does not exist: {sample_path}; "
+            "run scripts/prepare_live_training_sample.py first"
+        )
     if not sample_path.exists():
         data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
         training, validation, _, _ = split_datasets(data["records"], config)
@@ -145,6 +151,11 @@ def run_benchmark(args, config):
     batches = make_batches(
         sample, args.batch_size, seed=config["seed"], bucket_by_length=args.bucket
     )
+    if args.preserve_sample_batches:
+        by_id = {record["id"]: record for record in sample}
+        batches = [
+            [by_id[identity] for identity in group] for group in raw["batch_ids"]
+        ]
     started = perf_counter()
     torch.manual_seed(config["seed"])
     model = RWKVForecaster(settings).to(device="cuda", dtype=torch.bfloat16).train()

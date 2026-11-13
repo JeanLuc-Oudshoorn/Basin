@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
@@ -62,6 +63,45 @@ def examples(model):
 
 
 class EpochTrainingTests(unittest.TestCase):
+    def test_diagnostic_time_limit_finishes_cleanly_without_baseline(self):
+        model = ToyForecaster()
+        records = examples(model)
+        with tempfile.TemporaryDirectory() as temporary:
+            config = copy.deepcopy(load_config())
+            config["paths"]["training"] = temporary
+            config["training"].update(
+                epochs=None,
+                steps=None,
+                batch_size=1,
+                resume=False,
+                validate_before_training=False,
+                diagnostic_seconds=0.000001,
+            )
+            validation = Mock(
+                return_value={
+                    "loss": 1.0,
+                    "rmse": 1.0,
+                    "points": 16,
+                    "tables": [],
+                    "seconds": 0.0,
+                }
+            )
+            _, summary, _ = fit_epochs(
+                model,
+                records,
+                [{"source": "v"}],
+                config,
+                torch.optim.AdamW(model.parameters(), lr=0.001),
+                validation,
+            )
+            self.assertEqual(summary["reason"], "diagnostic_time_limit")
+            self.assertEqual(summary["completed_updates"], 1)
+            self.assertFalse(summary["last_epoch_complete"])
+            validation.assert_called_once()
+            self.assertFalse(
+                (Path(temporary) / "validation_epoch_00000.parquet").exists()
+            )
+
     def test_epoch_zero_is_pre_update_persisted_and_not_repeated_on_resume(self):
         model = ToyForecaster()
         initial = copy.deepcopy(model.state_dict())
@@ -75,6 +115,7 @@ class EpochTrainingTests(unittest.TestCase):
                 batch_size=1,
                 gradient_accumulation_steps=1,
                 validate_before_training=True,
+                resume="auto",
             )
             optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
             calls = []

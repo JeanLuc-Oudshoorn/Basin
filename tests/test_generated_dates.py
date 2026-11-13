@@ -213,6 +213,10 @@ class GeneratedDateTests(unittest.TestCase):
     def fixture(self, directory):
         base = Path(directory)
         config = load_config()
+        config["validation"]["enabled"] = True
+        config["validation"]["engine"] = (
+            "prophet"  # Exercise legacy reports explicitly.
+        )
         for key in ["raw", "processed", "embedded", "logs"]:
             config["paths"][key] = str(base / key)
         config["data"].update(

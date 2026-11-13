@@ -1,0 +1,65 @@
+- 1D Perlin noise - DONE
+- Pink noise - DONE
+- Increasing seasonal amplitude - DONE
+- Non sine humps like air passengers dataset - DONE
+- Too many timeseries have trend - DONE
+- Sawtooth like pattern? - DONE
+- Bimodal: high peak, low peak alternating - DONE
+- Colliding frequencies
+- ReLU effect from one variable to another - DONE
+- Decision tree influence (X1 -> X2)?
+- Ceiling/floor values
+- Noise amplification and increasing seasonal amplitude - DONE
+- ON/OFF type state transitions - DONE
+- Fourier series - DONE
+- Is Holt-Winters so shit in forecasting because we are not supplying the seasonal period? - DONE
+- GPU barely activates during training - DONE
+- Prophet should be measured on MAE - DONE
+- Exclude 'data' folder from IDE scanning features - DONE
+- Automatic Git workflow test suite on Git push
+- More interpretable training logs - DONE
+- Config.json should contain date table(s) for training - DONE
+- Unrealistic that DAG contains residuals of outcome from 180 timesteps ago - DONE
+- Too often all covariates are in one straight line - DONE
+- Too often the outcome is a straight line, or slightly bending up or down line (2/10) - DONE
+- Allow temporal relations between covariate and outcome? (e.g [covariate2 t-80] -> [outcome]) - DONE
+- Patch embeddings - DONE
+- Prophet for series viability - DONE
+
+- Standardize model folders (`results/model` and archived `results/447m_model`) - DONE
+- Can we use a smaller architecture? (Chronos-2 is 119.5M parameters, Timestral is 209M parameters) - DONE
+- Add plotly for interactive plots - DONE
+- RWKV doesn't understand when a series has flatlined it seems
+- Should we include tables with little information? - DONE
+- Measure forecasting speed - DONE
+- Optimize on MASE - DONE
+- Holdout script takes like 10 minutes to start up (before actually processing any tables) - DONE
+- Is it really the case that RWKV forecasts faster than Timestral? - DONE
+- What is the difference between Timestral and Timestral default in time comparison? - DONE
+- Implement inversion trick a la Timestral (symmetric forecasting)?
+- Markov chain for input covariates
+- More binary covariates
+- More univariate series (oversample or fast-track for 3-4 hidden covariates)
+- Partial sum Fourier series for more complex patterns?
+- Skip dataset validation?
+
+- Is RWKV performing less because of the code graph?
+- Trade-off between short-term and long-term forecasting (do we want to forecast up to 1024 timesteps?)
+- We can create more datasets by taking existing datasets and downsampling (or upsampling)
+- Mirroring a dataset over the horizontal axis? Does this work if we normalize everything before forecasting?
+
+- Fix scaling in production (any stdev below some threshold is set to 1.0 now) - DONE
+- Learned tendency to repeat the same 16 timestep token (more weight on forecasting all tokens correctly)?
+- Or are we overfeeding seasonality in data generation? - DONE
+- Can you pre-package graph replay with a model?
+- Or is it cache that only starts working after you made forecasts with a specific shape?
+- In start/stop tables, the active part is broadly always centered - DONE
+- Start/stop tables always look broadly symmetric, but we should also see long tails or abrupt stops - DONE
+- More state machine behavior? -> the series transitions between different levels - DONE
+- Size on disk of different models? RAM consumption during inference?
+
+- Checkpoint every one hour + save optimizer state for easy restart - DONE
+- No coarse copy or sign-inverted tables in the test set
+- FakeBench-TS: a benchmark of entirely unpredictable datasets
+- Affine transformations on dataset? (i.e. log transform all values)
+- Distribution needs to be tail heavy? (more 2048+ contexts)

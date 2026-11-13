@@ -9,13 +9,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from runtime_storage import configure_runtime_storage
+
+ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_STORAGE = configure_runtime_storage(ROOT)
+
 import pandas as pd
 import torch
 from loguru import logger
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-ROOT = Path(__file__).resolve().parents[2]
 for directory in (
     ROOT,
     ROOT / "src/03_transforming_input_data",
@@ -59,6 +63,7 @@ class ForecastOutput:
     quantiles: torch.Tensor  # [batch, target, horizon, quantile]
     loss: torch.Tensor | None = None
     per_sample_loss: torch.Tensor | None = None
+    loss_mass: torch.Tensor | None = None
 
 
 class VariateMix(nn.Module):
@@ -71,6 +76,12 @@ class VariateMix(nn.Module):
         self.compile_inference = False
 
     def forward(self, x):
+        graphs = getattr(self, "training_graphs", None)
+        if graphs is not None and self.training and torch.is_grad_enabled():
+            return graphs.run(self.training_graph_index, x)
+        return self.forward_ungraphed(x)
+
+    def forward_ungraphed(self, x):
         # Compile only the short variable axes measured in the throughput audit;
         # wider attention retains the default kernel's memory characteristics.
         if (
@@ -124,6 +135,9 @@ class RWKVForecaster(PatchEncoder):
         self.head = ResidualProjection(
             config.width, config.patch_size * len(config.quantiles), 4 * config.width
         )
+        if config.output_patches > 1:
+            self.lead_embedding = nn.Embedding(config.output_patches - 1, config.width)
+            nn.init.normal_(self.lead_embedding.weight, std=0.02)
         self.register_buffer(
             "levels", torch.tensor(config.quantiles, dtype=torch.float32)
         )
@@ -133,12 +147,15 @@ class RWKVForecaster(PatchEncoder):
             if (
                 not isinstance(horizon, int)
                 or horizon < 1
-                or horizon > self.config.patch_size
+                or horizon > self.config.patch_size * self.config.output_patches
             ):
                 raise ValueError(
-                    "forward predicts one patch; use forecast for longer horizons"
+                    "forward supports one direct block; use forecast for longer horizons"
                 )
             prepared = self.tokenize(context, horizon, **kwargs)
+            prepared["prediction_patches"] = (
+                horizon + self.config.patch_size - 1
+            ) // self.config.patch_size
             output = self.forward_encoded(
                 self.encode_tokens(prepared), prepared, kwargs.get("future_target")
             )
@@ -146,6 +163,8 @@ class RWKVForecaster(PatchEncoder):
                 output.point[..., :horizon],
                 output.quantiles[..., :horizon, :],
                 output.loss,
+                output.per_sample_loss,
+                output.loss_mass,
             )
         prepared = self.tokenize(context, horizon, **kwargs)
         return self.forward_encoded(
@@ -210,7 +229,11 @@ class RWKVForecaster(PatchEncoder):
                 and layer >= uncheckpointed_layers
             ):
                 flat, v_first = checkpoint(block, flat, v_first, use_reentrant=False)
-                x = checkpoint(mix, flat.reshape(b, v, t, d), use_reentrant=False)
+                # Graphs keep their own static backward buffers; retain ordinary
+                # checkpoint recomputation for the layers that need memory savings.
+                x = checkpoint(
+                    mix.forward_ungraphed, flat.reshape(b, v, t, d), use_reentrant=False
+                )
             else:
                 flat, v_first = block(flat, v_first)
                 x = mix(flat.reshape(b, v, t, d))
@@ -228,6 +251,38 @@ class RWKVForecaster(PatchEncoder):
             # running the projection and sorting quantiles for the entire past.
             selected, loc, scale = selected[:, :, -1:], loc[:, :, -1:], scale[:, :, -1:]
             n = 1
+        prediction_patches = prepared.get("prediction_patches", 1)
+        if prediction_patches > 1:
+            from multi_horizon import direct_quantiles
+
+            if prepared["is_training"]:
+                raise ValueError("Direct block decoding requires an evaluation context")
+            prediction = direct_quantiles(
+                model=self,
+                hidden=selected,
+                loc=loc[:, :, -1],
+                scale=scale[:, :, -1],
+                patches=prediction_patches,
+            )
+            loss = per_sample_loss = mass = None
+            if future_target is not None:
+                if self.config.horizon_loss_weights is None:
+                    raise ValueError(
+                        "Multi-patch validation requires horizon_loss_weights"
+                    )
+                from multi_horizon import weighted_forecast_loss
+
+                prediction = prediction[..., : future_target.shape[-1], :]
+                loss, per_sample_loss, mass = weighted_forecast_loss(
+                    self, prediction, future_target, loc[:, :, -1], scale[:, :, -1]
+                )
+            return ForecastOutput(
+                prediction[..., self.config.quantiles.index(0.5)],
+                prediction,
+                loss,
+                per_sample_loss,
+                mass,
+            )
         raw = self.head(self.norm(selected)).float()
         raw = (
             raw.reshape(b, targets, n, p, len(self.config.quantiles))
@@ -240,6 +295,7 @@ class RWKVForecaster(PatchEncoder):
         prediction = raw * scale[..., None] + loc[..., None]
         loss = None
         per_sample_loss = None
+        loss_mass = None
         if labels is not None:
             if labels.shape != raw.shape[:-1]:
                 raise ValueError("Next-patch label dimensions mismatch")
@@ -259,6 +315,22 @@ class RWKVForecaster(PatchEncoder):
                 else valid.sum()
             )
             loss = pinball.sum() / (count * len(levels))
+            if self.config.horizon_loss_weights is not None and prepared["is_training"]:
+                from multi_horizon import weighted_training_loss
+
+                loss, per_sample_loss, loss_mass = weighted_training_loss(
+                    self, selected, labels, loc, scale, raw
+                )
+            elif (
+                self.training
+                and prepared["is_training"]
+                and self.config.output_patches > 1
+            ):
+                from multi_horizon import auxiliary_loss
+
+                extra, extra_count = auxiliary_loss(self, selected, labels, loc, scale)
+                weight = self.config.multi_horizon_weight * (extra_count > 0)
+                loss = (1 - weight) * loss + weight * extra
             if "last_token_indices" in prepared:
                 per_sample_loss = pinball.flatten(1).sum(1) / (
                     valid.flatten(1).sum(1) * len(levels)
@@ -268,6 +340,7 @@ class RWKVForecaster(PatchEncoder):
             prediction,
             loss,
             per_sample_loss,
+            loss_mass,
         )
 
     @torch.inference_mode()
@@ -276,26 +349,44 @@ class RWKVForecaster(PatchEncoder):
         self.eval()
         try:
             if self.config.objective == "next_patch":
-                if not isinstance(horizon, int) or horizon < 1:
+                if (
+                    isinstance(horizon, bool)
+                    or not isinstance(horizon, int)
+                    or horizon < 1
+                ):
                     raise ValueError("horizon must be positive")
-                outputs = []
-                history = context
-                past = covariates.get("past_covariates")
                 if set(covariates) - {"past_covariates"}:
                     raise ValueError(
                         "Next-patch forecast accepts only observed historical covariates"
                     )
-                for _ in range(
-                    (horizon + self.config.patch_size - 1) // self.config.patch_size
-                ):
-                    part = self(history, self.config.patch_size, past_covariates=past)
+                engine = getattr(self, "fast_inference", None)
+                if engine is not None:
+                    quantiles = engine.forecast(context, horizon, **covariates).to(
+                        context.device
+                    )
+                    return ForecastOutput(
+                        quantiles[..., self.config.quantiles.index(0.5)], quantiles
+                    )
+                outputs = []
+                history = context
+                past = covariates.get("past_covariates")
+                block_size = self.config.patch_size * self.config.output_patches
+                for offset in range(0, horizon, block_size):
+                    patches = min(
+                        self.config.output_patches,
+                        (horizon - offset + self.config.patch_size - 1)
+                        // self.config.patch_size,
+                    )
+                    prepared = self.tokenize_next(history, past_covariates=past)
+                    prepared["prediction_patches"] = patches
+                    part = self.forward_encoded(self.encode_tokens(prepared), prepared)
                     outputs.append(part.quantiles)
                     history = torch.cat([history, part.point], dim=-1)[
                         ..., -self.config.context_length :
                     ]
                     if past is not None:
                         missing = past.new_full(
-                            (*past.shape[:-1], self.config.patch_size), float("nan")
+                            (*past.shape[:-1], part.point.shape[-1]), float("nan")
                         )
                         past = torch.cat([past, missing], dim=-1)[
                             ..., -self.config.context_length :
@@ -314,11 +405,21 @@ class RWKVForecaster(PatchEncoder):
         )
 
     @classmethod
-    def load(cls, path, *, device="cuda", dtype=torch.bfloat16):
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        model = cls(ForecastConfig(**checkpoint["config"])).to(
-            device=device, dtype=dtype
-        )
+    def load(cls, path, *, device="cuda", dtype=torch.bfloat16, checkpoint=None):
+        if checkpoint is None:
+            checkpoint = torch.load(
+                path, map_location="cpu", weights_only=True, mmap=True
+            )
+        # Restoring every saved tensor makes random initialization redundant.
+        # Meta construction avoids allocating/orthogonalizing a full CPU model
+        # before allocating the actual inference model on the destination.
+        settings = ForecastConfig(**checkpoint["config"])
+        # Import the backend outside the meta context so module-level CUDA
+        # setup and any backend constants retain their intended device.
+        load_rwkv(ctx_len=settings.max_patches, inference_only=False)
+        with torch.device("meta"):
+            model = cls(settings)
+        model = model.to(dtype=dtype).to_empty(device=device)
         model.load_state_dict(checkpoint["state_dict"])
         return model
 
@@ -363,6 +464,8 @@ def architecture_report(model):
         "tied_embeddings": False,
         "input_feature_dimension": 3 * model.config.patch_size,
         "output_dimension": model.config.patch_size * len(model.config.quantiles),
+        "direct_forecast_timesteps": model.config.patch_size
+        * model.config.output_patches,
     }
 
 
@@ -384,10 +487,40 @@ def train_step(model, batch, optimizer, gradient_clip=1.0):
 def train(config):
     training_options(config["training"])
     configure_cuda_memory(config["training"])
-    # Small patch preparation should not inherit all host CPU threads. Set this
-    # before any optional audit or lazy tokenization, rather than after it.
     torch.set_num_threads(config["training"].get("cpu_threads", 4))
     data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    # Detect an incompatible completed run before replacing its split, inventory
+    # or architecture reports. The changed validation tail requires fresh data.
+    from checkpoints import resume_path
+
+    previous = resume_path(config)
+    if previous is not None:
+        metadata = torch.load(
+            previous, map_location="cpu", weights_only=True, mmap=True
+        )
+        identity = metadata.get("identity", {})
+        if identity.get("input_signature") != signature(config):
+            raise ValueError(
+                f"Saved training checkpoint uses a different model/data policy: {previous}. "
+                f"Saved layers={identity.get('model', {}).get('layers', 'unknown')}; "
+                f"requested layers={config['model']['layers']}. "
+                "The prepared artifacts already match the current configuration; "
+                "do not rerun transform.py or embed.py for this error. "
+                "Archive the existing model results directory, then run train.py again "
+                "to initialize fresh weights. Auto-resume cannot use this incompatible checkpoint."
+            )
+        if (
+            config["data"].get("validation_policy") == "sampled_training_origins"
+            and identity.get("optimization", {}).get("validation_split_policy")
+            != "dataset_disjoint_v1"
+        ):
+            raise ValueError(
+                "Saved checkpoint predates dataset-disjoint validation. Its weights may already "
+                "have trained on the validation tables. Set training.resume=false to start fresh "
+                "or choose a new training output directory; transform/embed do not need rerunning "
+                "for this split change."
+            )
+        del metadata
     # The lazy-index loader already verified the full processed checksum.
     # Keep the legacy guard without rereading the same multi-GB file twice.
     if data.get("format") != "lazy_patch_index_v1" and data[
@@ -399,6 +532,17 @@ def train(config):
     records, validation_records, test_records, dataset_split = split_datasets(
         data["records"], config
     )
+    if config["training"].get("diagnostic_seconds") is not None:
+        limit = config["training"].get("diagnostic_validation_tables", 64)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("training.diagnostic_validation_tables must be positive")
+        validation_records = validation_records[:limit]
+        logger.warning(
+            "Diagnostic run: time budget={}s; final validation limited to {} tables; output={}",
+            config["training"]["diagnostic_seconds"],
+            len(validation_records),
+            location(config, "training"),
+        )
     inventory = None
     if config["model"].get("objective") == "next_patch":
         inventory = prepare_token_inventory(
@@ -406,8 +550,26 @@ def train(config):
             config,
             groups=(records, validation_records, test_records, dataset_split),
         )
+    dataset_split["input_signature"] = signature(config)
     write_json(location(config, "training") / "dataset_split.json", dataset_split)
-    emit_training_event("dataset_split", **dataset_split)
+    emit_training_event(
+        "dataset_split",
+        **{
+            k: v
+            for k, v in dataset_split.items()
+            if k
+            not in (
+                "train_sources",
+                "validation_sources",
+                "test_sources",
+                "source_keys",
+                "source_sha256",
+                "excluded_short_sources",
+                "evaluation_excluded_family_sources",
+            )
+        },
+        split_path=str(location(config, "training") / "dataset_split.json"),
+    )
     if not records:
         raise ValueError("Embedding artifact contains no training windows")
     torch.manual_seed(config["seed"])
@@ -433,6 +595,17 @@ def train(config):
         )
     t = config["training"]
     model.checkpoint_token_threshold = t.get("checkpoint_token_threshold", 0)
+    model.auto_microbatch = t.get("auto_microbatch", True)
+    logger.info(
+        "Training memory policy: optimizer tables={} x accumulation={} | physical "
+        "microbatch<={} variable-patch tokens<={} | checkpoint threshold={} | OOM retry={}",
+        t.get("batch_size", 1),
+        t.get("gradient_accumulation_steps", 1),
+        t.get("microbatch_size", 4),
+        t.get("microbatch_token_limit", 1536),
+        model.checkpoint_token_threshold,
+        model.auto_microbatch,
+    )
     configure_variate_execution(model, t, ROOT)
     for module in (model.embedding, model.roles):
         module.requires_grad_(t["train_embeddings"])
@@ -449,6 +622,20 @@ def train(config):
     )
     write_json(location(config, "training") / "architecture.json", report)
     logger.info("Measured model parameter groups={}", report["groups"])
+    logger.info(
+        "Forecast head: {} output patches ({} timesteps) per context pass",
+        settings.output_patches,
+        settings.patch_size * settings.output_patches,
+    )
+    if settings.horizon_loss_weights is not None:
+        logger.info(
+            "Exact per-lead loss weights={} (overrides legacy sampled auxiliary loss)",
+            settings.horizon_loss_weights,
+        )
+    elif settings.output_patches > 1:
+        logger.info(
+            "Legacy sampled auxiliary loss weight={}", settings.multi_horizon_weight
+        )
     logger.info(
         "Device={} dtype={} parameters={} trainable={}",
         torch.cuda.get_device_name(),
@@ -480,12 +667,17 @@ def train(config):
                 p.numel() for p in model.embedding.parameters()
             ),
             "skip_weight_change_l2": projection_delta,
-            "steps_with_nonzero_skip_gradient": sum(
-                row["embedding_skip_gradient_norm"] > 0 for row in history
+            "steps_with_nonzero_skip_gradient": training_summary.get(
+                "embedding_gradient_updates",
+                sum(row["embedding_skip_gradient_norm"] > 0 for row in history),
             ),
-            "optimizer_updates": len(history),
-            "selected_epoch": training_summary["best_epoch"],
-            "selected_update": training_summary["best_step"],
+            "optimizer_updates": training_summary["completed_updates"],
+            "selected_epoch": training_summary.get(
+                "exported_epoch", training_summary["best_epoch"]
+            ),
+            "selected_update": training_summary.get(
+                "exported_step", training_summary["best_step"]
+            ),
         },
     )
     logger.info(
@@ -525,8 +717,12 @@ def train(config):
         completed_global_step=training_summary["completed_updates"],
         completed_run_step=training_summary["completed_updates"],
         checkpoint_path=str(directory / "model.pt"),
-        selected_step=training_summary["best_step"],
-        selected_epoch=training_summary["best_epoch"],
+        selected_step=training_summary.get(
+            "exported_step", training_summary["best_step"]
+        ),
+        selected_epoch=training_summary.get(
+            "exported_epoch", training_summary["best_epoch"]
+        ),
         **{
             k: v
             for k, v in training_summary.items()
@@ -539,7 +735,7 @@ def train(config):
     )
 
 
-def launch_wsl(script, config_path):
+def launch_wsl(script, config_path, *, extra_args=()):
     if os.name != "nt":
         return False
     relative_config = (ROOT / config_path).resolve().relative_to(ROOT).as_posix()
@@ -548,6 +744,7 @@ def launch_wsl(script, config_path):
         relative_script
     )
     command += " --config " + shlex.quote(relative_config)
+    command += "".join(" " + shlex.quote(argument) for argument in extra_args)
     logger.info("Routing GPU stage to WSL: {}", command)
     # Fixed executable and shell-quoted repository paths; capture native backend output too.
     with subprocess.Popen(  # nosec B603
@@ -574,6 +771,7 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     with run_context(config, "train"):
+        logger.info("Training runtime storage: {}", RUNTIME_STORAGE)
         if launch_wsl(__file__, args.config):
             return
         if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():

@@ -16,6 +16,29 @@ from transform import load_config
 
 
 class HoldoutPlottingTests(unittest.TestCase):
+    def test_all_four_tokens_are_plotted_past_final_actual(self):
+        frame = pd.DataFrame({"outcome": range(48)})
+        predictions = pd.DataFrame(
+            {
+                "target": "outcome",
+                "origin": 32,
+                "time_index": range(32, 96),
+                "rwkv": range(64),
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            figure = write_holdout_plot(
+                frame,
+                predictions,
+                "outcome",
+                ["rwkv"],
+                Path(directory) / "four_tokens.html",
+                load_config(),
+                0,
+            )
+            self.assertEqual(list(figure.data[1].x), list(range(32, 96)) + [None])
+            self.assertEqual(len(figure.data[0].x), 48)
+
     def test_interactive_offline_html_preserves_all_models_and_forecast_gaps(self):
         config = load_config()
         frame = pd.DataFrame({"outcome": range(64)})
@@ -62,7 +85,7 @@ class HoldoutPlottingTests(unittest.TestCase):
             (Path(directory) / "plot_selection.json").write_text(json.dumps(selection))
             metrics = {
                 "models": methods,
-                "tables": [{"source": str(source)}] * 4,
+                "table_count": 4,
                 "pooled": {"rwkv": {"rmse": 0.5}},
             }
             (Path(directory) / "test_metrics.json").write_text(json.dumps(metrics))

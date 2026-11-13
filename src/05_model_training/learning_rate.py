@@ -40,13 +40,19 @@ def make_scheduler(optimizer, training, total_updates):
     settings = training.get("scheduler", {"name": "constant"})
     name = settings["name"]
     if name == "reduce_on_plateau":
-        allowed = {"name", "factor", "patience_epochs", "min_learning_rate"}
+        allowed = {
+            "name",
+            "factor",
+            "patience_epochs",
+            "patience_checks",
+            "min_learning_rate",
+        }
         if set(settings) - allowed:
             raise ValueError(
                 f"Unknown plateau fields: {sorted(set(settings) - allowed)}"
             )
         factor = settings.get("factor", 0.5)
-        patience = settings.get("patience_epochs", 1)
+        patience = settings.get("patience_checks", settings.get("patience_epochs", 1))
         minimum = settings.get("min_learning_rate", peak * 0.01)
         if (
             not math.isfinite(factor)
@@ -73,9 +79,15 @@ def make_scheduler(optimizer, training, total_updates):
         return scheduler, {
             "name": name,
             "total_updates": total_updates,
-            "step_unit": "validated_epochs",
+            "step_unit": "validation_checks"
+            if "patience_checks" in settings
+            else "validated_epochs",
             "factor": factor,
-            "patience_epochs": patience,
+            (
+                "patience_checks"
+                if "patience_checks" in settings
+                else "patience_epochs"
+            ): patience,
             "min_learning_rate": minimum,
             "threshold": delta,
         }
@@ -132,6 +144,9 @@ def scheduler_snapshot(scheduler, plan):
         if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
         else None,
         "completed_validation_epochs": scheduler.last_epoch
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
+        else None,
+        "completed_validation_checks": scheduler.last_epoch
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
         else None,
         "next_learning_rates": scheduler.get_last_lr(),

@@ -1,9 +1,19 @@
+# Forecasting
+
+**Current policy (2026-11-02):** Basin's new default forecasts up to four
+16-point patches directly (64 timesteps), with longer requests continuing
+autoregressively in blocks. Training and four-token validation use weights
+80/16/3/1. Holdout samples 1/2/3/4 tokens with those probabilities when the
+future fits. See [the complete forecasting policy](SHORT_HORIZON_FORECASTING.md)
+and [training/migration specification](../model_training/SHORT_HORIZON_TRAINING.md).
+Historical configuration descriptions below are retained for earlier runs.
+
 Current holdout evaluation uses up to five origins per table: first eligible,
 nearest 25%, 50%, and 75% row positions, and the final eligible origin. It compares
 RWKV, Prophet and last-observation carry-forward. Short tables use each eligible
 origin once. Training ends after exporting the model. Run
 `uv run python src/06_holdout_test/holdout_test.py` to test that model separately.
-Outputs are under `results/next_patch_300m_validated/holdout_test`
+Outputs are under `results/model/holdout_test`
 (`paths.holdout_test`), including table-level progress/ETA and model provenance.
 The latest exported model and its stored test split are selected automatically.
 General forecasting moved to `src/07_forecasting`. See the
@@ -91,7 +101,7 @@ Training now supports configurable warmup and cosine learning-rate decay. See th
 For the full-dataset, per-update capacity diagnostic, see the
 [capacity experiment report](../audits/2026-10-24/capacity_300m/REPORT.md).
 
-# Current default: 447.5M causal next-patch model
+# Historical default: 447.5M causal next-patch model
 
 `configs/config.json` selects 25 layers of width 1,024, patch size 16, and a
 2,048-observation context cap. The measured size is 447,482,144 parameters.
@@ -109,15 +119,15 @@ remain unchanged.
 See the [default training and holdout audit](../audits/2026-10-25/default_holdout/REPORT.md)
 for rounding, isolation, rolling origins, parameter dimensions, untied projections,
 logs, test artifacts, and the full-size GPU smoke test. Changing the model settings
-requires rerunning transform and embed before training. Existing output path names
-containing `300m` are retained for compatibility; the checkpoint and architecture
-report record the actual model size.
+requires rerunning transform and embed before training. Default outputs now use
+the `model` folders; the archived 447M model uses `447m_model`. The checkpoint and
+architecture report record the actual model size.
 
 Read the [complete experiment and audit report](../audits/2026-10-24/next_patch_300m/REPORT.md)
 for the objective, artifact layout, dimensions, coverage, baseline settings,
 100-table metrics and six plots from the original unscreened experiment. Current
-validated outputs use `results/next_patch_300m_validated/` and numbered data
-subdirectories named `next_patch_300m_validated`. Read the
+validated outputs use `results/model/` and numbered data
+subdirectories named `model`; archived 447M outputs use `447m_model`. Read the
 [validation and embedding audit](../audits/2026-10-24/learnability_gate/REPORT.md)
 for the current five-stage commands and admission policy. Prophet is available through
 `uv sync --extra validation`; install it in the configured WSL runtime as well.

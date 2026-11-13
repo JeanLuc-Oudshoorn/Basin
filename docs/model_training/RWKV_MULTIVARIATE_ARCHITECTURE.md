@@ -1,5 +1,13 @@
 # RWKV time mixing and cross-variable self-attention
 
+**2026-11-02 update:** The default uses 22 layers (394,914,080 total parameters)
+and a shared head conditioned on forecast lead, producing up to **64 timesteps**
+in one backbone pass. Four lead losses use weights 80%, 16%, 3%, 1%; validation
+reserves the final four tokens. See the
+[current training and migration specification](SHORT_HORIZON_TRAINING.md).
+The diagrams below describe the original next-patch flow and the unchanged
+temporal/variable mixing; they do not yet depict the additional lead vectors.
+
 Verified against the implementation on 2026-10-28. This document clarifies the
 term "cross-variable attention" used in the training performance audit.
 
@@ -41,7 +49,9 @@ patches: the output at P4 is supervised by actual P5, with context P1 through
 P4. These causal predictions are computed together, rather than by running a
 separate growing-prefix training job for every token. Actual observed patches
 are supplied during training; predicted patches are appended during multi-patch
-forecasting. The final P6 is held out for validation. The separate whole-table
+forecasting beyond the four-patch direct block. The displayed final-P6-only
+validation is historical: the current policy reserves the final four patches.
+The separate whole-table
 test split never enters training or epoch validation.
 
 Fresh runs also measure the full validation set before any training update
@@ -77,7 +87,7 @@ encoder–decoder cross-attention. Attention is a reusable operation and can be
 combined with recurrent sequence models.
 
 The tensor is `[batch, variables, patches, width]`. Each variable has its own
-16-observation patch embeddings. At each of the 25 layers:
+16-observation patch embeddings. At each of the 22 layers:
 
 1. The RWKV block processes `[batch * variables, patches, width]`, causally
    across time. Weights are shared across variable sequences.
@@ -94,8 +104,9 @@ No future patch is exposed by this operation, and different tables never
 attend to each other. Each patch is fully observed before predicting the next.
 
 The default configuration is 1024 hidden dimensions, 16 variate attention heads
-of 64 dimensions each, 25 layers, and up to 128 temporal patches / 2048 raw
-observations. The output head predicts the next target patch and its quantiles.
+of 64 dimensions each, 22 layers, and up to 128 temporal patches / 2048 raw
+observations. The shared output head predicts up to four target patches and
+their quantiles, with the first patch receiving 80% of the loss weight.
 
 Implementation:
 [VariateMix and RWKVForecaster](../../src/05_model_training/train.py),
@@ -169,7 +180,7 @@ with the target:
 ```python
 from train import RWKVForecaster  # src/05_model_training must be on sys.path
 
-model = RWKVForecaster.load("results/next_patch_300m_validated/training/model.pt")
+model = RWKVForecaster.load("results/model/training/model.pt")
 # y: torch.Tensor [batch, target_variables, history_observations]
 # covariates: torch.Tensor [batch, covariate_variables, history_observations]
 # Both tensors must be on the model's CUDA device.
@@ -177,7 +188,7 @@ result = model.forecast(y, horizon=16, past_covariates=covariates)
 # result.point: [batch, target_variables, 16]
 ```
 
-The standard `src/06_forecasting/forecast.py` pipeline already calls this model.
+The standard `src/07_forecasting/forecast.py` pipeline already calls this model.
 Current next-patch forecasting does not accept future-covariate arguments.
 For multi-patch forecasts, unavailable future covariates are extended as missing.
 

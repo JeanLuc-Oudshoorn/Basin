@@ -13,11 +13,50 @@ ROOT = Path(__file__).resolve().parents[1]
 for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_test"):
     sys.path.insert(0, str(ROOT / "src" / stage))
 from holdout import holdout_directory
-from holdout_test import run, select_test_records
+from holdout_test import evaluation_records, run, select_test_records
 from transform import load_config
 
 
 class HoldoutStageTests(unittest.TestCase):
+    def test_separate_test_split_cannot_include_model_validation_tables(self):
+        model = {
+            "dataset_split": {
+                "train_sources": ["train"],
+                "validation_sources": ["validation"],
+            }
+        }
+        split = {
+            "dataset_split": {
+                "train_sources": [],
+                "test_sources": ["validation"],
+                "source_sha256": {"validation": "digest"},
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "evaluated model validation"):
+            evaluation_records(model, split)
+        split["dataset_split"]["validation_sources"] = ["validation"]
+        with self.assertRaisesRegex(ValueError, "validation and holdout"):
+            evaluation_records(split, split)
+
+    def test_separate_split_checks_evaluated_model_training_before_sampling(self):
+        model = {"dataset_split": {"train_sources": ["old_train"]}}
+        split = {
+            "dataset_split": {
+                "train_sources": ["current_train"],
+                "test_sources": ["current_test"],
+                "source_sha256": {"current_test": "digest"},
+            }
+        }
+        self.assertEqual(evaluation_records(model, split)[0]["source"], "current_test")
+        model["dataset_split"]["train_sources"] = ["current_test"]
+        with self.assertRaisesRegex(ValueError, "evaluated model training"):
+            evaluation_records(model, split)
+        with self.assertRaisesRegex(ValueError, "record its training"):
+            evaluation_records({}, split)
+        split["dataset_split"]["train_sources"] = ["current_test"]
+        with self.assertRaisesRegex(ValueError, "training and holdout"):
+            evaluation_records(model, split)
+
     def test_training_returns_after_export_without_calling_holdout(self):
         from test_training_performance import model_and_records
         from train import train
@@ -109,19 +148,35 @@ class HoldoutStageTests(unittest.TestCase):
             model = Mock()
             model.eval.return_value = model
             metrics = {"table_count": 1, "pooled": {"rwkv": {"rmse": 0.2}}}
+            output = base / "holdout_test"
+            output.mkdir()
+            stale_plot = output / "test_table_999_target_0.html"
+            stale_plot.write_text("previous model")
+
+            def evaluate_new_model(*args):
+                self.assertFalse(stale_plot.exists())
+                self.assertTrue((output / "model_used.json").is_file())
+                return metrics
+
             with (
-                patch("holdout_test.read_artifact", side_effect=[data, metadata]),
-                patch("holdout_test.file_digest", return_value="digest"),
+                patch("holdout_test.torch.load", return_value=metadata) as read,
+                patch("holdout_test.populate_test_schema"),
+                patch("holdout_test.artifact_digest", return_value="digest"),
                 patch("holdout_test.RWKVForecaster.load", return_value=model) as load,
                 patch("holdout_test.configure_cuda_memory"),
                 patch("holdout_test.configure_variate_execution"),
                 patch(
-                    "holdout_test.evaluate_holdout", return_value=metrics
+                    "holdout_test.evaluate_holdout", side_effect=evaluate_new_model
                 ) as evaluate,
             ):
                 self.assertEqual(run(config), metrics)
-            load.assert_called_once_with(checkpoint)
-            self.assertEqual(evaluate.call_args.args[1], [data["records"][-1]])
+            load.assert_called_once_with(checkpoint, checkpoint=metadata)
+            read.assert_called_once_with(
+                checkpoint, map_location="cpu", weights_only=True, mmap=True
+            )
+            self.assertEqual(
+                [r["source"] for r in evaluate.call_args.args[1]], ["test"]
+            )
             provenance = json.loads((base / "holdout_test/model_used.json").read_text())
             self.assertEqual(provenance["selected_epoch"], 7)
             self.assertEqual(provenance["checkpoint_path"], str(checkpoint))
@@ -139,6 +194,50 @@ class HoldoutStageTests(unittest.TestCase):
         self.assertEqual(
             holdout_directory(config), ROOT / "results/example/holdout_test"
         )
+
+    def test_entrypoint_uses_external_split_but_loads_archived_weights(self):
+        split, _ = self.fixture()
+        archived = {
+            "dataset_split": {"train_sources": ["old_train"]},
+            "training_summary": {"best_epoch": 7},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            config["paths"].update(
+                training=str(base / "training"),
+                holdout_test=str(base / "holdout"),
+                logs=str(base / "logs"),
+            )
+            config["holdout"]["split_checkpoint"] = str(base / "current.pt")
+            checkpoint = base / "training/model.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+            model = Mock()
+            model.eval.return_value = model
+            with (
+                patch("holdout_test.torch.load", side_effect=[archived, split]),
+                patch("holdout_test.populate_test_schema") as schema,
+                patch(
+                    "holdout_test.artifact_digest", side_effect=["old_hash", "new_hash"]
+                ),
+                patch("holdout_test.RWKVForecaster.load", return_value=model) as load,
+                patch("holdout_test.configure_cuda_memory"),
+                patch("holdout_test.configure_variate_execution"),
+                patch("holdout_test.configure_fast_inference") as fast,
+                patch(
+                    "holdout_test.evaluate_holdout",
+                    return_value={"table_count": 1, "pooled": {}},
+                ) as evaluate,
+            ):
+                run(config)
+            load.assert_called_once_with(checkpoint, checkpoint=archived)
+            fast.assert_called_once_with(model, config["training"])
+            self.assertIs(schema.call_args.args[1], archived)
+            self.assertEqual(evaluate.call_args.args[1][0]["source"], "test")
+            provenance = json.loads((base / "holdout/model_used.json").read_text())
+            self.assertEqual(provenance["checkpoint_sha256"], "old_hash")
+            self.assertEqual(provenance["split_checkpoint_sha256"], "new_hash")
 
 
 if __name__ == "__main__":

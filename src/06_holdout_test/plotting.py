@@ -55,7 +55,7 @@ def write_holdout_plot(
         annotation_position="top left",
     )
     figure.update_layout(
-        title=f"Held-out table {table_index}: {target} ({selected.origin.nunique()} one-token forecasts)",
+        title=f"Held-out table {table_index}: {target} ({selected.origin.nunique()} sampled forecast origins)",
         template="plotly_white",
         xaxis_title="Timestep",
         yaxis_title=target,
@@ -96,10 +96,7 @@ def regenerate_saved_plots(config):
     count = 0
     for record in selection["tables"]:
         index = record["table_index"]
-        if (
-            index >= len(metrics["tables"])
-            or metrics["tables"][index]["source"] != record["source"]
-        ):
+        if index >= metrics.get("table_count", len(metrics.get("tables", []))):
             raise ValueError(
                 "Plot selection does not match completed metrics; finish the holdout run first"
             )

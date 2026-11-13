@@ -1,0 +1,43 @@
+{
+  "source_config": "configs/config.json",
+  "updates_per_profile": 180,
+  "warmup_updates_per_case": 3,
+  "profiles": [
+    {
+      "name": "current",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 1536,
+      "checkpoint_token_threshold": 1024
+    },
+    {
+      "name": "less_recomputation",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 1536,
+      "checkpoint_token_threshold": 1536
+    },
+    {
+      "name": "larger_microbatches",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 3072,
+      "checkpoint_token_threshold": 1536
+    },
+    {
+      "name": "larger_activation_budget",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 3072,
+      "checkpoint_token_threshold": 2048
+    },
+    {
+      "name": "margin_budget",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 3072,
+      "checkpoint_token_threshold": 1792
+    },
+    {
+      "name": "current_repeat",
+      "microbatch_size": 8,
+      "microbatch_token_limit": 1536,
+      "checkpoint_token_threshold": 1024
+    }
+  ]
+}

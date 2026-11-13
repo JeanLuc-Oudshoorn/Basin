@@ -311,6 +311,7 @@ class EffectTests(unittest.TestCase):
             "trend",
             "parent_combination",
             "node_link",
+            "sensor",
         ):
             outcome.pop(field, None)
         p = self.parameters("first_order_lag")

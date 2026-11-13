@@ -1,5 +1,6 @@
-"""Final, dataset-disjoint, one-token rolling evaluation for train and forecast."""
+"""Dataset-disjoint four-token evaluation with training-weighted lead scores."""
 
+import json
 import logging
 import math
 import tempfile
@@ -8,9 +9,15 @@ from time import perf_counter
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import torch
 from benchmarks import FoundationBenchmarks, benchmark_names, select_plot_tables
+from error_distribution import write_error_distribution, write_latency_distribution
+from fast_inference import inference_execution_summary
+from graph_profiles import configure_holdout_graph_profiles
+from horizon_policy import evaluation_weights
 from inference import forecast_contexts
+from latency import RequestTimer
 from loguru import logger
 from plotting import write_holdout_plot
 from training_log import emit_training_event
@@ -155,30 +162,102 @@ def prophet_forecast(history, horizon, config, regressors=None):
     return predictions
 
 
+def mase_scale(history, lag=1):
+    """Historical naive MAE; never bridge missing observations or use future labels."""
+    values = np.asarray(history, dtype=float)
+    if len(values) <= lag:
+        return np.nan
+    left, right = values[lag:], values[:-lag]
+    valid = np.isfinite(left) & np.isfinite(right)
+    if not valid.any():
+        return np.nan
+    scale = float(np.abs(left[valid] - right[valid]).mean())
+    return scale if scale > 0 else np.nan
+
+
 def summarize(frame):
-    """Pool squared errors over observations, not averages of per-origin RMSE."""
+    """Lead-weighted scores; unobserved future values never enter metrics."""
+    frame = frame[np.isfinite(frame.actual)].copy()
     result = {"observations": len(frame)}
+    weights = frame.get("metric_weight", pd.Series(1.0, index=frame.index)).to_numpy()
+
+    def mean(values, mask=None):
+        if mask is None:
+            mask = np.ones(len(values), dtype=bool)
+        return (
+            float(np.average(np.asarray(values)[mask], weights=weights[mask]))
+            if mask.any()
+            else None
+        )
+
+    scales = frame.get("mase_scale", pd.Series(np.nan, index=frame.index)).to_numpy()
+    valid = np.isfinite(scales) & (scales > 0)
     for method in ("rwkv", "prophet", "naive", "chronos", "timestral"):
         if method not in frame:
             continue
         error = frame[method].to_numpy() - frame.actual.to_numpy()
         result[method] = {
-            "rmse": float(np.sqrt(np.mean(error**2))),
-            "mae": float(np.mean(np.abs(error))),
-            "normalized_rmse": float(
-                np.sqrt(np.mean((error / frame.context_scale) ** 2))
-            ),
+            "mase": mean(np.abs(error) / np.where(valid, scales, 1), valid)
+            if valid.any()
+            else None,
+            "mase_observations": int(valid.sum()),
+            "mase_undefined_observations": int((~valid).sum()),
+            "rmse": float(np.sqrt(mean(error**2))),
+            "mae": mean(np.abs(error)),
+            "normalized_rmse": float(np.sqrt(mean((error / frame.context_scale) ** 2))),
         }
-    result["rwkv"]["normalized_pinball"] = float(frame.normalized_pinball.mean())
+        values = np.abs(error[valid]) / scales[valid]
+        for label, q in (
+            ("median_absolute_scaled_error", 0.5),
+            ("absolute_scaled_error_p10", 0.1),
+            ("absolute_scaled_error_p90", 0.9),
+        ):
+            result[method][label] = weighted_quantile(values, weights[valid], q)
+    result["rwkv"]["normalized_pinball"] = mean(frame.normalized_pinball)
     return result
+
+
+def weighted_quantile(values, weights, quantile):
+    """Inverse weighted empirical CDF; no invented observations between points."""
+    if not len(values):
+        return None
+    order = np.argsort(values)
+    cumulative = np.cumsum(weights[order])
+    index = min(np.searchsorted(cumulative, quantile * cumulative[-1]), len(order) - 1)
+    return float(values[order[index]])
+
+
+def classical_request(method, history, targets, covariates, horizon, config):
+    """One complete classical-model request, including any regressor fitting."""
+    options = dict(
+        config, holdout=dict(config.get("holdout", {}), benchmark_models=[method])
+    )
+    regressors = (
+        prophet_regressor_inputs(history[covariates], horizon, options)
+        if method == "prophet"
+        else None
+    )
+    points = np.stack(
+        [
+            baseline_forecasts(
+                history[target].to_numpy(), horizon, options, regressors=regressors
+            )[method]
+            for target in targets
+        ]
+    )
+    return points, regressors
 
 
 @torch.inference_mode()
 def evaluate_holdout(model, records, config):
     """Never fit the neural model on these sources, including their initial context."""
     settings = config.get("holdout", {})
+    probabilities = evaluation_weights(config)
     percentiles = settings.get("percentiles", [1, 25, 50, 75, 99])
-    batch_size = settings.get("inference_batch_size", 5)
+    lag = settings.get("mase_seasonality", 1)
+    if isinstance(lag, bool) or not isinstance(lag, int) or lag < 1:
+        raise ValueError("holdout.mase_seasonality must be a positive integer")
+    timer = RequestTimer(config)
     progress_every = settings.get("progress_every_tables", 100)
     if (
         isinstance(progress_every, bool)
@@ -188,18 +267,54 @@ def evaluate_holdout(model, records, config):
         raise ValueError("holdout.progress_every_tables must be a positive integer")
     directory = holdout_directory(config)
     directory.mkdir(parents=True, exist_ok=True)
-    plot_indices, plot_selection = select_plot_tables(records, config)
-    write_json(directory / "plot_selection.json", plot_selection, level="DEBUG")
     device = next(model.parameters()).device
     patch = model.config.patch_size
+    requested_tables = len(records)
+    minimum = (2 + len(probabilities)) * patch
+    records = [
+        record
+        for record in records
+        if (
+            record["source_rows"]
+            if "source_rows" in record
+            else pq.ParquetFile(ROOT / record["source"]).metadata.num_rows
+        )
+        >= minimum
+    ]
+    if len(records) != requested_tables:
+        logger.warning(
+            "Skipping {} short holdout tables: need at least {} points for two context tokens plus four forecast tokens",
+            requested_tables - len(records),
+            minimum,
+        )
+    if not records:
+        raise ValueError(
+            f"No holdout tables have at least {minimum} points for a full four-token forecast"
+        )
+    plot_indices, plot_selection = select_plot_tables(records, config)
+    write_json(directory / "plot_selection.json", plot_selection, level="DEBUG")
     cap = min(model.config.context_length, config["data"]["context_length"])
     benchmarks = FoundationBenchmarks(config, cap)
+    benchmarks.metadata["rwkv"] = {
+        "parameters": sum(p.numel() for p in model.parameters()),
+        "dtype": str(next(model.parameters()).dtype),
+        "device": str(device),
+        "point_forecast": "median of configured quantiles",
+        "inputs": "historical targets and time-matched past covariates",
+    }
     methods = ["rwkv"] + benchmarks.names
+    graph_plan = configure_holdout_graph_profiles(model, records, config)
+    if graph_plan is not None:
+        logger.info("Holdout graph profile admission: {}", graph_plan)
     rows, origin_metrics, table_metrics = [], [], []
     was_training = model.training
     model.eval()
     started = perf_counter()
     completed_origins = 0
+    latency_cursor = 0
+    latency_summary = {}
+    latency_journal = directory / "request_latencies.jsonl"
+    latency_journal.write_text("", encoding="utf-8")
     logger.info(
         "HOLDOUT start: {} tables, up to {} origins per table, models={}, output={}",
         len(records),
@@ -215,7 +330,9 @@ def evaluate_holdout(model, records, config):
             frame = pd.read_parquet(path)
             targets, covariates = record["targets"], record["roles"]["past"]
             table_rows = []
-            origins = sampled_origins(len(frame), patch, percentiles)
+            origins = sampled_origins(
+                len(frame), patch, percentiles, prediction_patches=len(probabilities)
+            )
             contexts = []
             for origin in origins:
                 history = frame.iloc[max(0, origin - cap) : origin]
@@ -231,50 +348,105 @@ def evaluate_holdout(model, records, config):
                         )[None],
                     }
                 )
-            with timed(
-                f"holdout RWKV table={table_index} origins={origins}",
-                cuda=device.type == "cuda",
-                level="DEBUG",
-            ):
-                predictions = list(forecast_contexts(model, contexts, batch_size))
-            foundation_predictions = benchmarks.predict(contexts, patch)
-            for origin, prediction, foundation in zip(
-                origins, predictions, foundation_predictions
-            ):
-                stop = min(origin + patch, len(frame))
+            for origin_index, (origin, context) in enumerate(zip(origins, contexts)):
+                forecast_tokens = len(probabilities)
+                horizon = forecast_tokens * patch
+                stop = min(origin + horizon, len(frame))
                 history = frame.iloc[max(0, origin - cap) : origin]
-                quantiles = prediction[:, : stop - origin].numpy()
+                request = {
+                    "table_index": table_index,
+                    "source": record["source"],
+                    "origin": origin,
+                    "context_points": len(history),
+                    "targets": len(targets),
+                    "covariates": len(covariates),
+                    "horizon": horizon,
+                    "forecast_tokens": forecast_tokens,
+                    "scored_horizon": stop - origin,
+                }
+                foundation, classic = {}, {}
+                regressors = None
+                # Rotate serial execution order to spread cache/clock/order effects.
+                shift = (table_index + origin_index) % len(methods)
+                order = methods[shift:] + methods[:shift]
+                for order_index, name in enumerate(order):
+                    request["order_index"] = order_index
+                    if name == "rwkv":
+                        prediction = timer.measure(
+                            name,
+                            lambda: list(
+                                forecast_contexts(
+                                    model,
+                                    [context],
+                                    1,
+                                    **(
+                                        {"prediction_patches": forecast_tokens}
+                                        if forecast_tokens > 1
+                                        else {}
+                                    ),
+                                )
+                            )[0],
+                            device=device,
+                            request=request,
+                        )
+                    elif name in ("prophet", "naive"):
+                        points, bundle = timer.measure(
+                            name,
+                            lambda name=name: classical_request(
+                                name, history, targets, covariates, horizon, config
+                            ),
+                            device="cpu",
+                            request=request,
+                        )
+                        classic[name] = points
+                        if name == "prophet":
+                            regressors = bundle
+                    else:
+                        foundation[name] = timer.measure(
+                            name,
+                            lambda name=name: benchmarks.predict(
+                                [context], horizon, model_names=[name]
+                            )[0][name],
+                            device=benchmarks.metadata[name]["device"],
+                            request=request,
+                        )
+                quantiles = prediction[:, :horizon].numpy()
+                if quantiles.shape != (
+                    len(targets),
+                    horizon,
+                    len(model.config.quantiles),
+                ):
+                    raise ValueError(
+                        "Holdout model must return every requested forecast point"
+                    )
                 point = quantiles[..., model.config.quantiles.index(0.5)]
                 if not np.isfinite(quantiles).all():
                     raise FloatingPointError("Nonfinite holdout neural forecast")
-                regressors = (
-                    prophet_regressor_inputs(history[covariates], stop - origin, config)
-                    if "prophet" in benchmarks.names
-                    else None
-                )
                 for target_index, target in enumerate(targets):
-                    baseline = (
-                        baseline_forecasts(
-                            history[target].to_numpy(),
-                            stop - origin,
-                            config,
-                            regressors=regressors,
-                        )
-                        if any(
-                            name in benchmarks.names for name in ("prophet", "naive")
-                        )
-                        else {}
+                    actual = np.full(horizon, np.nan)
+                    actual[: stop - origin] = (
+                        frame[target].iloc[origin:stop].to_numpy(dtype=float)
                     )
-                    actual = frame[target].iloc[origin:stop].to_numpy(dtype=float)
+                    denominator = mase_scale(history[target].to_numpy(), lag)
                     scale = float(np.nanstd(history[target].to_numpy(dtype=float)))
-                    scale = scale if math.isfinite(scale) and scale > 1e-5 else 1.0
+                    scale = scale if math.isfinite(scale) and scale > 0 else 1.0
                     error = (actual[:, None] - quantiles[target_index]) / scale
                     levels = np.asarray(model.config.quantiles)
                     pinball = np.maximum(levels * error, (levels - 1) * error).mean(-1)
                     current_rows = []
+                    available = [
+                        np.isfinite(actual[i * patch : (i + 1) * patch]).sum()
+                        for i in range(forecast_tokens)
+                    ]
+                    total_weight = sum(
+                        w for w, count in zip(probabilities, available) if count
+                    )
+                    if total_weight == 0:
+                        raise ValueError(
+                            f"No observed holdout labels: {record['source']} origin={origin}"
+                        )
                     for offset, value in enumerate(actual):
-                        if not np.isfinite(value):
-                            continue
+                        token = offset // patch
                         current_rows.append(
                             {
                                 "source": record["source"],
@@ -282,16 +454,27 @@ def evaluate_holdout(model, records, config):
                                 "origin": origin,
                                 "time_index": origin + offset,
                                 "context_points": len(history),
+                                "forecast_tokens": forecast_tokens,
+                                "forecast_horizon": horizon,
+                                "forecast_token": token + 1,
+                                "metric_weight": probabilities[token]
+                                / available[token]
+                                / total_weight
+                                if np.isfinite(value)
+                                else 0.0,
                                 "actual": value,
                                 "rwkv": float(point[target_index, offset]),
                                 **{
-                                    name: float(baseline[name][offset])
+                                    name: float(classic[name][target_index, offset])
                                     if name in ("prophet", "naive")
                                     else float(foundation[name][target_index, offset])
                                     for name in benchmarks.names
                                 },
                                 "context_scale": scale,
-                                "normalized_pinball": float(pinball[offset]),
+                                "mase_scale": denominator,
+                                "normalized_pinball": float(pinball[offset])
+                                if np.isfinite(value)
+                                else np.nan,
                             }
                         )
                     if not current_rows:
@@ -303,6 +486,8 @@ def evaluate_holdout(model, records, config):
                         "source": record["source"],
                         "target": target,
                         "origin": origin,
+                        "forecast_tokens": forecast_tokens,
+                        "forecast_horizon": horizon,
                         **summarize(pd.DataFrame(current_rows)),
                     }
                     origin_metrics.append(metric)
@@ -348,8 +533,15 @@ def evaluate_holdout(model, records, config):
                 "eta_seconds": elapsed / completed * (len(records) - completed),
                 "progress_percent": 100 * completed / len(records),
                 "last_table": metric,
+                "primary_metric": "mase",
             }
+            # Append only new requests; do not rewrite the entire timing history per table.
+            with latency_journal.open("a", encoding="utf-8") as journal:
+                for row in timer.rows[latency_cursor:]:
+                    journal.write(json.dumps(row) + "\n")
+            latency_cursor = len(timer.rows)
             if completed % progress_every == 0 or completed == len(records):
+                latency_summary = timer.summary()
                 logger.info(
                     "HOLDOUT tables {:,}/{:,} ({:.1f}%) | origins={:,} | elapsed {} | ETA {}",
                     completed,
@@ -359,6 +551,9 @@ def evaluate_holdout(model, records, config):
                     duration(elapsed),
                     duration(progress["eta_seconds"]),
                 )
+            progress["latency"] = latency_summary
+            progress["rwkv_inference"] = inference_execution_summary(model)
+            progress["latency_summary_updates_every_tables"] = progress_every
             emit_training_event("holdout_table_complete", **progress)
             write_json(
                 directory / "test_metrics_progress.json",
@@ -369,15 +564,46 @@ def evaluate_holdout(model, records, config):
             raise ValueError("No holdout observations")
         all_predictions = pd.DataFrame(rows)
         all_predictions.to_parquet(directory / "test_predictions.parquet", index=False)
+        pd.DataFrame(timer.rows).to_parquet(
+            directory / "request_latencies.parquet", index=False
+        )
         result = {
-            "protocol": "dataset-disjoint, sampled patch origins, one token ahead",
+            "scoring_protocol_version": "four_token_complete_weighted_v2",
+            "primary_metric": "mase",
+            "mase_definition": {
+                "seasonality": lag,
+                "scale": "mean absolute lag-m difference of finite historical target pairs within the capped context at each origin",
+                "aggregation": "weighted token means per origin and target, then equal origin-target weight; pooled point quantiles use the same weights; table_summary gives equal-table score percentiles",
+                "undefined": "zero scale, insufficient history or no finite lag pairs: null MASE and explicit excluded counts; no epsilon substitution",
+            },
+            "latency_protocol": timer.metadata(),
+            "latency": timer.summary(),
+            "protocol": "dataset-disjoint, sampled patch origins, always four forecast tokens, training-weighted scoring",
+            "horizon_policy": {
+                "loss_weights": probabilities,
+                "forecast_tokens": len(probabilities),
+                "boundary": "all origins reserve four full future tokens; final origin is the latest patch-aligned start with 64 points remaining; missing actuals alone are excluded from scoring",
+                "counts_by_tokens": {
+                    str(k): len(
+                        {
+                            (row["source"], row["origin"])
+                            for row in origin_metrics
+                            if row["forecast_tokens"] == k
+                        }
+                    )
+                    for k in range(1, len(probabilities) + 1)
+                },
+            },
             "percentiles": percentiles,
-            "origin_selection": "first eligible, nearest row percentiles with distinct ordered origins, final eligible; all origins for short tables",
+            "origin_selection": "first eligible after two context tokens, nearest row percentiles among starts with four full future tokens, final eligible; all eligible origins for short tables",
             "patch_size": patch,
             "context_limit": cap,
             "initial_context_tokens": 2,
-            "partial_final_patch": "score real observations only",
+            "minimum_table_points": minimum,
+            "selected_tables_before_length_filter": requested_tables,
+            "skipped_short_tables": requested_tables - len(records),
             "models": methods,
+            "graph_profile_plan": graph_plan,
             "benchmark_metadata": benchmarks.metadata,
             "plot_selection": plot_selection,
             "baseline_covariates": "Naive uses historical targets; foundation models use past covariates directly; Prophet uses configured historical regressors with forecast-derived future values, no observed future covariates",
@@ -385,10 +611,53 @@ def evaluate_holdout(model, records, config):
             "origin_target_count": len(origin_metrics),
             "seconds": perf_counter() - started,
             "pooled": summarize(all_predictions),
-            "tables": table_metrics,
-            "origins": origin_metrics,
+        }
+        write_json(directory / "table_metrics.json", table_metrics, level="DEBUG")
+        write_json(directory / "origin_metrics.json", origin_metrics, level="DEBUG")
+        result["detail_files"] = {
+            "tables": "table_metrics.json",
+            "origins": "origin_metrics.json",
+            "predictions": "test_predictions.parquet",
+            "latencies": "request_latencies.parquet",
+        }
+        write_error_distribution(result, directory, config, tables=table_metrics)
+        write_latency_distribution(result, pd.DataFrame(timer.rows), directory, config)
+        result["leaderboard"] = sorted(
+            [
+                {
+                    "model": name,
+                    "mase": result["pooled"][name]["mase"],
+                    "median_absolute_scaled_error": result["pooled"][name][
+                        "median_absolute_scaled_error"
+                    ],
+                    "table_mase_mean": result["table_summary"]["models"][name]["mase"][
+                        "mean"
+                    ],
+                    "table_mase_median": result["table_summary"]["models"][name][
+                        "mase"
+                    ]["median"],
+                    "table_mase_p10": result["table_summary"]["models"][name]["mase"][
+                        "p10"
+                    ],
+                    "table_mase_p90": result["table_summary"]["models"][name]["mase"][
+                        "p90"
+                    ],
+                    "median_latency_ms": result["latency"][name]["median_ms"],
+                    "p95_latency_ms": result["latency"][name]["p95_ms"],
+                }
+                for name in methods
+            ],
+            key=lambda item: (item["mase"] is None, item["mase"] or 0),
+        )
+        result["paired_latency"] = timer.paired_comparison()
+        result["rwkv_inference"] = inference_execution_summary(model)
+        result["by_forecast_token"] = {
+            str(token): summarize(group)
+            for token, group in all_predictions.groupby("forecast_token")
+            if np.isfinite(group.actual).any()
         }
         write_json(directory / "test_metrics.json", result)
+        logger.success("MASE / request latency leaderboard: {}", result["leaderboard"])
         logger.success("Final out-of-sample comparison: {}", result["pooled"])
         return result
     finally:

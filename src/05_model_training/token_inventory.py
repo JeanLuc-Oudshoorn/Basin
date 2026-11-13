@@ -216,19 +216,21 @@ def _add_record(index, record, split, patch):
     if not train:
         labels = _numpy(batch["future_target"])[0]
         for variable, name in enumerate(record["targets"]):
-            padded = np.pad(
-                labels[variable], (0, patch - labels.shape[-1]), constant_values=np.nan
-            )
-            index.add(
-                split,
-                padded,
-                0,
-                source,
-                name,
-                record["cutoff"],
-                record["cutoff"] + patch,
-                target=True,
-            )
+            for offset in range(0, labels.shape[-1], patch):
+                values = labels[variable, offset : offset + patch]
+                padded = np.pad(
+                    values, (0, patch - len(values)), constant_values=np.nan
+                )
+                index.add(
+                    split,
+                    padded,
+                    0,
+                    source,
+                    name,
+                    record["cutoff"] + offset,
+                    record["cutoff"] + offset + patch,
+                    target=True,
+                )
     index.counts[split]["windows"] += 1
 
 
@@ -246,7 +248,12 @@ def _add_test(index, record, config):
         len(frame),
         patch,
         config.get("holdout", {}).get("percentiles", [1, 25, 50, 75, 99]),
+        prediction_patches=4
+        if config["data"].get("validation_policy") == "sampled_training_origins"
+        else 1,
     )
+    if not origins:
+        return
     last = origins[-1] // patch
     targets = record["targets"]
     columns = targets + record["roles"]["past"]
@@ -272,11 +279,26 @@ def _add_test(index, record, config):
                 )
         if variable < len(targets):
             for start in origins:
-                raw = values[variable, start : start + patch]
-                padded = np.pad(raw, (0, patch - len(raw)), constant_values=np.nan)
-                index.add(
-                    "test", padded, 0, source, name, start, start + patch, target=True
+                patches = (
+                    4
+                    if config["data"].get("validation_policy")
+                    == "sampled_training_origins"
+                    else 1
                 )
+                for offset in range(patches):
+                    origin = start + offset * patch
+                    raw = values[variable, origin : origin + patch]
+                    padded = np.pad(raw, (0, patch - len(raw)), constant_values=np.nan)
+                    index.add(
+                        "test",
+                        padded,
+                        0,
+                        source,
+                        name,
+                        origin,
+                        origin + patch,
+                        target=True,
+                    )
     index.counts["test"]["windows"] += len(origins)
 
 
@@ -293,12 +315,18 @@ def build_inventory(data, config, *, groups=None, directory=None):
         index = _Index(Path(temp) / "counts.sqlite", config["model"]["patch_size"])
         try:
             for split, records in (("training", training), ("validation", validation)):
+                if (
+                    split == "validation"
+                    and records
+                    and "validation_origin" in records[0]
+                ):
+                    from rolling_validation import validation_windows
+
+                    records = validation_windows(records, config)
                 for i, record in enumerate(records, 1):
                     _add_record(index, record, split, config["model"]["patch_size"])
                     if i % 1000 == 0:
-                        logger.info(
-                            "Token inventory: {} {}/{} windows", split, i, len(records)
-                        )
+                        logger.info("Token inventory: {} {} windows", split, i)
             for i, record in enumerate(test, 1):
                 _add_test(index, record, config)
                 if i % 100 == 0:
@@ -333,7 +361,7 @@ def build_inventory(data, config, *, groups=None, directory=None):
             "exclusions": "Kernel padding, entirely unobserved patches, held-out-table training records and repeated epochs do not create unique input tokens.",
             "targets": "Prediction labels counted separately from input patches; test includes the real partial tail.",
             "test": "Sampled dataset-disjoint origins, with the same capped expanding actual history as final testing.",
-            "overlap": "Training/validation input overlap is expected shared history; content overlap across different sources can also occur naturally.",
+            "overlap": "Sampled-origin validation uses disjoint source tables: training/validation source overlap must be zero. Legacy reserved-tail validation shares history. Identical content across different sources can occur naturally.",
             "interpretation": "Exact content counts measure duplication, not statistical independence or guaranteed data sufficiency. Similar noisy patches can all be distinct. Ratios are descriptive; no pass/fail threshold is imposed.",
         },
     }
@@ -442,7 +470,8 @@ def prepare_token_inventory(data, config, *, groups):
         "artifact_signature": data["signature"],
         "processed_sha256": data["processed_sha256"],
         "training_windows": len(groups[0]),
-        "validation_tables": len(groups[1]),
+        "validation_tables": len({r["source"] for r in groups[1]}),
+        "validation_forecasts": len(groups[1]),
         "test_tables": len(groups[2]),
         "corpus_scan_performed": mode == "exact",
         "exact_inventory_command": "uv run python src/05_model_training/token_inventory.py --config configs/config.json",

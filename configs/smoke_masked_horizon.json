@@ -1,0 +1,83 @@
+{
+  "seed": 7,
+  "paths": {
+    "raw": "data/01_generated",
+    "processed": "data/02_processed",
+    "embedded": "data/03_embedded",
+    "training": "results/pipeline/training",
+    "forecasts": "results/pipeline/forecasts",
+    "logs": "logs"
+  },
+  "logging": {
+    "level": "DEBUG",
+    "preview_values": 8
+  },
+  "data": {
+    "context_length": 64,
+    "horizon": 16,
+    "targets": [
+      "outcome"
+    ],
+    "past_covariates": "auto",
+    "known_covariates": [],
+    "time_column": "time_index",
+    "max_tables": 2,
+    "train_windows_per_table": 2,
+    "stride": 16,
+    "excluded_column_patterns": [
+      "(?i)(?:^|_)lag(?:ged)?(?:_?\\d+)?(?:_|$)"
+    ],
+    "export_processed_tables": true
+  },
+  "model": {
+    "patch_size": 8,
+    "width": 128,
+    "layers": 2,
+    "variate_heads": 4,
+    "max_patches": 32,
+    "quantiles": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ]
+  },
+  "training": {
+    "steps": 3,
+    "learning_rate": 0.001,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "train_embeddings": true
+  },
+  "baseline": {
+    "trend": "add",
+    "seasonal": "add",
+    "seasonal_periods": 8,
+    "damped_trend": false,
+    "initialization_method": "estimated"
+  },
+  "plot": {
+    "width": 12,
+    "height": 5,
+    "dpi": 140
+  },
+  "prophet": {
+    "enabled": true,
+    "start_date": "2000-01-01",
+    "frequency": "D",
+    "yearly_seasonality": false,
+    "weekly_seasonality": false,
+    "daily_seasonality": false,
+    "seasonality_mode": "additive",
+    "changepoint_prior_scale": 0.05,
+    "seasonality_prior_scale": 10.0,
+    "seasonality_period": 16,
+    "fourier_order": 3,
+    "uncertainty_samples": 0
+  }
+}

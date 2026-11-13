@@ -1,0 +1,16 @@
+{
+  "model_config": "configs/config.json",
+  "seed": 101,
+  "warmup_updates": 5,
+  "measured_updates": 24,
+  "repeats": 3,
+  "cases": [
+    {"name": "256_points_microbatch_4", "variables": 4, "patches": 16, "microbatch": 4},
+    {"name": "512_points_microbatch_4", "variables": 4, "patches": 32, "microbatch": 4},
+    {"name": "1024_points_microbatch_4", "variables": 4, "patches": 64, "microbatch": 4},
+    {"name": "512_points_microbatch_1", "variables": 4, "patches": 32, "microbatch": 1},
+    {"name": "2048_points_control", "variables": 6, "patches": 128, "microbatch": 4}
+  ],
+  "mixed_batches": 24,
+  "mixed_repeats": 3
+}

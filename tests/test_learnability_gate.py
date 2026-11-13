@@ -24,6 +24,9 @@ from transform import (
 class LearnabilityGateTests(unittest.TestCase):
     def fixture(self, root):
         config = load_config()
+        config["validation"]["enabled"] = True
+        config["data"]["horizon"] = 16  # Explicit legacy screening fixture.
+        config["validation"]["engine"] = "prophet"  # Legacy report compatibility.
         config["data"].pop("generated_dates", None)  # Legacy flat-table fixture.
         base = Path(root)
         config["paths"]["raw"] = str(base / "raw")

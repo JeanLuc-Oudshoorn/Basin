@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src/05_model_training"))
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
 sys.path.insert(0, str(ROOT / "src/06_holdout_test"))
 from benchmarks import sample_holdout
+from fast_inference import configure_fast_inference
 from holdout import evaluate_holdout
 from performance import configure_cuda_memory
 from train import RWKVForecaster, launch_wsl
@@ -54,6 +55,7 @@ def forecast(config):
         configure_cuda_memory(config["training"])
         model = RWKVForecaster.load(checkpoint).eval()
         configure_variate_execution(model, config["training"], ROOT)
+        configure_fast_inference(model, config["training"])
     if "dataset_split" in metadata:
         test_sources = set(metadata["dataset_split"]["test_sources"])
         records = [
@@ -185,7 +187,12 @@ def forecast(config):
                             np.mean((prophet_prediction[valid] - actual[valid]) ** 2)
                         )
                     )
-            context_scale = max(float(np.nanstd(context)), 1e-5)
+            context_scale = float(np.nanstd(context))
+            context_scale = (
+                context_scale
+                if np.isfinite(context_scale) and context_scale > 0
+                else 1.0
+            )
             row = {
                 "window": record["id"],
                 "target": target,

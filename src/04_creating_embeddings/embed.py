@@ -1,7 +1,7 @@
 """Stage 2: index patch inputs; create learned embeddings inside model training."""
 
 import argparse
-import json
+import math
 import os
 import shutil
 import sys
@@ -17,6 +17,8 @@ from torch.nn import functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
+from embedding_progress import EmbeddingCheckpoint, EmbeddingProgress, embedding_options
+from sharded_records import ShardedRecords
 from transform import (
     file_digest,
     load_config,
@@ -25,8 +27,8 @@ from transform import (
     run_context,
     save_artifact,
     timed,
-    write_json,
 )
+from transform_progress import atomic_json, atomic_write
 
 
 @dataclass(frozen=True)
@@ -40,8 +42,39 @@ class ForecastConfig:
     objective: str = "masked_horizon"
     context_length: int = 2048
     gradient_checkpointing: bool = False
+    output_patches: int = 1
+    multi_horizon_weight: float = 0.5
+    horizon_loss_weights: tuple[float, ...] | None = None
 
     def __post_init__(self):
+        if self.horizon_loss_weights is not None:
+            weights = tuple(self.horizon_loss_weights)
+            object.__setattr__(self, "horizon_loss_weights", weights)
+            if (
+                self.objective != "next_patch"
+                or len(weights) != self.output_patches
+                or any(
+                    isinstance(w, bool)
+                    or not isinstance(w, (int, float))
+                    or not math.isfinite(w)
+                    or w <= 0
+                    for w in weights
+                )
+                or not math.isclose(sum(weights), 1.0, abs_tol=1e-8)
+            ):
+                raise ValueError(
+                    "horizon_loss_weights must be positive, sum to one and match next_patch output_patches"
+                )
+        if (
+            isinstance(self.output_patches, bool)
+            or not isinstance(self.output_patches, int)
+            or self.output_patches < 1
+        ):
+            raise ValueError("output_patches must be a positive integer")
+        if not 0 <= self.multi_horizon_weight <= 1:
+            raise ValueError("multi_horizon_weight must be between zero and one")
+        if self.output_patches > 1 and self.objective != "next_patch":
+            raise ValueError("Multiple output patches require next_patch")
         if self.objective not in ("masked_horizon", "next_patch"):
             raise ValueError("Unknown forecasting objective")
         if self.patch_size < 1 or self.width < 64 or self.width % 64:
@@ -183,7 +216,11 @@ class PatchEncoder(nn.Module):
         scale = (
             ((clean - loc).square() * observed).sum(-1, keepdim=True) / count
         ).sqrt()
-        scale = torch.where(scale > 1e-5, scale, torch.ones_like(scale))
+        # Preserve every positive finite standard deviation, regardless of units.
+        # Only degenerate/unavailable scales need the division-by-zero fallback.
+        scale = torch.where(
+            torch.isfinite(scale) & (scale > 0), scale, torch.ones_like(scale)
+        )
         history = F.pad(history, (cp * p - length, 0), value=float("nan"))
         future = F.pad(future, (0, hp * p - horizon), value=float("nan"))
         values = torch.cat([history, future], dim=-1)
@@ -249,7 +286,9 @@ class PatchEncoder(nn.Module):
             clean.square().sum(-1, keepdim=True).cumsum(-2) / count - loc.square()
         )
         scale = variance.clamp_min(0).sqrt()
-        scale = torch.where(scale > 1e-5, scale, torch.ones_like(scale)).float()
+        scale = torch.where(
+            torch.isfinite(scale) & (scale > 0), scale, torch.ones_like(scale)
+        ).float()
         loc = loc.float()
         values = ((patches - loc) / scale).nan_to_num().clamp(-1e4, 1e4)
         time = (
@@ -346,152 +385,195 @@ def open_patch_index(index, config):
         torch.manual_seed(config["seed"])
         encoder = PatchEncoder(ForecastConfig(**settings)).eval()
     encoder.load_state_dict(index["encoder_state"])
+    if processed.get("format") == "sharded_windows_v1":
+        from sharded_records import EncodedRecords
+
+        records = EncodedRecords(processed["records"], encoder, LazyPatchRecord)
+    else:
+        records = [LazyPatchRecord(r, encoder) for r in processed["records"]]
     return {
         **index,
-        "records": [LazyPatchRecord(r, encoder) for r in processed["records"]],
+        "records": records,
     }
 
 
+def record_summary(record, settings):
+    """Inspect one raw window without tokenization or learned projections."""
+    if "batch" not in record:
+        if record["split"] != "evaluation":
+            raise ValueError(f"Missing raw training batch: {record['id']}")
+        return {
+            "id": record["id"],
+            "source": record["source"],
+            "split": record["split"],
+            "metadata_only": True,
+        }, 0
+    batch = record["batch"]
+    context = batch["context"]
+    if context.ndim != 3 or min(context.shape) < 1:
+        raise ValueError(
+            f"Invalid context shape for {record['id']}: {list(context.shape)}"
+        )
+    variables = context.shape[1] + sum(
+        batch[name].shape[1]
+        for name in ("past_covariates", "known_covariates")
+        if batch.get(name) is not None
+    )
+    p = settings.patch_size
+    length = context.shape[-1]
+    if settings.objective == "next_patch":
+        length = (
+            length
+            if record["split"] == "train"
+            else min(length, settings.context_length)
+        )
+        tokens = (length + p - 1) // p - int(record["split"] == "train")
+    else:
+        tokens = (length + p - 1) // p + (batch["horizon"] + p - 1) // p
+    padded = (tokens + 15) // 16 * 16
+    if tokens < 1 or padded > settings.max_patches:
+        raise ValueError(f"Invalid token count for {record['id']}: {tokens}")
+    shape = [context.shape[0], variables, padded, settings.width]
+    return {
+        "id": record["id"],
+        "source": record["source"],
+        "split": record["split"],
+        "context_shape": list(context.shape),
+        "input_tokens": tokens,
+        "padded_tokens": padded,
+        "embedding_shape_when_used": shape,
+    }, math.prod(shape) * 4
+
+
 def embed(config):
-    """Prepare an index, not a corpus-sized collection of random embeddings."""
+    """Index windows in bounded batches and resume from a durable JSONL prefix."""
     import psutil
 
-    options = config.get("embedding", {})
-    threads = options.get("cpu_threads", 2)
-    interval = options.get("progress_every", 1000)
-    if any(
-        isinstance(v, bool) or not isinstance(v, int) or v < 1
-        for v in (threads, interval)
-    ):
-        raise ValueError(
-            "embedding.cpu_threads and progress_every must be positive integers"
-        )
+    options = embedding_options(config.get("embedding", {}))
+    threads = options["cpu_threads"]
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(threads)
     directory = location(config, "embedded")
-    directory.mkdir(parents=True, exist_ok=True)
     temporary = directory / f".embeddings_{uuid4().hex}.tmp"
-    detail_temp = directory / f".windows_{uuid4().hex}.tmp"
     started = perf_counter()
     process = psutil.Process()
     try:
+        directory.mkdir(parents=True, exist_ok=True)
         processed_path = location(config, "processed") / "windows.pt"
+        logger.info("Checking processed artifact identity: {}", processed_path)
+        processed_sha256 = file_digest(processed_path)
         processed = read_artifact(processed_path, config)
         settings = dict(config["model"], quantiles=tuple(config["model"]["quantiles"]))
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(config["seed"])
             encoder = PatchEncoder(ForecastConfig(**settings)).eval()
-        count = len(processed["records"])
+        records = processed["records"]
+        count = len(records)
         if not count:
             raise ValueError("Processed artifact has no windows")
-        estimated_old_bytes = 0
-        logger.info(
-            "Patch preparation: windows={} CPU threads={} RSS_GiB={:.3f}; "
-            "raw tensors memory mapped; learned projections run only during training",
-            count,
-            threads,
-            process.memory_info().rss / 2**30,
+        implementation = file_digest(Path(__file__)) + file_digest(
+            Path(__file__).with_name("embedding_progress.py")
         )
-        with detail_temp.open("w", encoding="utf-8") as details:
-            for position, record in enumerate(processed["records"], 1):
-                batch = record["batch"]
-                context = batch["context"]
-                context_shape = list(context.shape)
-                if context.ndim != 3 or min(context.shape) < 1:
-                    raise ValueError(
-                        f"Invalid context shape for {record['id']}: {context.shape}"
-                    )
-                variables = context.shape[1] + sum(
-                    batch[name].shape[1]
-                    for name in ("past_covariates", "known_covariates")
-                    if batch.get(name) is not None
-                )
-                p = encoder.config.patch_size
-                length = context.shape[-1]
-                if encoder.config.objective == "next_patch":
-                    length = (
-                        length
-                        if record["split"] == "train"
-                        else min(length, encoder.config.context_length)
-                    )
-                    tokens = (length + p - 1) // p - int(record["split"] == "train")
-                else:
-                    tokens = (length + p - 1) // p + (batch["horizon"] + p - 1) // p
-                padded = (tokens + 15) // 16 * 16
-                if tokens < 1 or padded > encoder.config.max_patches:
-                    raise ValueError(
-                        f"Invalid token count for {record['id']}: {tokens}"
-                    )
-                shape = [context.shape[0], variables, padded, encoder.config.width]
-                estimated_old_bytes += (
-                    context.shape[0] * variables * padded * encoder.config.width * 4
-                )
-                details.write(
-                    json.dumps(
-                        {
-                            "id": record["id"],
-                            "source": record["source"],
-                            "split": record["split"],
-                            "context_shape": context_shape,
-                            "input_tokens": tokens,
-                            "padded_tokens": padded,
-                            "embedding_shape_when_used": shape,
-                        }
-                    )
-                    + "\n"
-                )
-                if position % interval == 0 or position == count:
-                    logger.info(
-                        "Indexed {}/{} windows elapsed={:.2f}s RSS_GiB={:.3f} free_RAM_GiB={:.3f}",
-                        position,
-                        count,
-                        perf_counter() - started,
-                        process.memory_info().rss / 2**30,
-                        psutil.virtual_memory().available / 2**30,
-                    )
-        payload = {
-            "format": "lazy_patch_index_v1",
-            "signature": processed["signature"],
-            "processed_sha256": file_digest(processed_path),
-            "record_count": count,
-            "source_selection": processed.get("source_selection"),
-            "encoder_state": encoder.state_dict(),
-        }
-        # Write beside the destination on E:, never in C:'s temporary directory.
-        # A failed/interrupted write cannot replace the prior completed artifact.
-        save_artifact(temporary, payload)
-        os.replace(temporary, directory / "embeddings.pt")
-        os.replace(detail_temp, directory / "windows.jsonl")
-        report = {
-            "config": config,
-            "format": payload["format"],
-            "window_count": count,
-            "source_selection": processed.get("source_selection"),
-            "window_details": "windows.jsonl",
-            "cpu_threads": threads,
-            "cached_embedding_vectors": False,
-            "prepared_features": "computed per accessed record",
-            "avoided_float32_snapshot_bytes": estimated_old_bytes,
-            "artifact_bytes": (directory / "embeddings.pt").stat().st_size,
-            "rss_bytes_at_completion": process.memory_info().rss,
-            "available_ram_bytes": psutil.virtual_memory().available,
-            "output_disk_free_bytes": shutil.disk_usage(directory).free,
-            "seconds": perf_counter() - started,
-            "note": "Preparation only. Model training jointly optimizes the patch projection; no offline embedding fitting.",
-        }
-        write_json(directory / "manifest.json", report)
-        logger.success(
-            "Patch index complete: {} windows, artifact_MiB={:.2f}, "
-            "avoided random embeddings_GiB={:.2f}, elapsed={:.2f}s",
+        with EmbeddingCheckpoint(
+            directory,
+            processed["signature"],
+            processed_sha256,
             count,
-            report["artifact_bytes"] / 2**20,
-            estimated_old_bytes / 2**30,
-            report["seconds"],
-        )
-        return report
+            implementation,
+            options,
+        ) as checkpoint:
+            checkpoint.restore()
+            initial = checkpoint.position
+            progress = EmbeddingProgress(count, initial, options["progress_every"])
+            logger.info(
+                "Patch preparation: windows={} batch={} CPU threads={} RSS_GiB={:.3f}; "
+                "learned projections run only during training",
+                count,
+                options["batch_size_records"],
+                threads,
+                process.memory_info().rss / 2**30,
+            )
+            for batch_start in range(initial, count, options["batch_size_records"]):
+                batch_stop = min(count, batch_start + options["batch_size_records"])
+                for position in range(batch_start, batch_stop):
+                    record = records[position]
+                    if (
+                        "batch" not in record
+                        and config["data"].get("validation_policy")
+                        != "sampled_training_origins"
+                    ):
+                        raise ValueError(f"Missing raw training batch: {record['id']}")
+                    detail, estimated_bytes = record_summary(record, encoder.config)
+                    checkpoint.append(detail, estimated_bytes)
+                    checkpoint.save()
+                    progress.update(checkpoint.position)
+                    del record
+                # Keep at most one shard mapped. Do not repeatedly deserialize the
+                # same large shard just because an inspection batch ends inside it.
+                if isinstance(records, ShardedRecords) and (
+                    batch_stop == count
+                    or batch_stop >= records.ends[records.cached_index]
+                ):
+                    records.cached = None
+                    records.cached_index = None
+            checkpoint.save(force=True)
+            checkpoint.status("finalizing")
+            estimated_old_bytes = checkpoint.estimated_old_bytes
+            logger.info(
+                "All records checkpointed. Publishing embedding index and streamed window details."
+            )
+            payload = {
+                "format": "lazy_patch_index_v1",
+                "signature": processed["signature"],
+                "processed_sha256": processed_sha256,
+                "record_count": count,
+                "source_selection": processed.get("source_selection"),
+                "encoder_state": encoder.state_dict(),
+            }
+
+            # Copy the completed metadata stream in bounded blocks. Keep the recovery
+            # copy so interrupted finalization can retry without indexing again.
+            def publish_details(stream):
+                with checkpoint.details_path.open("rb") as source:
+                    shutil.copyfileobj(source, stream, length=1024 * 1024)
+
+            atomic_write(directory / "windows.jsonl", publish_details)
+            save_artifact(temporary, payload)
+            with temporary.open("r+b") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / "embeddings.pt")
+            report = {
+                "config": config,
+                "format": payload["format"],
+                "window_count": count,
+                "source_selection": processed.get("source_selection"),
+                "window_details": "windows.jsonl",
+                "cpu_threads": threads,
+                "batch_size_records": options["batch_size_records"],
+                "resumed_records": initial,
+                "checkpoint": str(checkpoint.path),
+                "cached_embedding_vectors": False,
+                "prepared_features": "computed per accessed record",
+                "avoided_float32_snapshot_bytes": estimated_old_bytes,
+                "artifact_bytes": (directory / "embeddings.pt").stat().st_size,
+                "rss_bytes_at_completion": process.memory_info().rss,
+                "available_ram_bytes": psutil.virtual_memory().available,
+                "output_disk_free_bytes": shutil.disk_usage(directory).free,
+                "seconds": perf_counter() - started,
+                "note": "Preparation only. Model training jointly optimizes the patch projection; no offline embedding fitting.",
+            }
+            atomic_json(directory / "manifest.json", report)
+            checkpoint.status("complete")
+            logger.success(
+                "Patch index complete: {} windows, resumed={}, artifact_MiB={:.2f}, elapsed={:.2f}s",
+                count,
+                initial,
+                report["artifact_bytes"] / 2**20,
+                report["seconds"],
+            )
+            return report
     finally:
         temporary.unlink(missing_ok=True)
-        detail_temp.unlink(missing_ok=True)
         torch.set_num_threads(previous_threads)
 
 

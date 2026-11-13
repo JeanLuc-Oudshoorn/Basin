@@ -1,0 +1,27 @@
+{
+  "seed": 7,
+  "contexts": [32, 128, 512, 2048],
+  "horizons": [1, 16, 64, 256],
+  "covariates": [0, 3],
+  "warmups": 3,
+  "repeats": 20,
+  "diagnostic_repeats": 100,
+  "cpu_threads": 4,
+  "reduced_layers": 17,
+  "confirmation": {
+    "cases": [[32, 16, 3], [512, 16, 0], [512, 16, 3], [2048, 16, 3], [512, 256, 3]],
+    "warmups": 3,
+    "repeats": 20,
+    "cuda_memory_limit_gib": 4.0,
+    "compile_threads": 1
+  },
+  "cpu": {
+    "contexts": [128, 2048],
+    "horizons": [16, 256],
+    "covariates": [0, 3],
+    "warmups": 1,
+    "repeats": 5
+  },
+  "quantiles": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+  "output": "docs/time_benchmark/2026-10-31"
+}

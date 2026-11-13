@@ -1,11 +1,13 @@
-"""Stage 02: screen pre-test history with Prophet versus last observation carried forward."""
+"""Stage 02: screen historical targets and covariates with Chronos-2 Small."""
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from uuid import uuid4
 
 import pandas as pd
@@ -17,6 +19,13 @@ from prophet_validator import ProphetValidator, multivariate_admitted
 
 
 def validate(config, *, retry_errors=False):
+    if not config.get("validation", {}).get("enabled", False):
+        logger.info(
+            "Data screening skipped: validation.enabled=false; transform will admit all candidate tables"
+        )
+        results = pd.DataFrame()
+        results.attrs["screening_skipped"] = True
+        return results
     # Keep training/Torch imports out of spawned Prophet workers.
     from transform import (
         discover_source_tables,
@@ -29,22 +38,33 @@ def validate(config, *, retry_errors=False):
     )
 
     policy = config["validation"]
-    if not policy["enabled"]:
-        raise ValueError("Enable validation in config.json to run screening")
+    logger.info("Preparing validation engine={}", policy.get("engine", "chronos_bolt"))
+    engine = policy.get("engine", "chronos_bolt")
+    if engine not in ("chronos2", "chronos_bolt", "prophet"):
+        raise ValueError("validation.engine must be chronos2, chronos_bolt or prophet")
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
-    validator = ProphetValidator(
-        location(config, "raw"),
-        PROJECT_ROOT / Path(policy["metrics_path"]).parent,
-        train_fraction=policy["train_fraction"],
-        covariate_mode=policy["covariate_mode"],
-        step_duration=policy["step_duration"],
-        seed=config["seed"],
-        prophet_options=policy["prophet_options"],
-        seasonal_periods=policy["seasonal_periods"],
-        reserved_tail_rows=config["data"]["horizon"],
-        workers=policy.get("workers"),
-    )
+    if engine == "chronos2":
+        from chronos_validator import ChronosValidator
+
+        validator = ChronosValidator(config)
+    elif engine == "chronos_bolt":
+        from bolt_validator import BoltValidator
+
+        validator = BoltValidator(config)
+    else:
+        validator = ProphetValidator(
+            location(config, "raw"),
+            PROJECT_ROOT / Path(policy["metrics_path"]).parent,
+            train_fraction=policy["train_fraction"],
+            covariate_mode=policy["covariate_mode"],
+            step_duration=policy["step_duration"],
+            seed=config["seed"],
+            prophet_options=policy["prophet_options"],
+            seasonal_periods=policy["seasonal_periods"],
+            reserved_tail_rows=config["data"]["horizon"],
+            workers=policy.get("workers"),
+        )
     paths = discover_source_tables(config)
     if not paths:
         raise ValueError("No source data.parquet files found")
@@ -62,8 +82,13 @@ def validate(config, *, retry_errors=False):
         "run_date_utc": started.date().isoformat(),
         "dataset_dates": generated_dates(config),
         "source_selection": source_selection(config),
-        "admission_metric": "mae",
-        "admission_rule": "multivariate_mae <= baseline_mae",
+        "engine": engine,
+        "admission_metric": "mase" if engine == "chronos_bolt" else "mae",
+        "admission_rule": "chronos2_mae <= (1 + max_relative_degradation) * baseline_mae"
+        if engine == "chronos2"
+        else "chronos_bolt_mase <= (1 + max_relative_degradation) * baseline_mase; undefined MASE retained"
+        if engine == "chronos_bolt"
+        else "multivariate_mae <= baseline_mae",
         "report": str(report.resolve()),
         "retry_source": str(previous_report.resolve()) if previous_report else None,
     }
@@ -117,7 +142,14 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
                 and not bool(row.get("smoke_test_only", False))
                 and row.screening_signature == signature
                 and row.source_sha256 == file_digest(path)
-                and pd.notna(row.get("multivariate_mae"))
+                and (
+                    pd.notna(row.get("chronos2_mae"))
+                    if metadata["engine"] == "chronos2"
+                    else pd.notna(row.get("chronos_bolt_mase"))
+                    or row.get("mase_scale") == 0
+                    if metadata["engine"] == "chronos_bolt"
+                    else pd.notna(row.get("multivariate_mae"))
+                )
             ):
                 records[path] = row.to_dict()
     if report.is_file():
@@ -134,6 +166,7 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
                 shutil.copy2(previous_file, archive / previous_file.name)
         logger.info("Archived previous validation report: {}", archive)
     reused = len(records)
+    processing_started = perf_counter()
     pending = [path for path in paths if path not in records]
     progress = report.with_name("metrics_progress.csv")
     if records:
@@ -150,7 +183,7 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
         key = path.relative_to(location(config, "raw")).as_posix()
         record.update(source_key=key, screening_signature=signature)
         records[path] = record
-        logger.info("VALIDATION {}/{} {}", index, len(paths), record)
+        logger.debug("VALIDATION {}/{} {}", index, len(paths), record)
         # Durable per-table progress without rewriting a growing Parquet report.
         pd.DataFrame([record]).to_csv(
             progress,
@@ -158,7 +191,17 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
             header=index == 1,
             index=False,
         )
-        if index % 100 == 0:
+        if index % 100 == 0 or index == len(paths):
+            elapsed = perf_counter() - processing_started
+            completed = index - reused
+            eta = elapsed / completed * (len(paths) - index)
+            logger.info(
+                "VALIDATION tables {}/{} | elapsed {:.1f}s | ETA {:.1f}s",
+                index,
+                len(paths),
+                elapsed,
+                eta,
+            )
             write_json(
                 report.with_name("status.json"),
                 {
@@ -168,6 +211,8 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
                     "processed": index,
                     "reused": reused,
                     "reevaluated": index - reused,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": eta,
                 },
             )
     results = pd.DataFrame([records[path] for path in paths])
@@ -175,7 +220,16 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
     temporary = report.with_suffix(".tmp.parquet")
     results.to_parquet(temporary, index=False)
     temporary.replace(report)
-    wins = multivariate_admitted(results)
+    if metadata["engine"] == "chronos2":
+        from chronos_validator import chronos_admitted
+
+        wins = chronos_admitted(results, policy.get("max_relative_degradation", 0.15))
+    elif metadata["engine"] == "chronos_bolt":
+        from bolt_validator import bolt_admitted
+
+        wins = bolt_admitted(results, policy.get("max_relative_degradation", 0.1))
+    else:
+        wins = multivariate_admitted(results)
     summary = {
         **metadata,
         "tables": len(results),
@@ -195,6 +249,7 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
         "policy": policy,
         "effective_workers": validator.worker_count(len(paths)),
         "temp_dir": str(validator.temp_dir.resolve()),
+        "model_metadata": getattr(validator, "metadata", {}),
     }
     summary["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(report.with_name("summary.json"), summary)
@@ -208,7 +263,7 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
                 "report": report.relative_to(root).as_posix(),
                 "screening_signature": signature,
                 "source_selection": source_selection(config),
-                "admission_metric": "mae",
+                "admission_metric": metadata["admission_metric"],
             },
         )
         pointer.replace(root / "latest.json")
@@ -222,10 +277,13 @@ def _evaluate_run(config, validator, paths, report, previous_report, metadata):
 
 
 def main():
-    from transform import load_config, run_context
+    from transform import load_config, run_context, write_source_manifest
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/config.json"))
+    parser.add_argument(
+        "--source-manifest", help="Run-local native source index passed to WSL"
+    )
     parser.add_argument(
         "--retry-errors",
         action="store_true",
@@ -233,7 +291,36 @@ def main():
     )
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.source_manifest:
+        os.environ["BASIN_SOURCE_MANIFEST"] = str(PROJECT_ROOT / args.source_manifest)
     with run_context(config, "validate"):
+        if not config.get("validation", {}).get("enabled", False):
+            validate(config, retry_errors=args.retry_errors)
+            return
+        if config["validation"].get("engine", "chronos_bolt") in (
+            "chronos2",
+            "chronos_bolt",
+        ):
+            sys.path.insert(0, str(PROJECT_ROOT / "src/05_model_training"))
+            from train import launch_wsl
+
+            extra_args = ("--retry-errors",) if args.retry_errors else ()
+            if os.name == "nt":
+                manifest = (
+                    Path(os.environ["BASIN_SOURCE_MANIFEST"])
+                    if args.source_manifest
+                    else write_source_manifest(config)
+                )
+                extra_args += (
+                    "--source-manifest",
+                    manifest.relative_to(PROJECT_ROOT).as_posix(),
+                )
+            if launch_wsl(
+                __file__,
+                args.config,
+                extra_args=extra_args,
+            ):
+                return
         validate(config, retry_errors=args.retry_errors)
 
 
