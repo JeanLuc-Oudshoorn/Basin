@@ -6,6 +6,7 @@ dimensionally calibrated simulator of a particular pump, reactor or controller.
 """
 
 from collections import deque
+from functools import lru_cache
 
 import numpy as np
 
@@ -44,6 +45,7 @@ TEMPORAL_OPERATORS = (
     "regime_switch",
     "pid",
     "volatility_coupling",
+    "second_order",
 )
 
 
@@ -56,12 +58,71 @@ def clip_scalar(value, low, high):
     return low if value < low else high if value > high else value
 
 
+def second_order_coefficients(period, damping):
+    """Exact one-step update of y'' + 2*zeta*w*y' + w*w*y = w*w*u, input held.
+
+    Returns (a11, a12, a21, a22, b1, b2) for the state (y, y'). Unit static
+    gain: a step input settles at the input, with overshoot below zeta=1.
+    Matrix exponential by scaling and squaring; no SciPy dependency.
+    """
+    omega = 2 * np.pi / period
+    system = np.array([[0.0, 1.0], [-omega * omega, -2 * damping * omega]])
+    squarings = max(0, int(np.ceil(np.log2(max(1e-12, np.abs(system).sum())))) + 4)
+    scaled = system / 2**squarings
+    transition, term = np.eye(2), np.eye(2)
+    for order in range(1, 13):
+        term = term @ scaled / order
+        transition = transition + term
+    for _ in range(squarings):
+        transition = transition @ transition
+    drive = np.linalg.solve(
+        system, (transition - np.eye(2)) @ np.array([0.0, omega * omega])
+    )
+    return tuple(float(v) for v in (*transition.ravel(), *drive))
+
+
+# Only these maps consume a positive temperature/concentration. Temporal
+# filters and the other static maps do not need a softplus on every sample.
+_POSITIVE_OPERATORS = frozenset(
+    (
+        "hill",
+        "michaelis_menten",
+        "langmuir",
+        "arrhenius",
+        "antoine",
+        "decreasing_quadratic",
+        "quadratic_friction",
+        "stefan_boltzmann",
+    )
+)
+_POSITIVE_PARENT_MODES = frozenset(("product", "ratio", "exponent_gate", "log_sum"))
+
+
+@lru_cache(maxsize=1024)
+def _lag_alpha(tau):
+    # Parameters are fixed for a whole SCM. Reuse the identical scalar NumPy
+    # calculation across rows; never approximate expm1 or change its dtype.
+    # Key by the parameter, so edited/replayed specifications remain valid.
+    # Bound memory in workers generating millions of unrelated SCMs.
+    return -np.expm1(-1 / tau)
+
+
+@lru_cache(maxsize=1024)
+def _cascade_alphas(tau, count, spread):
+    return tuple(_lag_alpha(tau * spread**index) for index in range(count))
+
+
+@lru_cache(maxsize=1024)
+def _resonance_pole(tau, period):
+    return np.exp(-1 / tau + 2j * np.pi / period)
+
+
 def evaluate_extra(op, z, b, instruction, state):
     """Evaluate one instruction. Temporal updates consume only current/past input."""
     p = instruction
     k, width, threshold = p["k"], p["width"], p["threshold"]
-    # Stable softplus supplies a strictly positive temperature/concentration.
-    positive = float(np.logaddexp(0.0, z)) + p["floor"]
+    if op in _POSITIVE_OPERATORS:
+        positive = float(np.logaddexp(0.0, z)) + p["floor"]
     if op == "saturation":
         return z / (k + abs(z))
     if op in ("hill", "michaelis_menten", "langmuir"):
@@ -111,11 +172,15 @@ def evaluate_extra(op, z, b, instruction, state):
     # Shared defaults are used only on the first call of an instruction. The
     # simulator owns this dictionary; never mutate the saved SCM itself.
     previous = state.get("output", 0.0)
-    alpha = -np.expm1(-1 / p["tau"])
     if op == "first_order_lag":
+        alpha = _lag_alpha(p["tau"])
         result = previous + alpha * (z - previous)
     elif op == "delay":
-        queue = state.setdefault("queue", deque([0.0] * p["steps"], maxlen=p["steps"]))
+        # setdefault evaluates its default eagerly, allocating and discarding
+        # a full delay buffer every timestep even when the buffer exists.
+        queue = state.get("queue")
+        if queue is None:
+            queue = state["queue"] = deque([0.0] * p["steps"], maxlen=p["steps"])
         result = queue.popleft()
         queue.append(z)
     elif op == "integrator":
@@ -133,17 +198,21 @@ def evaluate_extra(op, z, b, instruction, state):
     elif op == "rate_limiter":
         result = previous + clip_scalar(z - previous, -p["fall_rate"], p["rise_rate"])
     elif op in ("erlang", "diffusion"):
-        stages = state.setdefault("stages", [0.0] * p["stages"])
+        stages = state.get("stages")
+        if stages is None:
+            stages = state["stages"] = [0.0] * p["stages"]
         # Cascaded first-order filters give Erlang-like impulse responses.
         # Geometrically spaced time constants make the diffusion variant broader.
         result = z
-        for index in range(len(stages)):
-            tau = p["tau"] * (p["spread"] ** index if op == "diffusion" else 1)
-            stages[index] += -np.expm1(-1 / tau) * (result - stages[index])
+        alphas = _cascade_alphas(
+            p["tau"], len(stages), p["spread"] if op == "diffusion" else 1
+        )
+        for index, alpha in enumerate(alphas):
+            stages[index] += alpha * (result - stages[index])
             result = stages[index]
     elif op == "resonance":
         # Stable complex pole: an input impulse excites a damped oscillator.
-        pole = np.exp(-1 / p["tau"] + 2j * np.pi / p["period"])
+        pole = _resonance_pole(p["tau"], p["period"])
         oscillator = pole * state.get("oscillator", 0j) + (1 - abs(pole)) * z
         state["oscillator"] = oscillator
         result = oscillator.imag
@@ -168,10 +237,23 @@ def evaluate_extra(op, z, b, instruction, state):
         result = k * error + p["ki"] * integral + p["kd"] * derivative
     elif op == "volatility_coupling":
         # Deterministic volatility estimate, not an extra random innovation.
+        alpha = _lag_alpha(p["tau"])
         mean = state.get("mean", 0.0)
         variance = (1 - alpha) * state.get("variance", 0.0) + alpha * (z - mean) ** 2
         state.update(mean=mean + alpha * (z - mean), variance=variance)
         result = z * (1 + k * np.sqrt(variance))
+    elif op == "second_order":
+        # Settling with optional overshoot and ringing around the NEW level.
+        # (resonance above is band-pass: it rings and returns to zero.)
+        coefficients = state.get("coefficients")
+        if coefficients is None:
+            coefficients = state["coefficients"] = second_order_coefficients(
+                p["period"], p.get("damping", 0.5)
+            )
+        a11, a12, a21, a22, b1, b2 = coefficients
+        position, velocity = state.get("position", 0.0), state.get("velocity", 0.0)
+        state["position"] = result = a11 * position + a12 * velocity + b1 * z
+        state["velocity"] = a21 * position + a22 * velocity + b2 * z
     else:
         raise ValueError(f"Unknown operator: {op}")
     state["output"] = float(clip_scalar(result, -p["limit"], p["limit"]))
@@ -278,8 +360,9 @@ def _combine_selected_parents(effects, spec, prepared=None):
     indices = prepared["indices"]
     selected = values[indices]
     z = selected / spec["scale"]
-    positive = _positive(z, spec)
     mode, scale = spec["mode"], spec["scale"]
+    if mode in _POSITIVE_PARENT_MODES:
+        positive = _positive(z, spec)
     if mode == "product":
         joint = scale * np.exp(clip_scalar(np.log(positive).sum(), -30, 30))
     elif mode == "saddle":

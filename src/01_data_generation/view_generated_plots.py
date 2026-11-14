@@ -4,6 +4,7 @@ Uses only Python's standard library. Stop the local server with Ctrl+C.
 """
 
 import json
+import os
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,7 +12,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 # Settings: select a day here, or switch dates inside the viewer.
 GENERATED_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
-INITIAL_DATE = None  # None selects the latest available day, e.g. "2026-10-23".
+INITIAL_DATE = None  # None selects the latest available day, e.g. "2026-11-13".
+LATEST_ONLY = True  # Skip older days; set False to offer all dates in the dropdown.
+PAGE_SIZE = 50  # Bound filesystem checks, response size and browser rendering.
 PORT = 0  # Zero chooses an available local port automatically.
 OPEN_BROWSER = True
 
@@ -44,6 +47,9 @@ class PlotHandler(BaseHTTPRequestHandler):
                 if root.is_dir()
                 else []
             )
+            if self.server.latest_only:
+                selected = self.server.initial_date
+                dates = [selected] if selected in dates else dates[:1]
             self.respond(
                 json.dumps(
                     {"dates": dates, "initial_date": self.server.initial_date}
@@ -57,21 +63,45 @@ class PlotHandler(BaseHTTPRequestHandler):
             if folder.parent != root or not folder.is_dir():
                 self.send_error(404, "Date folder not found")
                 return
-            tables = []
-            for table in sorted(folder.iterdir()):
-                if table.is_dir() and table.resolve().parent == folder:
-                    tables.append(
-                        {
-                            "name": table.name,
-                            "plots": [
-                                name
-                                for name in ("series.png", "dag.png")
-                                if (table / name).is_file()
-                                and (table / name).resolve().parent == table.resolve()
-                            ],
-                        }
-                    )
-            self.respond(json.dumps(tables).encode(), "application/json")
+            try:
+                offset = max(0, int(parse_qs(request.query).get("offset", ["0"])[0]))
+            except ValueError:
+                self.send_error(400, "Invalid page offset")
+                return
+            tables, scanned, more = [], 0, False
+            # Do not sort/materialize millions of entries before serving page 1.
+            # The cursor counts directory entries, including non-table files.
+            # Reopening scandir avoids retaining handles between browser requests.
+            with os.scandir(folder) as entries:
+                for index, table in enumerate(entries):
+                    if index < offset:
+                        continue
+                    if len(tables) >= self.server.page_size:
+                        more = True
+                        break
+                    scanned += 1
+                    if table.is_dir(follow_symlinks=False):
+                        path = Path(table.path)
+                        tables.append(
+                            {
+                                "name": table.name,
+                                "plots": [
+                                    name
+                                    for name in ("series.png", "dag.png")
+                                    if (path / name).is_file()
+                                    and (path / name).resolve().parent == path.resolve()
+                                ],
+                            }
+                        )
+            self.respond(
+                json.dumps(
+                    {
+                        "tables": tables,
+                        "next_offset": offset + scanned if more else None,
+                    }
+                ).encode(),
+                "application/json",
+            )
             return
         if request.path.startswith("/image/"):
             parts = unquote(request.path[len("/image/") :]).split("/")
@@ -88,11 +118,19 @@ class PlotHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
-def make_server(generated_dir=GENERATED_DIR, port=PORT, initial_date=INITIAL_DATE):
+def make_server(
+    generated_dir=GENERATED_DIR,
+    port=PORT,
+    initial_date=INITIAL_DATE,
+    latest_only=LATEST_ONLY,
+    page_size=PAGE_SIZE,
+):
     # Loopback binding keeps this a local desktop utility.
     server = ThreadingHTTPServer(("127.0.0.1", port), PlotHandler)
     server.generated_dir = Path(generated_dir)
     server.initial_date = initial_date
+    server.latest_only = latest_only
+    server.page_size = max(1, page_size)
     return server
 
 

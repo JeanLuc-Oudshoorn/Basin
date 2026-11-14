@@ -8,8 +8,10 @@ from time import perf_counter
 from loguru import logger
 
 ROOT = Path(__file__).resolve().parents[2]
-POLICY = "augmentation_families_train_only_v1"
-_SUFFIX = re.compile(r"(?:_coarse_[2-5]_[0-4]|_sign_inverted)$")
+POLICY = "augmentation_families_train_only_v2"
+_SUFFIX = re.compile(
+    r"(?:_coarse_[2-5]_[0-4]|_sign_inverted|_aggregate_(?:min|max|mean)_[2-5])$"
+)
 
 
 class _Progress:

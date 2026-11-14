@@ -91,7 +91,7 @@ class GenerationRuntimeTests(unittest.TestCase):
                 pd.testing.assert_frame_equal(
                     expected, left.simulate(model), check_exact=True
                 )
-                trend_free += model["quality"]["screened_trend_free"]
+                trend_free += model["quality"]["proposed_trend_free"]
                 for name in ("series.png", "dag.png"):
                     self.assertEqual(
                         (source / name).read_bytes(), (candidate / name).read_bytes()

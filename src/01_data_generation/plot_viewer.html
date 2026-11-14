@@ -30,8 +30,10 @@
 <header>
   <h1>Basin · Generated plots</h1>
   <label>Date <select id="date" aria-label="Dataset date"></select></label>
-  <input id="filter" placeholder="Filter table names…" aria-label="Filter table names">
+  <input id="filter" placeholder="Filter this page..." aria-label="Filter table names on this page">
   <button id="refresh">Refresh</button>
+  <button id="previous" disabled>Previous</button>
+  <button id="next" disabled>Next</button>
   <span id="status" role="status"></span>
 </header>
 <main id="tables"></main>
@@ -40,7 +42,8 @@
   const dates = document.querySelector('#date'), filter = document.querySelector('#filter');
   const tables = document.querySelector('#tables'), status = document.querySelector('#status');
   const zoom = document.querySelector('#zoom'), expanded = document.querySelector('#expanded');
-  let data = [], requestNumber = 0;
+  const previous = document.querySelector('#previous'), next = document.querySelector('#next');
+  let data = [], requestNumber = 0, offsets = [0], page = 0, nextOffset = null;
   async function get(url) {
     const response = await fetch(url);
     if (!response.ok) throw Error(`Could not load data (${response.status}). Refresh to retry.`);
@@ -49,7 +52,7 @@
   function render() {
     tables.replaceChildren();
     const visible = data.filter(table => table.name.toLowerCase().includes(filter.value.toLowerCase()));
-    status.textContent = `${visible.length} / ${data.length} tables · Click a plot to enlarge`;
+    status.textContent = `Page ${page + 1} | ${visible.length} / ${data.length} tables on this page | Click a plot to enlarge`;
     for (const table of visible) {
       const card = document.createElement('article'), title = document.createElement('h2');
       title.textContent = table.name;
@@ -76,13 +79,19 @@
     }
     if (!visible.length) tables.textContent = data.length ? 'No matching tables.' : 'No generated tables for this date.';
   }
-  async function load() {
+  async function load(reset = false) {
+    if (reset) { offsets = [0]; page = 0; }
     const number = ++requestNumber;
     status.textContent = 'Loading…';
     try {
-      const result = await get(`/api/tables?date=${encodeURIComponent(dates.value)}`);
+      const result = await get(`/api/tables?date=${encodeURIComponent(dates.value)}&offset=${offsets[page]}`);
       if (number !== requestNumber) return;
-      data = result; render(); window.scrollTo(0, 0);
+      data = result.tables; nextOffset = result.next_offset;
+      previous.disabled = page === 0; next.disabled = nextOffset === null;
+      render(); window.scrollTo(0, 0);
+      if (data.length && data.every(table => !table.plots.length)) {
+        status.textContent += ' | No saved plots on this page. Enable SAVE_PLOT / SAVE_DAG when generating.';
+      }
     } catch (error) { if (number === requestNumber) status.textContent = error.message; }
   }
   async function refresh() {
@@ -91,11 +100,15 @@
       dates.replaceChildren(...result.dates.map(date => new Option(date, date)));
       dates.value = result.dates.includes(current) ? current :
         result.dates.includes(result.initial_date) ? result.initial_date : result.dates[0] || '';
-      if (dates.value) await load();
+      if (dates.value) await load(true);
       else { tables.textContent = 'No generated date folders yet.'; status.textContent = '0 tables'; }
     } catch (error) { status.textContent = error.message; }
   }
-  dates.onchange = load; filter.oninput = render;
+  dates.onchange = () => load(true); filter.oninput = render;
+  previous.onclick = () => { if (page > 0) { page--; load(); } };
+  next.onclick = () => {
+    if (nextOffset !== null) { offsets[++page] = nextOffset; load(); }
+  };
   document.querySelector('#refresh').onclick = refresh;
   document.querySelector('#close').onclick = () => zoom.close();
   refresh();

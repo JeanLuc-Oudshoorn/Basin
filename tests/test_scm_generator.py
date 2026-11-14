@@ -690,7 +690,7 @@ class GeneratorTests(unittest.TestCase):
                 self.assertTrue(not weight or outcome_weight > 0)
         self.assertTrue(0.03 < residual_count / lag_count < 0.15)
 
-    def test_trend_free_batch_quota(self):
+    def test_trend_proposal_quota_and_observed_classification(self):
         with tempfile.TemporaryDirectory() as directory:
             generator = OperationalSCMGenerator(
                 directory,
@@ -705,15 +705,24 @@ class GeneratorTests(unittest.TestCase):
             )
             paths = generator.generate(5)
             screened = 0
+            proposed = 0
             for path in paths:
                 model = json.loads((path / "scm.json").read_text())
                 frame = pd.read_parquet(path / "data.parquet")
+                proposed += model["quality"]["proposed_trend_free"]
                 if model["quality"]["screened_trend_free"]:
                     screened += 1
                     self.assertLessEqual(generator.trend_score(frame), 0.15)
                 else:
-                    self.assertGreaterEqual(generator.trend_strength(frame, model), 0.4)
-            self.assertGreaterEqual(screened, 3)
+                    self.assertGreater(
+                        max(
+                            generator.trend_score(frame),
+                            generator.trend_strength(frame, model),
+                        ),
+                        0.15,
+                    )
+            self.assertEqual(proposed, 3)
+            self.assertLessEqual(screened, proposed)
 
     def test_permanent_shock_trend_and_required_trending_profile(self):
         generator = OperationalSCMGenerator(

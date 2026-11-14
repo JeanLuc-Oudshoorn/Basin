@@ -204,6 +204,45 @@ use new directory names. `SAVE_SCM`, `SAVE_PLOT`, `SAVE_DAG`, and `PLOT_COVARIAT
 the optional artifacts; all default to true. Paths work from any working directory,
 including IPython `%run`.
 
+### Realism settings (2026-11-13)
+
+A second block of runner settings makes tables resemble recorded plant data.
+Every one of them defaults to off inside `OperationalSCMGenerator`, so earlier
+seeds and saved SCMs replay unchanged; `generate_operational_data.py` turns
+them on.
+
+- **Length.** `FULL_LENGTH_PROBABILITY` puts a point mass at `MAX_ROWS`.
+  `PREHISTORY_PROBABILITY` simulates up to `MAX_PREHISTORY_ROWS` earlier rows
+  and discards them, so the table is the tail of a longer history.
+- **Seasonality and noise.** `SEASONAL_TABLE_PROBABILITY` is the share of
+  tables with clock-driven cycles. `NOISE_PROFILE_WEIGHTS` draws one noise
+  budget per table (clean, low, moderate, noisy). `*_WANDER_PROBABILITY` adds
+  slow mean-reverting wander to the outcome.
+- **Closed loops** (`plant_mechanisms.py`). With `PLANT_PROBABILITY` the classic
+  outcome becomes the demand of a unit, and the unit's level, pressure or
+  controller output is recorded: on/off control with hysteresis, PID setpoint
+  tracking, fill-and-reset cycles, first/second-order step responses, and
+  running totals. Other channels of the unit can be exported as covariates.
+- **Settling and lifecycle.** `STEP_RESPONSE_PROBABILITY`,
+  `SLOW_DYNAMICS_PROBABILITY`, `TRANSPORT_DELAY_PROBABILITY` and the
+  `second_order` edge operator give lagged, overshooting and delayed responses.
+  `LIFECYCLE_TREND_PROBABILITY` draws wear, onset, commissioning, maintenance
+  sawtooth and level-shift trends. `STARTUP_TRANSIENT_PROBABILITY` adds
+  coast-down and inrush to shutdown tables.
+- **Recording layer** (`measurement_layer.py`), applied after simulation and
+  never fed back into the equations: redundant sensors, removed rows, sensor
+  artifacts (noise, quantization, clipping, deadband, hold, stuck, spikes,
+  dropout, drift, recalibration) and missing values written as NaN. Missingness
+  is completely at random, at random (driven by an observed column, the clock or
+  the previous reading) or structural (periodic gaps, slower sampling, late
+  start, early end, logger outage, censored extremes). The final 80 outcome
+  rows are always observed.
+
+`experiments/claude_review/generator_coverage.py` reports how often each
+mechanism is drawn and compares shape statistics with the files in
+`data/00_public`; `generator_contact_sheet.py` plots sampled outcomes.
+`tests/test_generator_realism.py` covers the new behaviour.
+
 The reusable `OperationalSCMGenerator` lives in `src/data_generation/scm_generator.py`.
 The runner samples 3–10 covariates. Sparse, fork, dense, and diamond
 structures allow mediation, shared causes, colliders, and hidden confounding.
@@ -662,6 +701,18 @@ the corresponding initialization-description text. The report is saved to
 `results/data_generation/generation_benchmark.json`; timings depend on hardware
 and workload. SCM sampling, rejection criteria, and simulated values remain unchanged.
 
+For an exact performance regression audit of the current runner settings, copy
+`src/01_data_generation` before editing, set `REFERENCE_SOURCE` in
+`src/01_data_generation/benchmark_generation_exact.py` to that copy, and run it.
+It times sampling, screening, recording and Parquet/SCM writes on a small fixed
+batch, without launching the production job. It checks floating-point bits,
+missing-value positions, sampled SCMs, augmentations and exported file bytes;
+plots and forced rare-mechanism checks run outside the timing. Results are saved
+to `results/data_generation/generation_exact_benchmark.json`.
+The simulator caches fixed filter coefficients in bounded per-worker caches,
+reuses delay buffers and binds node arrays once per simulation. Random draws,
+equations, arithmetic order and screening thresholds remain unchanged.
+
 Multiplicative trends also have two independent rare exceptions, configured by
 `MULTIPLICATIVE_CONSTANT_NOISE_PROBABILITY=0.05` and
 `MULTIPLICATIVE_CONSTANT_SEASONALITY_PROBABILITY=0.05`. These probabilities apply
@@ -686,6 +737,13 @@ enlarge it (Esc closes it). Refresh discovers newly generated tables. Images loa
 as you scroll; missing plots are indicated. No additional dependencies are needed.
 Keep the launcher window open while browsing and press Ctrl+C there to stop it.
 `GENERATED_DIR`, `INITIAL_DATE` and the local port can be edited in the Python script.
+By default, `LATEST_ONLY=True` offers only the latest date folder. Older days
+are not scanned for tables. `INITIAL_DATE` can pin a particular day, such as
+`"2026-11-13"`; set `LATEST_ONLY=False` to restore the full date dropdown.
+Tables load in pages of `PAGE_SIZE=50` with Previous/Next buttons, so opening a
+large day does not enumerate and render every table first. The name filter
+applies to the current page. The viewer displays saved `series.png`/`dag.png`
+files; generation must have `SAVE_PLOT`/`SAVE_DAG` enabled to produce those images.
 
 `NOISE_FREE_COVARIATE_PROBABILITY=0.10` in
 `src/01_data_generation/generate_operational_data.py` independently selects
@@ -1105,3 +1163,40 @@ for total-update timings, correctness checks and limits of the measurement.
 ## Reproducing the pipeline
 
 The repository contains pipeline code, configurations, dependency locks, tests, experiment scripts and narrative audit reports. Generated datasets, model weights, numeric audit artifacts, caches and run outputs remain local and are not committed. Follow the stage commands above to regenerate these artifacts. Historical reports may link to local evidence files intentionally excluded from Git.
+
+
+### Moderate trends, causal historian copies and mechanical plants
+
+Trend screening now accepts a linear R-squared above 0.15 or, for a trending
+proposal, a trend-shape R-squared above 0.15. Those are different metrics;
+there is no longer a required 0.4 shape score. Incidental linear trends in
+trend-free proposals are accepted and classified as trending. The configured
+trend-free fraction controls proposals; the accepted fraction can differ.
+Quality metadata records both proposed and screened profiles. Values are never
+corrected to make a trend pass.
+
+`AGGREGATE_COPY_PROBABILITY=0.03` independently selects eligible originals with
+more than 512 rows for one min, max or mean copy. Window size is uniformly 2-5.
+At source time `t=w`, the first aggregate contains only rows `[0,w)`; the next
+is at `t=2w` and contains `[w,2w)`. All covariates use that same completed window
+and statistic. No row at or after `t` contributes, and the incomplete tail is
+discarded. NaNs propagate. Binary covariate means represent fractions of the
+window active, not instantaneous states. The timestamp remains the source
+window's exclusive end; provenance and saved SCMs describe the observation
+operation, while DAGs retain source-clock lags. Copies are exactly replayable.
+
+These are observed covariates: aggregates for future windows must not be given
+to a forecaster as future-known inputs. Forecast rows after the observed prefix
+using only aggregates already available at that forecast origin. All members
+of an augmented source family are excluded from validation/test by the existing
+family-isolation machinery, now extended to `_aggregate_{min|max|mean}_{2..5}`.
+
+The plant mixture now includes `stick_slip` and `interlock` (runner weights 0.08
+each; reusable class defaults remain opt-in). Stick-slip uses a driven spring,
+static breakaway friction and lower sliding friction; recorded force builds
+while position sticks, then releases. The interlock trips on the previous
+physical state and remains latched until both safe conditions and an explicit
+rising reset command occur. Both use scalar causal state updates without an
+ODE solver; they replace a selected plant family rather than adding loops to
+every table. Optional channels expose position/drive or trip/reset/actuator.
+Extra aggregate copies do add a small amount of output I/O when selected.

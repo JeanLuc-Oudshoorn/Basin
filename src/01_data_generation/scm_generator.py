@@ -22,6 +22,7 @@ import pandas as pd
 try:
     from .generation_runtime import (
         GenerationProgress,
+        aggregate_frame,
         coarsen_frame,
         generate_batch,
         generate_worker_batch,
@@ -31,6 +32,7 @@ try:
 except ImportError:
     from generation_runtime import (
         GenerationProgress,
+        aggregate_frame,
         coarsen_frame,
         generate_batch,
         generate_worker_batch,
@@ -79,6 +81,46 @@ except ImportError:
         evaluate_extra,
         prepare_parent_combination,
     )
+
+try:
+    from .measurement_layer import (
+        DEFAULT_ARTIFACT_WEIGHTS,
+        DEFAULT_MISSINGNESS_WEIGHTS,
+        apply_observation,
+        recorded_window,
+        sample_observation,
+        sample_row_gaps,
+    )
+    from .plant_mechanisms import (
+        DEFAULT_PLANT_WEIGHTS,
+        LIFECYCLE_KINDS,
+        lifecycle_path,
+        sample_lifecycle,
+        sample_plant,
+        simulate_plant,
+    )
+except ImportError:
+    from measurement_layer import (
+        DEFAULT_ARTIFACT_WEIGHTS,
+        DEFAULT_MISSINGNESS_WEIGHTS,
+        apply_observation,
+        recorded_window,
+        sample_observation,
+        sample_row_gaps,
+    )
+    from plant_mechanisms import (
+        DEFAULT_PLANT_WEIGHTS,
+        LIFECYCLE_KINDS,
+        lifecycle_path,
+        sample_lifecycle,
+        sample_plant,
+        simulate_plant,
+    )
+
+
+# Membership is checked for every expression instruction, on every timestep.
+# Materialize this once instead of concatenating/scanning tuples in that loop.
+_EXTRA_OPERATORS = frozenset(STATIC_OPERATORS + TEMPORAL_OPERATORS)
 
 
 def _render_plot_job(generator, model, frame, directory):
@@ -308,6 +350,8 @@ class OperationalSCMGenerator:
             0.15,
         )
     )
+    # Opt-in (appended last, weight zero): earlier seeds keep their draws.
+    DEFAULT_EFFECT_WEIGHTS["second_order"] = 0.0
     DEFAULT_PARENT_COMBINATION_WEIGHTS = {
         "sum": 16,
         "product": 4,
@@ -326,6 +370,7 @@ class OperationalSCMGenerator:
         "volatility_coupling": 1,
         "swiglu": 0.15,
     }
+    NOISE_PROFILES = ("clean", "low", "moderate", "noisy")
     DEFAULT_NODE_LINK_WEIGHTS = {
         "identity": 16,
         "saturation": 4,
@@ -398,7 +443,32 @@ class OperationalSCMGenerator:
         generation_batch_size=16,
         progress_interval=1.0,
         coarse_copy_probability=0.03,
+        aggregate_copy_probability=0.0,
         sign_inversion_probability=0.03,
+        full_length_probability=0.0,
+        prehistory_probability=0.0,
+        max_prehistory_rows=2048,
+        row_gap_probability=0.0,
+        seasonal_table_probability=1.0,
+        nonseasonal_covariate_season_probability=0.15,
+        forced_season_probability=0.85,
+        noise_profile_weights=None,
+        slow_dynamics_probability=0.0,
+        transport_delay_probability=0.0,
+        step_response_probability=0.0,
+        lifecycle_trend_probability=0.0,
+        calendar_gate_probability=0.0,
+        plant_probability=0.0,
+        plant_weights=None,
+        startup_transient_probability=0.0,
+        redundant_sensor_probability=0.0,
+        measurement_probability=0.0,
+        artifact_weights=None,
+        missingness_probability=0.0,
+        missingness_weights=None,
+        nonseasonal_wander_probability=0.0,
+        seasonal_wander_probability=0.0,
+        reject_constant_outcome=False,
     ):
         settings = locals().copy()
         self._auto_render_workers = render_workers is None
@@ -461,6 +531,7 @@ class OperationalSCMGenerator:
             "discrete_covariate_probability",
             "sensor_bounds_probability",
             "coarse_copy_probability",
+            "aggregate_copy_probability",
             "sign_inversion_probability",
             "multiplicative_trend_probability",
             "variance_dynamics_probability",
@@ -475,6 +546,24 @@ class OperationalSCMGenerator:
             "angle_covariate_probability",
             "pairwise_interaction_probability",
             "additive_interaction_probability",
+            "full_length_probability",
+            "prehistory_probability",
+            "row_gap_probability",
+            "seasonal_table_probability",
+            "nonseasonal_covariate_season_probability",
+            "forced_season_probability",
+            "slow_dynamics_probability",
+            "transport_delay_probability",
+            "step_response_probability",
+            "lifecycle_trend_probability",
+            "calendar_gate_probability",
+            "plant_probability",
+            "startup_transient_probability",
+            "redundant_sensor_probability",
+            "measurement_probability",
+            "missingness_probability",
+            "nonseasonal_wander_probability",
+            "seasonal_wander_probability",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -629,6 +718,38 @@ class OperationalSCMGenerator:
         self.burn_in = max(burn_in, max_lag, max_covariate_lag)
         self.save_scm, self.save_plot = save_scm, save_plot
         self.plot_covariates, self.save_dag = plot_covariates, save_dag
+        if (
+            isinstance(max_prehistory_rows, bool)
+            or not isinstance(max_prehistory_rows, int)
+            or max_prehistory_rows < 64
+        ):
+            raise ValueError("max_prehistory_rows must be an integer of at least 64")
+        self.max_prehistory_rows = max_prehistory_rows
+        self.reject_constant_outcome = bool(reject_constant_outcome)
+        for attribute, defaults, overrides in (
+            ("plant_weights", DEFAULT_PLANT_WEIGHTS, plant_weights),
+            ("artifact_weights", DEFAULT_ARTIFACT_WEIGHTS, artifact_weights),
+            ("missingness_weights", DEFAULT_MISSINGNESS_WEIGHTS, missingness_weights),
+        ):
+            weights = dict(defaults)
+            for name, weight in (overrides or {}).items():
+                if name not in weights or not np.isfinite(weight) or weight < 0:
+                    raise ValueError(f"Invalid {attribute} entry: {name}")
+                weights[name] = float(weight)
+            if sum(weights.values()) <= 0:
+                raise ValueError(f"At least one {attribute} entry must be positive")
+            setattr(self, attribute, weights)
+        # None keeps the original outcome noise floor, U(0.15, 0.45).
+        self.noise_profile_weights = None
+        if noise_profile_weights is not None:
+            weights = dict.fromkeys(self.NOISE_PROFILES, 0.0)
+            for name, weight in noise_profile_weights.items():
+                if name not in weights or not np.isfinite(weight) or weight < 0:
+                    raise ValueError(f"Invalid noise_profile_weights entry: {name}")
+                weights[name] = float(weight)
+            if sum(weights.values()) <= 0:
+                raise ValueError("At least one noise profile must be positive")
+            self.noise_profile_weights = weights
 
     def _draw(self, name, *, log=False, signed=False):
         low, high = self.priors[name]
@@ -638,6 +759,55 @@ class OperationalSCMGenerator:
             else self.rng.uniform(low, high)
         )
         return float(value * (self.rng.choice([-1, 1]) if signed else 1))
+
+    def _log_uniform(self, low, high):
+        return float(np.exp(self.rng.uniform(np.log(low), np.log(high))))
+
+    def _sample_noise_profile(self):
+        """One noise budget per table: most real sensors are far cleaner than
+        the original fixed floor, a few are almost pure noise."""
+        r = self.rng
+        names = list(self.noise_profile_weights)
+        weights = np.array(list(self.noise_profile_weights.values()), dtype=float)
+        name = str(r.choice(names, p=weights / weights.sum()))
+        if name == "clean":
+            white, factor = 0.0, self._log_uniform(0.003, 0.03)
+        elif name == "low":
+            white, factor = self._log_uniform(0.004, 0.05), self._log_uniform(0.03, 0.3)
+        elif name == "moderate":
+            white, factor = float(r.uniform(0.15, 0.45)), 1.0
+        else:
+            white, factor = float(r.uniform(0.6, 2.0)), float(r.uniform(1.0, 3.0))
+        return {"name": name, "white_noise_scale": white, "innovation_factor": factor}
+
+    def _response_program(self):
+        """One clean settling operator: lag, cascade, or second-order overshoot."""
+        r = self.rng
+        return [
+            {
+                "op": str(
+                    r.choice(
+                        ["first_order_lag", "erlang", "second_order"],
+                        p=[0.45, 0.2, 0.35],
+                    )
+                ),
+                "a": 0,
+                "b": 0,
+                "gain": 1.0,
+                "offset": 0.0,
+                "limit": 12.0,
+                # Read by every stateful operator; unused by these three.
+                "k": 1.0,
+                "width": 1.0,
+                "threshold": 1.0,
+                "floor": 0.05,
+                "tau": self._log_uniform(3, 250),
+                "stages": int(r.integers(2, 5)),
+                "spread": 1.5,
+                "period": self._log_uniform(8, 300),
+                "damping": self._log_uniform(0.04, 0.9),
+            }
+        ]
 
     def _sample_noise(self, kind=None):
         """Separate shape, location, and scale so tail changes need not change SNR."""
@@ -947,6 +1117,8 @@ class OperationalSCMGenerator:
                     ki=self._draw("effect_pid_i", log=True),
                     kd=self._draw("effect_pid_d", log=True),
                 )
+            if op == "second_order":
+                instruction["damping"] = self._log_uniform(0.04, 1.5)
             program.append(instruction)
         return program
 
@@ -1002,10 +1174,11 @@ class OperationalSCMGenerator:
                 result = z * b
             elif op == "gate":
                 result = z * (1 + np.tanh(b)) / 2
-            elif op in STATIC_OPERATORS + TEMPORAL_OPERATORS:
-                result = evaluate_extra(
-                    op, z, b, instruction, state.setdefault(index, {})
-                )
+            elif op in _EXTRA_OPERATORS:
+                instruction_state = state.get(index)
+                if instruction_state is None:
+                    instruction_state = state[index] = {}
+                result = evaluate_extra(op, z, b, instruction, instruction_state)
             else:
                 raise ValueError(f"Unknown operator: {op}")
             # Soft saturation models finite capacity and controls nonlinear
@@ -1427,7 +1600,7 @@ class OperationalSCMGenerator:
             "quantization_offset": self._draw("effect_offset"),
         }
 
-    def _sample_lags(self, rows):
+    def _sample_lags(self, rows, seasonal_table=True):
         """Draw independent short, seasonal and unstructured history groups.
 
         Capacity is a ceiling, not a target to fill with compulsory recent lags.
@@ -1462,7 +1635,8 @@ class OperationalSCMGenerator:
             )
         seasonal = []
         if (
-            candidates
+            seasonal_table
+            and candidates
             and len(roles) < capacity
             and r.random() < self.seasonal_lag_probability
         ):
@@ -1482,6 +1656,13 @@ class OperationalSCMGenerator:
         Inverse-CDF sampling avoids piling an exponential tail onto the maximum
         lag. Positive delays use 1+floor(X): one timestep has the most mass.
         """
+        if (
+            self.transport_delay_probability
+            and self.max_covariate_lag > 4
+            and self.rng.random() < self.transport_delay_probability
+        ):
+            # Transport/dead time: the exponential law almost never exceeds 3.
+            return int(self._log_uniform(4, self.max_covariate_lag + 1))
         if self.rng.random() < self.instantaneous_probability:
             return 0
         mass = -np.expm1(-self.max_covariate_lag / self.covariate_delay_scale)
@@ -1530,13 +1711,30 @@ class OperationalSCMGenerator:
         """
         r = self.rng
         rows = int(r.integers(self.min_rows, self.max_rows + 1))
+        # Below, `rows` is the SIMULATED span. Only the final `recorded` rows are
+        # kept, like a long-running series cut to the model's context length.
+        recorded, row_gaps = rows, None
+        if self.full_length_probability and r.random() < self.full_length_probability:
+            recorded = rows = self.max_rows
+            if self.prehistory_probability and r.random() < self.prehistory_probability:
+                rows += int(r.integers(64, self.max_prehistory_rows + 1))
+        if self.row_gap_probability and r.random() < self.row_gap_probability:
+            row_gaps = sample_row_gaps(r, recorded)
+            rows += row_gaps["total"]
+        seasonal_table = bool(
+            self.seasonal_table_probability >= 1
+            or r.random() < self.seasonal_table_probability
+        )
+        noise_profile = (
+            self._sample_noise_profile() if self.noise_profile_weights else None
+        )
         trend_free = (
             bool(r.random() < self.trend_free_fraction)
             if trend_free is None
             else bool(trend_free)
         )
         count = int(r.integers(self.min_covariates, self.max_covariates + 1))
-        lags, lag_roles, seasonal_lags = self._sample_lags(rows)
+        lags, lag_roles, seasonal_lags = self._sample_lags(rows, seasonal_table)
         event = "covariate_00"
         nodes = [
             {
@@ -1563,10 +1761,28 @@ class OperationalSCMGenerator:
             )
 
         def sample_edge(parent, lag=0):
-            domain = next(
-                (n.get("domain", "real") for n in nodes if n["name"] == parent), "real"
-            )
-            return self._edge(parent, lag, input_domain=domain)
+            source = next((n for n in nodes if n["name"] == parent), {})
+            edge = self._edge(parent, lag, input_domain=source.get("domain", "real"))
+            if (
+                self.step_response_probability
+                and (
+                    source.get("kind") in ("switch", "markov")
+                    or source.get("family") in ("state_machine", "process_run")
+                )
+                and r.random() < self.step_response_probability
+            ):
+                # A level change arrives as a clean settling response instead of
+                # passing through a random static map that hides its shape.
+                edge.update(
+                    program=self._response_program(),
+                    input_scale=float(
+                        max(1.0, np.abs(source.get("values", [1])).max())
+                    ),
+                    input_offset=0.0,
+                    output_offset=0.0,
+                    weight=float(r.choice([-1, 1]) * r.uniform(0.8, 4.0)),
+                )
+            return edge
 
         for i in range(len(nodes), count):
             # Retain at least one continuous process. Additional discrete sources
@@ -1593,6 +1809,23 @@ class OperationalSCMGenerator:
                 "edges": [],
                 **self._dynamics(event),
             }
+            if (
+                not seasonal_table
+                and r.random() >= self.nonseasonal_covariate_season_probability
+            ):
+                node["seasons"] = []
+            if (
+                self.slow_dynamics_probability
+                and r.random() < self.slow_dynamics_probability
+            ):
+                # A slow first-order state with unit static gain: steps from its
+                # parents arrive as long exponential settling curves.
+                persistence = float(np.exp(-1 / self._log_uniform(20, 400)))
+                node.update(
+                    persistence=persistence,
+                    forcing_gain=1 - persistence,
+                    innovation_gain=float(np.sqrt(1 - persistence**2)),
+                )
             probability = self.edge_probability * (1.8 if topology == "dense" else 1)
             for parent in nodes:
                 if r.random() < probability:
@@ -1640,6 +1873,8 @@ class OperationalSCMGenerator:
             "ar_weights": [0.0] * len(lags),
             "outcome_ar_weights": self._lag_weights(lags, lag_roles),
         }
+        if not seasonal_table:
+            outcome["seasons"] = []
         # Use the same periods in the structural seasonal equation and the AR
         # anchors. They are not unrelated, uniformly sampled distant lags.
         for index, period in enumerate(seasonal_lags):
@@ -1677,7 +1912,9 @@ class OperationalSCMGenerator:
                 node["node_link"] = self._sample_node_link(
                     node.get("parent_combination", {}).get("mode") == "log_sum"
                 )
-            self._revise_dynamics(node, rows, trend_free, node is outcome)
+            self._revise_dynamics(
+                node, rows, trend_free, node is outcome, seasonal_table, noise_profile
+            )
             if r.random() < 0.25:
                 # A causal impulse response supplies actual time-domain decay,
                 # even when the edge input does not monotonically represent time.
@@ -1725,6 +1962,19 @@ class OperationalSCMGenerator:
                 "restart_rate": float(r.uniform(0.03, 0.3)),
                 "ramp_rate": float(r.uniform(0.01, 0.08) * r.choice([-1, 1])),
             }
+            if (
+                self.startup_transient_probability
+                and r.random() < self.startup_transient_probability
+            ):
+                # Coast-down instead of an instant stop; inrush on restart.
+                outcome["operation"].update(
+                    stop_tau=0.0 if r.random() < 0.4 else self._log_uniform(2, 80),
+                    restart_shape=str(r.choice(["linear", "exponential"])),
+                    restart_overshoot=0.0
+                    if r.random() < 0.5
+                    else float(r.uniform(0.15, 2.5)),
+                    overshoot_decay=float(r.uniform(0.4, 0.95)),
+                )
         if not trend_free:
             # The trending batch profile must not undergo a second Bernoulli
             # drift draw. Size its change relative to local variation, and start
@@ -1751,6 +2001,15 @@ class OperationalSCMGenerator:
                 "event_time": None,
                 "slope_multiplier": 1.0,
             }
+            if (
+                self.lifecycle_trend_probability
+                and r.random() < self.lifecycle_trend_probability
+            ):
+                # Wear, commissioning and maintenance curves, same change budget.
+                trend = sample_lifecycle(
+                    r, rows, float(r.choice([-1, 1]) * r.uniform(4, 12) * activity)
+                )
+                kind = trend["kind"]
             if kind == "multiplicative":
                 # A latent positive level feeds its own next value: L[t+1] =
                 # L[t]*exp(log_rate). The total log change is horizon-scaled,
@@ -1787,7 +2046,13 @@ class OperationalSCMGenerator:
                 }
                 outcome["white_noise_scale"] = max(
                     outcome["white_noise_scale"],
-                    trend["initial_level"] * self._draw("relative_noise_scale"),
+                    trend["initial_level"]
+                    * self._draw("relative_noise_scale")
+                    * (
+                        min(1.0, noise_profile["innovation_factor"])
+                        if noise_profile
+                        else 1
+                    ),
                 )
                 # Draw these independently: constant noise can coexist with
                 # growing seasons, and constant seasonal amplitude with growing
@@ -1827,7 +2092,7 @@ class OperationalSCMGenerator:
         # change the simulated process, even if subset sampling consumes RNG.
         observation_seed = int(r.integers(0, 2**63))
         sampled_visible_count = self._sample_visibility(nodes, visible_covariate_count)
-        return {
+        model = {
             "version": 3,
             "observation_seed": observation_seed,
             "rows": rows,
@@ -1880,10 +2145,82 @@ class OperationalSCMGenerator:
                 "formula_source": "saved clock formula or causal setpoint response plus saved innovation law; no empirical centering or output correction",
                 "sensor": "optional hard floor/ceiling in recorded units; measured values, including clipping, enter causal history",
                 "discrete": "exogenous Bernoulli or saved Markov transition matrix over binary/multi-level values; no added continuous noise",
+                "plant": "optional closed-loop unit driven by the standardized outcome as relative demand; its chosen channel replaces the recorded outcome; other channels may be exported",
+                "observation": "optional recording layer after simulation: redundant sensors, removed rows, sensor artifacts sized by the clean column's span, then NaN missingness (MCAR, MAR, structural); never enters causal history",
             },
         }
+        return self._sample_recording(
+            model, recorded, row_gaps, seasonal_table, noise_profile
+        )
 
-    def _revise_dynamics(self, node, rows, trend_free, is_outcome):
+    def _sample_recording(self, model, recorded, row_gaps, seasonal_table, profile):
+        """Closed-loop unit and recording layer. Absent keys replay as before."""
+        r, nodes = self.rng, model["nodes"]
+        if not seasonal_table:
+            model["seasonal_table"] = False
+        if profile:
+            model["noise_profile"] = profile
+        if recorded != model["rows"]:
+            model["recorded_rows"] = recorded
+        if row_gaps:
+            model["row_gaps"] = row_gaps
+        next_index = len(nodes)
+        # Regulated units hold a level, so they belong to the trend-free profile;
+        # a totalizer only ever counts up, so it belongs to the trending one.
+        if self.plant_probability and r.random() < self.plant_probability:
+            weights = {
+                family: weight
+                for family, weight in self.plant_weights.items()
+                if (family == "totalizer") != model["trend_free"]
+            }
+            share = sum(weights.values()) / sum(self.plant_weights.values())
+            if share > 0 and (model["trend_free"] or r.random() < share):
+                model["plant"] = sample_plant(r, model["rows"], weights, next_index)
+                next_index += len(model["plant"]["exports"])
+        columns = [{"name": "outcome", "discrete": False}]
+        columns += [
+            {"name": n["name"], "discrete": n["kind"] not in ("process", "formula")}
+            for n in nodes
+            if n["visible"]
+        ]
+        columns += [
+            {"name": e["name"], "discrete": e["channel"] == "status"}
+            for e in model.get("plant", {}).get("exports", [])
+        ]
+        if (
+            self.redundant_sensor_probability
+            or self.measurement_probability
+            or self.missingness_probability
+        ):
+            observation = sample_observation(
+                r,
+                columns,
+                {
+                    "next_index": next_index,
+                    "redundant_sensor_probability": self.redundant_sensor_probability,
+                    "measurement_probability": self.measurement_probability,
+                    "artifact_weights": self.artifact_weights,
+                    "missingness_probability": self.missingness_probability,
+                    "missingness_weights": self.missingness_weights,
+                },
+            )
+            if any(observation.values()):
+                model["observation"] = observation
+        if model.get("plant") or model.get("observation"):
+            model["univariate"] = len(columns) == 1 and not model.get(
+                "observation", {}
+            ).get("redundant")
+        return model
+
+    def _revise_dynamics(
+        self,
+        node,
+        rows,
+        trend_free,
+        is_outcome,
+        seasonal_table=True,
+        noise_profile=None,
+    ):
         """Budget cumulative changes against the observation horizon.
 
         Disabling only slope is insufficient: hidden random walks, permanent
@@ -1922,12 +2259,38 @@ class OperationalSCMGenerator:
             node["level_jump"] *= 0.15
             node["event_mode"] = str(r.choice(["reverse", "reset"]))
         node["level_limit"] = float(r.uniform(2, 6))
+        if noise_profile and node["noise"]["kind"] not in ("perlin", "brown"):
+            # Smooth wander (Perlin/brown) is process behaviour, not sensor hiss.
+            node["noise"]["scale"] *= noise_profile["innovation_factor"]
+        if noise_profile:
+            # A resolution fixed for unit-scale variation would flatten a quiet
+            # signal to a single level; coarse sensors are a recording artifact.
+            node["quantization_step"] *= min(1.0, noise_profile["innovation_factor"])
         if is_outcome:
             # A visible stochastic floor prevents seasonal/slow components from
             # producing nearly deterministic ramps. It is a causal innovation,
             # not noise added after seeing or normalizing the finished series.
             node["white_noise_scale"] = float(r.uniform(0.15, 0.45))
-            if not node["seasons"] and r.random() < 0.85:
+            if noise_profile:
+                node["white_noise_scale"] = noise_profile["white_noise_scale"]
+            chance = (
+                self.seasonal_wander_probability
+                if seasonal_table
+                else self.nonseasonal_wander_probability
+            )
+            if chance and r.random() < chance:
+                # Mean-reverting load wander: slow, bounded, not a trend. Without
+                # it a cycle-free outcome is little more than its noise floor.
+                node["wander"] = {
+                    "tau": self._log_uniform(8, 600),
+                    "scale": self._log_uniform(0.3, 3.0),
+                    "seed": int(r.integers(0, 2**63)),
+                }
+            if (
+                seasonal_table
+                and not node["seasons"]
+                and r.random() < self.forced_season_probability
+            ):
                 node["seasons"] = [
                     {
                         "period": min(
@@ -1971,6 +2334,19 @@ class OperationalSCMGenerator:
                 # The new expansion replaces, rather than doubles, the older
                 # sine-plus-harmonics waveform. Legacy specs still replay below.
                 season.pop("harmonics", None)
+            if (
+                self.calendar_gate_probability
+                and r.random() < self.calendar_gate_probability
+            ):
+                # Working days versus rest days: some whole cycles run reduced.
+                cycles = int(r.choice([5, 7, 7, 7, 10, 14]))
+                season["gate"] = {
+                    "cycles": cycles,
+                    "off": int(r.integers(1, max(2, cycles // 2))),
+                    "shift": int(r.integers(cycles)),
+                    "depth": float(r.uniform(0.3, 1.0)),
+                    "level": float(r.uniform(-0.8, 0.3)) if r.random() < 0.5 else 0.0,
+                }
 
     def _sample_fourier(self, season, rows):
         """Project operational templates onto a finite sine/cosine basis.
@@ -2071,10 +2447,11 @@ class OperationalSCMGenerator:
         This measures discernible linear trend, not formal stationarity; curved
         cycles, variance evolution and operational shutdowns remain possible.
         """
-        values = frame["outcome"].to_numpy()
-        if np.std(values) < 1e-12:
+        values = frame["outcome"].to_numpy(dtype=float)
+        keep = np.isfinite(values)  # Recorded tables may contain missing values.
+        if keep.sum() < 3 or np.std(values[keep]) < 1e-12:
             return 0.0
-        return float(np.corrcoef(np.arange(len(values)), values)[0, 1] ** 2)
+        return float(np.corrcoef(np.arange(len(values))[keep], values[keep])[0, 1] ** 2)
 
     @staticmethod
     def trend_strength(frame, model):
@@ -2085,7 +2462,12 @@ class OperationalSCMGenerator:
         the presence of nonzero parameters. No output values are modified.
         """
         y = frame["outcome"].to_numpy()
-        t = np.arange(len(y), dtype=float) / max(1, len(y) - 1)
+        # With unrecorded prehistory the window starts `offset` rows into the
+        # simulated span; every shape below is evaluated on that original clock.
+        offset = max(0, model["rows"] - len(y)) if "recorded_rows" in model else 0
+        total = offset + len(y)
+        index = np.arange(offset, total)
+        t = index.astype(float) / max(1, total - 1)
         columns = [np.ones(len(y)), t]
         trend = model["outcome"].get("trend", {})
         if trend.get("kind") == "multiplicative":
@@ -2094,18 +2476,20 @@ class OperationalSCMGenerator:
             # not a curve selected by searching over the 01_generated outcome.
             columns = [
                 np.ones(len(y)),
-                np.expm1(trend["log_rate"] * np.arange(1, len(y) + 1)),
+                np.expm1(trend["log_rate"] * (index + 1)),
             ]
+        if trend.get("kind") in LIFECYCLE_KINDS:
+            columns.append(lifecycle_path(trend, index))
         if trend.get("kind") in ("accelerating", "decelerating"):
             columns.append(t**2)
         if trend.get("event_time") is not None:
-            columns.append(np.maximum(0, t - trend["event_time"] / max(1, len(y) - 1)))
+            columns.append(np.maximum(0, t - trend["event_time"] / max(1, total - 1)))
         operation = model["outcome"].get("operation", {})
         if operation.get("mode") == "episode":
             # Process humps are structured nonstationary shapes even when both
             # ends return to idle. Fit the saved causal envelope for screening.
             source = next(n for n in model["nodes"] if n["name"] == operation["parent"])
-            clock = np.arange(-model["burn_in"], len(y))
+            clock = np.arange(-model["burn_in"], total)
             if operation.get("activity_source") == "direct":
                 activity = formula_path(source, clock - operation.get("lag", 0))
             else:
@@ -2113,7 +2497,7 @@ class OperationalSCMGenerator:
                     clock < source["stop"] + operation.get("lag", 0)
                 )
                 activity = episode_envelope(operation, command)
-            columns.append(activity[model["burn_in"] :])
+            columns.append(activity[model["burn_in"] + offset :])
         design = np.column_stack(columns)
         fitted = design @ np.linalg.lstsq(design, y, rcond=None)[0]
         total = np.sum((y - y.mean()) ** 2)
@@ -2126,6 +2510,8 @@ class OperationalSCMGenerator:
     @staticmethod
     def _trend_path(trend, time, events):
         """Integrate a persistent slope state; warm-up leaves this state at zero."""
+        if trend["kind"] in LIFECYCLE_KINDS:
+            return lifecycle_path(trend, time)
         values = np.zeros(len(time))
         level, changed = 0.0, False
         horizon = max(1, int(time[-1]) + 1)
@@ -2169,10 +2555,16 @@ class OperationalSCMGenerator:
             # are thinned; skipping latent updates would change the process.
             source = model.copy()
             source.pop("observation_selection")
-            source["rows"] = selection["source_rows"]
-            frame = coarsen_frame(
-                self.simulate(source), selection["window_size"], selection["offset"]
-            )
+            source["rows"] = selection.get("simulated_rows", selection["source_rows"])
+            original = self.simulate(source)
+            if selection["kind"] == "trailing_aggregate":
+                frame = aggregate_frame(
+                    original, selection["window_size"], selection["statistic"]
+                )
+            else:
+                frame = coarsen_frame(
+                    original, selection["window_size"], selection["offset"]
+                )
             if len(frame) != model["rows"]:
                 raise ValueError("Coarse observation count disagrees with saved SCM")
             return frame
@@ -2189,6 +2581,23 @@ class OperationalSCMGenerator:
             )
         if model["version"] not in (2, 3):
             raise ValueError("Unsupported SCM schema version")
+        return self._observe(self._simulate_process(model), model)
+
+    @staticmethod
+    def _observe(frame, model):
+        """Recording layer: what was logged, given what the process did."""
+        if not any(k in model for k in ("observation", "recorded_rows", "row_gaps")):
+            return frame
+        return apply_observation(
+            frame,
+            model.get("observation", {}),
+            model.get("recorded_rows"),
+            model.get("row_gaps"),
+            model["observation_seed"],
+        )
+
+    def _simulate_process(self, model):
+        """Clean process values over the full simulated span, before recording."""
         # Validate before evaluating any equations. A positive delay may refer
         # to any node's past; a zero delay must refer to an earlier current node.
         self.graph_spec(model)
@@ -2295,7 +2704,12 @@ class OperationalSCMGenerator:
             if trend
             else np.zeros(length)
         )
-        recovery, ramp, previous_on = 1.0, 0.0, True
+        recovery, ramp, previous_on, surge = 1.0, 0.0, True, 0.0
+        wander_values = (
+            self._wander(model["outcome"]["wander"], length)
+            if model["outcome"].get("wander")
+            else None
+        )
         envelopes = {
             name: (
                 self._delay_values(
@@ -2325,17 +2739,57 @@ class OperationalSCMGenerator:
         def past(name, index):
             return history[name][index] if index >= 0 else 0.0
 
+        # Bind each node's buffers once, rather than repeatedly resolving names
+        # in a dozen dictionaries per row. Buffers and dynamic state remain
+        # private to this simulation; the saved SCM is never changed.
+        runtime_nodes = [
+            (
+                name,
+                spec,
+                randoms[name],
+                states[name],
+                residuals[name],
+                history[name],
+                season_values.get(name),
+                white_errors.get(name),
+                noise_scales.get(name),
+                noise_means.get(name),
+                edge_inputs[name],
+                parent_maps[name],
+                ringing_values.get(name),
+                envelopes.get(name),
+            )
+            for name, spec in active_nodes
+        ]
+        version = model["version"]
+        effect = self._effect
+        quantize = self._quantize
         for i in range(length):
             t = i - warmup
-            for name, spec in active_nodes:
+            for (
+                name,
+                spec,
+                draws,
+                node_state,
+                node_residuals,
+                node_history,
+                node_seasons,
+                node_white,
+                node_noise_scale,
+                noise_mean,
+                inputs,
+                parent_map,
+                node_ringing,
+                envelope,
+            ) in runtime_nodes:
                 reading = None
-                noise, walk, slope_walk = randoms[name]
+                noise, walk, slope_walk = draws
                 event = (
                     past(spec["event_parent"], i - spec.get("event_lag", 0))
                     if spec["event_parent"]
                     else 0
                 )
-                level, slope, shock = states[name]
+                level, slope, shock = node_state
                 slope += spec["slope_walk"] * slope_walk[i]
                 if event:
                     mode = spec["event_mode"]
@@ -2356,10 +2810,10 @@ class OperationalSCMGenerator:
                         clip_scalar(level, -spec["level_limit"], spec["level_limit"])
                     )
                 shock = spec["shock_decay"] * shock + event * spec["shock_size"]
-                states[name] = [level, slope, shock]
+                node_state[:] = level, slope, shock
                 seasonal = (
-                    season_values[name][i]
-                    if model["version"] == 3
+                    node_seasons[i]
+                    if version == 3
                     else sum(
                         s["amplitude"]
                         * (
@@ -2372,13 +2826,11 @@ class OperationalSCMGenerator:
                     )
                 )
                 effects = []
-                for edge, source, lag, state in edge_inputs[name]:
+                for edge, source, lag, state in inputs:
                     value = source[i - lag] if i >= lag else 0.0
-                    effects.append(self._effect(edge, value, state))
+                    effects.append(effect(edge, value, state))
                 forcing = (
-                    combine_parents(
-                        effects, spec["parent_combination"], parent_maps[name]
-                    )
+                    combine_parents(effects, spec["parent_combination"], parent_map)
                     if "parent_combination" in spec
                     else sum(effects)
                 )
@@ -2386,11 +2838,13 @@ class OperationalSCMGenerator:
                     forcing += (
                         spec["interaction"] * np.tanh(effects[0]) * np.tanh(effects[1])
                     )
-                forcing = apply_node_link(forcing, spec.get("node_link"))
-                previous = residuals[name][i - 1] if i else 0.0
+                link = spec.get("node_link")
+                if link is not None and link["mode"] != "identity":
+                    forcing = apply_node_link(forcing, link)
+                previous = node_residuals[i - 1] if i else 0.0
                 ar = (
                     sum(
-                        w * residuals[name][i - lag]
+                        w * node_residuals[i - lag]
                         for w, lag in residual_ar
                         if i >= lag
                     )
@@ -2400,43 +2854,49 @@ class OperationalSCMGenerator:
                 if name == "outcome":
                     ar += sum(w * past("outcome", i - lag) for w, lag in outcome_ar)
                 innovation = noise[i]
-                if name in noise_scales:
+                if node_noise_scale is not None:
                     # Scale deviations, not the distribution's location. Thus
                     # changing variance need not also change the expected mean.
-                    mean = noise_means[name]
-                    innovation = mean + (innovation - mean) * noise_scales[name][i]
+                    innovation = (
+                        noise_mean + (innovation - noise_mean) * node_noise_scale[i]
+                    )
+                if "forcing_gain" in spec:
+                    forcing *= spec["forcing_gain"]
+                    innovation *= spec["innovation_gain"]
                 residual = (
                     ar
                     + forcing
                     + innovation
                     * (1 + spec["heteroskedasticity"] * abs(np.tanh(previous)))
                 )
-                if model["version"] == 3:
-                    residual += white_errors[name][i] * (
-                        noise_scales[name][i] if name in noise_scales else 1
+                if version == 3:
+                    residual += node_white[i] * (
+                        node_noise_scale[i] if node_noise_scale is not None else 1
                     )
-                residuals[name][i] = residual
+                node_residuals[i] = residual
                 value = spec["intercept"] + level + shock + seasonal + residual
-                if name in ringing_values:
-                    value += ringing_values[name][i]
+                if node_ringing is not None:
+                    value += node_ringing[i]
                 if name == "outcome":
                     value += trend_values[i]
-                value = self._quantize(
-                    value, spec["quantization_step"], spec["quantization_offset"]
-                )
+                    if wander_values is not None:
+                        value += wander_values[i]
+                if spec["quantization_step"]:
+                    value = quantize(
+                        value, spec["quantization_step"], spec["quantization_offset"]
+                    )
                 operation = spec.get("operation")
                 if operation:
                     on = bool(past(operation["parent"], i - operation.get("lag", 0)))
                     if operation["mode"] == "episode":
-                        activity = envelopes[name][i]
+                        activity = envelope[i]
                         # Preserve visible active-process variation even if a
                         # large latent offset saturates the parent-detail map.
                         # These are the existing causal innovations/seasons,
                         # expressed as saved fractions of process amplitude.
                         white = (
-                            white_errors[name][i]
-                            / max(spec.get("white_noise_scale", 0), 1e-12)
-                            if name in white_errors
+                            node_white[i] / max(spec.get("white_noise_scale", 0), 1e-12)
+                            if node_white is not None
                             else 0.0
                         )
                         texture = operation.get("noise_fraction", 0) * np.tanh(
@@ -2456,16 +2916,23 @@ class OperationalSCMGenerator:
                         )
                         value = (reading - spec["baseline"]) / spec["scale"]
                     elif operation["mode"] == "shutdown":
-                        recovery = (
-                            min(1.0, recovery + operation["restart_rate"])
-                            if on
-                            else 0.0
-                        )
+                        coast = operation.get("stop_tau", 0.0)
+                        if not on:
+                            # Instant stop, or an exponential coast/cool-down.
+                            recovery = recovery * math.exp(-1 / coast) if coast else 0.0
+                        elif operation.get("restart_shape") == "exponential":
+                            recovery += operation["restart_rate"] * (1 - recovery)
+                        else:
+                            recovery = min(1.0, recovery + operation["restart_rate"])
+                        if on and not previous_on:
+                            surge = operation.get("restart_overshoot", 0.0)
                         flat = (operation["flat_value"] - spec["baseline"]) / spec[
                             "scale"
                         ]
-                        value = flat + recovery * (value - flat)
-                        if not on:
+                        # Inrush: the running level is briefly exceeded on restart.
+                        value = flat + recovery * (1 + surge) * (value - flat)
+                        surge *= operation.get("overshoot_decay", 0.0)
+                        if not on and not coast:
                             reading = operation["flat_value"]
                     else:
                         # Reset accumulated ramp on each binary transition:
@@ -2491,7 +2958,7 @@ class OperationalSCMGenerator:
                     value = (reading - spec["baseline"]) / spec["scale"]
                 elif sensor:
                     value = sensor_reading(value, sensor)
-                history[name][i] = value
+                node_history[i] = value
         outcome = model["outcome"]
         physical = (
             measured_outcome
@@ -2501,16 +2968,45 @@ class OperationalSCMGenerator:
         operation = outcome.get("operation")
         if measured_outcome is None and operation and operation["mode"] == "shutdown":
             physical[history[operation["parent"]] == 0] = operation["flat_value"]
+        plant = model.get("plant")
+        if plant:
+            # The SCM outcome becomes the unit's demand; the unit's own channel
+            # (level, pressure, controller output ...) is what gets recorded.
+            channels = simulate_plant(plant, history["outcome"], time)
+            physical = (
+                outcome["baseline"]
+                + outcome["scale"]
+                * plant["output_gain"]
+                * channels[plant["outcome_channel"]]
+            )
         data = {"time_index": np.arange(rows), "outcome": physical[warmup:]}
         for node in model["nodes"]:
             if node["visible"]:
                 data[node["name"]] = history[node["name"]][warmup:]
+        if plant:
+            for export in plant["exports"]:
+                data[export["name"]] = channels[export["channel"]][warmup:]
         frame = pd.DataFrame(data)
         if not np.isfinite(frame.to_numpy()).all():
             raise FloatingPointError(
                 "Non-finite SCM observations; inspect sampled parameters"
             )
         return frame
+
+    @staticmethod
+    def _wander(spec, length):
+        """Stationary first-order Gauss-Markov path with a saved time constant."""
+        rng = np.random.default_rng(spec["seed"])
+        persistence = math.exp(-1 / spec["tau"])
+        # Start inside the stationary law. Drawn first, so a longer request
+        # extends the same path instead of producing a different one.
+        value = rng.normal(0, spec["scale"])
+        steps = rng.normal(0, spec["scale"] * math.sqrt(1 - persistence**2), length)
+        result = np.empty(length)
+        for index in range(length):
+            value = persistence * value + steps[index]
+            result[index] = value
+        return result
 
     @staticmethod
     def _delay_values(values, lag):
@@ -2639,6 +3135,12 @@ class OperationalSCMGenerator:
             )
             envelope *= 1 + s.get("alternation", 0) * np.cos(phase / 2)
             envelope *= np.exp(np.clip(s.get("growth", 0) * time, -3, 3))
+            gate = s.get("gate")
+            if gate:
+                cycle = np.floor(phase / (2 * np.pi)) + gate["shift"]
+                resting = cycle % gate["cycles"] < gate["off"]
+                envelope = np.where(resting, envelope * (1 - gate["depth"]), envelope)
+                result += s["amplitude"] * gate["level"] * resting
             result += s["amplitude"] * envelope * wave
         return result
 
@@ -3000,27 +3502,42 @@ class OperationalSCMGenerator:
         figure.clear()
 
     def _sample_accepted_model(self, trend_free, progress=None, completed=0):
-        """Keep the exact original rejection criterion and arithmetic."""
+        """Accept moderate trends too; linear and shape R-squared are distinct."""
         for attempt in range(100):
             if progress:
                 progress.update(completed)
             model = self.sample_model(trend_free=trend_free)
-            frame = self.simulate(model)
-            score = self.trend_score(frame)
-            strength = self.trend_strength(frame, model)
-            if (trend_free and score <= 0.15) or (not trend_free and strength >= 0.4):
+            clean = self._simulate_process(model)
+            # Screen the process itself on the rows that will be recorded;
+            # sensor artifacts and missing values are applied after acceptance.
+            window = recorded_window(clean, model.get("recorded_rows"))
+            score = self.trend_score(window)
+            strength = self.trend_strength(window, model)
+            if self.reject_constant_outcome:
+                # Nothing to learn from a flat line, and variation below
+                # float32 resolution turns into rounding noise downstream.
+                y = window["outcome"].to_numpy()
+                if np.ptp(y) <= 1e-5 * max(1.0, abs(float(np.median(y)))):
+                    continue
+            # A linear score above the trend-free cutoff is sufficient evidence
+            # of trend. Nonlinear trends can instead qualify by their shape fit.
+            # Reclassify incidental trends in trend-free proposals without
+            # correcting any values or resampling a valid moderate trend away.
+            if score > 0.15 or (trend_free and score <= 0.15) or strength > 0.15:
                 break
         else:
             raise RuntimeError(
                 "Could not meet trend-profile screening criterion after 100 attempts"
             )
+        model["trend_free"] = bool(trend_free and score <= 0.15)
         model["quality"] = {
             "linear_trend_r_squared": score,
-            "screened_trend_free": trend_free,
+            "screened_trend_free": bool(trend_free and score <= 0.15),
+            "proposed_trend_free": trend_free,
             "trend_shape_r_squared": strength,
             "sampling_attempts": attempt + 1,
         }
-        return model, frame
+        return model, self._observe(clean, model)
 
     def _write_table(self, model, frame, directory):
         directory.mkdir(exist_ok=False)
@@ -3061,6 +3578,8 @@ class OperationalSCMGenerator:
             "offset": offset,
             "complete_windows_only": True,
         }
+        if model["rows"] != len(frame):
+            selection["simulated_rows"] = model["rows"]  # Includes prehistory.
         derived = copy.deepcopy(model)
         derived["rows"] = len(coarse)
         derived["observation_selection"] = selection
@@ -3086,6 +3605,56 @@ class OperationalSCMGenerator:
             encoding="utf-8",
         )
         _render_plot_job(self, derived, coarse, target)
+        return target
+
+    def _write_aggregate_copy(self, model, frame, directory):
+        if (
+            not self.aggregate_copy_probability
+            or len(frame) <= 512
+            or model.get("observation_selection")
+            or model.get("observation_transform")
+        ):
+            return None
+        # Independent from sampling, thinning and mirroring RNG streams.
+        rng = np.random.default_rng(
+            np.random.SeedSequence([model["observation_seed"], 0xA663])
+        )
+        if rng.random() >= self.aggregate_copy_probability:
+            return None
+        window = int(rng.integers(2, 6))
+        statistic = str(rng.choice(["min", "max", "mean"]))
+        recorded = aggregate_frame(frame, window, statistic)
+        selection = {
+            "kind": "trailing_aggregate",
+            "window_size": window,
+            "statistic": statistic,
+            "source_rows": len(frame),
+            "simulated_rows": model["rows"],
+            "complete_windows_only": True,
+            "availability": "exclusive_right_edge",
+            "source_interval": "[t-window_size,t)",
+        }
+        derived = copy.deepcopy(model)
+        derived.update(rows=len(recorded), observation_selection=selection)
+        derived["quality"] = {
+            "source_quality": model.get("quality", {}),
+            "screened": False,
+            "linear_trend_r_squared": self.trend_score(recorded),
+        }
+        target = directory.with_name(f"{directory.name}_aggregate_{statistic}_{window}")
+        self._write_table(derived, recorded, target)
+        (target / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "source_table": directory.name,
+                    "observation_selection": selection,
+                    "note": "All channels summarize the preceding completed window. Future aggregates are not future-known covariates. DAG describes the source clock.",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _render_plot_job(self, derived, recorded, target)
         return target
 
     def _write_sign_inverted_copy(self, model, frame, directory):
@@ -3137,6 +3706,7 @@ class OperationalSCMGenerator:
             for path in (
                 self._write_coarse_copy(model, frame, directory),
                 self._write_sign_inverted_copy(model, frame, directory),
+                self._write_aggregate_copy(model, frame, directory),
             )
             if path is not None
         ]

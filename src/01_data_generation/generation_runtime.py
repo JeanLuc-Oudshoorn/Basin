@@ -40,6 +40,31 @@ def coarsen_frame(frame, window_size, offset):
     return result
 
 
+def aggregate_frame(frame, window_size, statistic):
+    """Trailing completed windows, available only at their exclusive right edge.
+
+    At source-clock t=w, summarize rows [0,w); at t=2w, rows [w,2w).
+    All measured columns use exactly the same window. Never backfill, center,
+    or include the row at t. Incomplete final windows are discarded. NaNs
+    propagate: missing measurements are not silently replaced by future data.
+    """
+    if type(window_size) is not int or window_size not in (2, 3, 4, 5):
+        raise ValueError("window_size must be 2, 3, 4 or 5")
+    reducers = {"min": np.min, "max": np.max, "mean": np.mean}
+    if statistic not in reducers:
+        raise ValueError("statistic must be min, max or mean")
+    stop = len(frame) // window_size * window_size
+    columns = [name for name in frame if name != "time_index"]
+    values = frame[columns].to_numpy(dtype=float)[:stop]
+    values = reducers[statistic](values.reshape(-1, window_size, len(columns)), axis=1)
+    result = (
+        frame.iloc[window_size - 1 : stop : window_size].reset_index(drop=True).copy()
+    )
+    result[columns] = values
+    result["time_index"] = result["time_index"] + 1
+    return result
+
+
 def duration(seconds):
     """Compact elapsed/ETA display, including multi-day generation runs."""
     seconds = max(0, int(seconds))
@@ -58,12 +83,15 @@ class GenerationProgress:
         self.last_report = -math.inf
         self.extra_tables = 0
         self.mirrored_tables = 0
+        self.aggregate_tables = 0
 
     def record_copies(self, groups):
         for group in groups:
             for path in group[1:]:
                 if path.name.endswith("_sign_inverted"):
                     self.mirrored_tables += 1
+                elif "_aggregate_" in path.name:
+                    self.aggregate_tables += 1
                 else:
                     self.extra_tables += 1
 
@@ -84,6 +112,11 @@ class GenerationProgress:
             + (
                 f" | +{self.mirrored_tables:,} sign-inverted copies"
                 if self.mirrored_tables
+                else ""
+            )
+            + (
+                f" | +{self.aggregate_tables:,} aggregate copies"
+                if self.aggregate_tables
                 else ""
             ),
             # Keep progress/ETA denominators tied to original SCMs, not extras.

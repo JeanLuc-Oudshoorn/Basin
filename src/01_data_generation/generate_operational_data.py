@@ -4,11 +4,19 @@ import sys
 from pathlib import Path
 
 # User settings (one fresh structural causal model per table).
-NUM_TABLES = 2_500_000
+NUM_TABLES = 1000
 SEED = 1  # Use None for a fresh random seed each execution.
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
 MIN_ROWS = 96
 MAX_ROWS = 2056  # Inclusive.
+# Real series are usually longer than the model's context, so the model sees
+# exactly the context length. Give that length a point mass instead of leaving
+# it one value among ~2000; the rest stay uniform between MIN_ROWS and MAX_ROWS.
+FULL_LENGTH_PROBABILITY = 0.5
+# Among full-length tables: simulate this many EARLIER rows and discard them, so
+# the table is the tail of a longer history (mid-life trends, running cycles).
+PREHISTORY_PROBABILITY = 0.5
+MAX_PREHISTORY_ROWS = 2048  # Uniform 64..this; costs generation time, not disk.
 MIN_COVARIATES = (
     3  # Includes a binary event source; other nodes are compound processes.
 )
@@ -41,9 +49,9 @@ NOISE_FREE_COVARIATE_PROBABILITY = (
     0.35  # Per process covariate; deterministic given its parents.
 )
 TREND_FREE_FRACTION = (
-    0.5  # Batch quota, screened using outcome linear-trend R² <= 0.15.
+    0.5  # Proposal share; incidental moderate trends are accepted as trending.
 )
-# Remaining tables MUST have a discernible trend (trend-shape R² >= 0.4).
+# Trending proposals qualify by linear or trend-shape R-squared > 0.15.
 # They include rising/falling, accelerating/decelerating, and permanent shock breaks.
 RESIDUAL_HISTORY_PROBABILITY = (
     0.05  # Per selected outcome lag; residuals supplement full values.
@@ -68,7 +76,7 @@ DISCRETE_COVARIATE_PROBABILITY = (
     0.25  # Additional source slots after the first continuous process.
 )
 SENSOR_BOUNDS_PROBABILITY = (
-    0.02  # Rare hard bounds, per continuous covariate and outcome; measured units.
+    0.05  # Hard physical bounds, per continuous covariate and outcome; measured units.
 )
 DISCRETE_WEIGHTS = {
     "bernoulli": 0.35,
@@ -84,7 +92,8 @@ ANGLE_COVARIATE_PROBABILITY = (
 # Relative weights, not percentages. Unlisted operators retain tier defaults:
 # often=8, sometimes=2, rare=0.15. Set a weight to zero to disable an operator.
 # Static and temporal operators share this prior. See effect_mechanisms.py.
-EFFECT_WEIGHTS = {}  # Example: {"affine": 16, "hill": 4, "tangent": 0}.
+# second_order (settling with overshoot/ringing around the new level) is opt-in.
+EFFECT_WEIGHTS = {"second_order": 2.0}  # Example: {"affine": 16, "tangent": 0}.
 PARENT_COMBINATION_WEIGHTS = {}  # Override sum/product/ratio/min/max/soft_min/gate/etc.
 NODE_LINK_WEIGHTS = {}  # identity/saturation/softplus/exponential/sigmoid/logarithm.
 PAIRWISE_INTERACTION_PROBABILITY = 0.85  # Most selected interactions use a random pair.
@@ -152,11 +161,65 @@ PRIOR_RANGES = {
         0.5,
         1.2,
     ),  # Exponential falloff in recent-lag selection probability.
+    "effect_tau": (1.0, 200.0),  # Edge lag time constants, log-uniform (was 1..30).
 }
+
+# --- Realism settings (all default to OFF inside OperationalSCMGenerator, so
+# --- older seeds and saved SCMs replay unchanged; set a value to 0 to disable).
+# Seasonality. Share of tables whose outcome has clock-driven cycles at all. In
+# the others the outcome has no seasonal term or seasonal AR anchor, and each
+# covariate keeps its cycles only with the second probability below.
+SEASONAL_TABLE_PROBABILITY = 0.4
+NONSEASONAL_COVARIATE_SEASON_PROBABILITY = 0.15
+FORCED_SEASON_PROBABILITY = 0.85  # Seasonal tables: add a cycle if none was drawn.
+CALENDAR_GATE_PROBABILITY = 0.15  # Per season: reduced "rest day" cycles (5+2 etc.).
+# Slow mean-reverting wander of the outcome itself (time constant 8-600 samples).
+# It is what a cycle-free signal mostly consists of; cycles can ride on it too.
+NONSEASONAL_WANDER_PROBABILITY = 0.7
+SEASONAL_WANDER_PROBABILITY = 0.25
+# Noise budget per table. clean: no white floor, innovations x0.003-0.03;
+# low: floor 0.004-0.05; moderate: the previous fixed floor 0.15-0.45;
+# noisy: floor 0.6-2 (a sensor that is mostly noise). None restores the old floor.
+NOISE_PROFILE_WEIGHTS = {"clean": 0.45, "low": 0.28, "moderate": 0.19, "noisy": 0.08}
+# Time scales and settling.
+SLOW_DYNAMICS_PROBABILITY = 0.25  # Per process covariate: time constant 20-400.
+TRANSPORT_DELAY_PROBABILITY = 0.10  # Per edge: dead time 4..MAX_COVARIATE_LAG.
+STEP_RESPONSE_PROBABILITY = 0.5  # Edges from switches/levels: clean lag/overshoot.
+STARTUP_TRANSIENT_PROBABILITY = 0.6  # Shutdown tables: coast-down and inrush.
+# Trends. Among trending tables: wear, onset, commissioning, maintenance sawtooth
+# and level-shift curves instead of the linear/broken/multiplicative kinds.
+LIFECYCLE_TREND_PROBABILITY = 0.35
+# Closed-loop units, among trend-free tables. The classic outcome becomes the
+# unit's demand; the recorded outcome is its level/pressure/controller output.
+PLANT_PROBABILITY = 0.3
+# A totalizer (running total of a flow) only counts up, so it is drawn for
+# TRENDING tables instead, with probability PLANT_PROBABILITY x its weight share.
+PLANT_WEIGHTS = {
+    "relay": 0.4,
+    "pid": 0.25,
+    "batch": 0.2,
+    "step_response": 0.15,
+    "totalizer": 0.1,
+    "stick_slip": 0.08,
+    "interlock": 0.08,
+}
+# Recording layer, applied after simulation (see measurement_layer.py).
+REDUNDANT_SENSOR_PROBABILITY = 0.12  # Per table: 1-2 extra sensors on a signal.
+MEASUREMENT_PROBABILITY = 0.2  # 20% per continuous column: 1-3 sensor artifacts.
+ARTIFACT_WEIGHTS = {}  # noise/quantize/clip/deadband/hold/stuck/spikes/dropout/...
+MISSINGNESS_PROBABILITY = 0.15  # Per table: one missing-value mechanism (NaN).
+# mcar: independent of all values. mar: depends on an observed column, the clock
+# or the previous reading. structural: periodic gaps, slower sampling, late
+# start, early end, whole-logger outage, out-of-range values not reported.
+MISSINGNESS_WEIGHTS = {"mcar": 0.35, "mar": 0.25, "structural": 0.40}
+ROW_GAP_PROBABILITY = 0.04  # Rows absent from the file: the series jumps.
+# Resample tables whose outcome never moves (or moves by less than float32 can
+# hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
+REJECT_CONSTANT_OUTCOME = True
 BURN_IN = 128  # Unrecorded history for warm-up and valid initial lag columns.
-SAVE_SCM = False
-SAVE_PLOT = False
-SAVE_DAG = False  # Causal structure with hidden nodes and explicit history proxies.
+SAVE_SCM = True
+SAVE_PLOT = True
+SAVE_DAG = True  # Causal structure with hidden nodes and explicit history proxies.
 PLOT_COVARIATES = True  # False plots only the outcome.
 RENDER_WORKERS = (
     None  # Automatically use up to four plot processes; 1 renders serially.
@@ -167,6 +230,9 @@ GENERATION_WORKERS = (
 GENERATION_BATCH_SIZE = 16  # Tables per task; bounded queues avoid large memory spikes.
 PROGRESS_INTERVAL = 1.0  # Seconds between elapsed/rate/ETA console updates.
 COARSE_COPY_PROBABILITY = 0.03  # Extra thinned copy, only for originals with >512 rows.
+AGGREGATE_COPY_PROBABILITY = (
+    0.03  # One causal min/max/mean copy; windows 2-5, >512 rows.
+)
 SIGN_INVERSION_PROBABILITY = 0.05  # Extra copy negating all values except time_index.
 
 
@@ -236,7 +302,32 @@ def main():
         generation_batch_size=GENERATION_BATCH_SIZE,
         progress_interval=PROGRESS_INTERVAL,
         coarse_copy_probability=COARSE_COPY_PROBABILITY,
+        aggregate_copy_probability=AGGREGATE_COPY_PROBABILITY,
         sign_inversion_probability=SIGN_INVERSION_PROBABILITY,
+        full_length_probability=FULL_LENGTH_PROBABILITY,
+        prehistory_probability=PREHISTORY_PROBABILITY,
+        max_prehistory_rows=MAX_PREHISTORY_ROWS,
+        row_gap_probability=ROW_GAP_PROBABILITY,
+        seasonal_table_probability=SEASONAL_TABLE_PROBABILITY,
+        nonseasonal_covariate_season_probability=NONSEASONAL_COVARIATE_SEASON_PROBABILITY,
+        forced_season_probability=FORCED_SEASON_PROBABILITY,
+        noise_profile_weights=NOISE_PROFILE_WEIGHTS,
+        slow_dynamics_probability=SLOW_DYNAMICS_PROBABILITY,
+        transport_delay_probability=TRANSPORT_DELAY_PROBABILITY,
+        step_response_probability=STEP_RESPONSE_PROBABILITY,
+        lifecycle_trend_probability=LIFECYCLE_TREND_PROBABILITY,
+        calendar_gate_probability=CALENDAR_GATE_PROBABILITY,
+        plant_probability=PLANT_PROBABILITY,
+        plant_weights=PLANT_WEIGHTS,
+        startup_transient_probability=STARTUP_TRANSIENT_PROBABILITY,
+        redundant_sensor_probability=REDUNDANT_SENSOR_PROBABILITY,
+        measurement_probability=MEASUREMENT_PROBABILITY,
+        artifact_weights=ARTIFACT_WEIGHTS,
+        missingness_probability=MISSINGNESS_PROBABILITY,
+        missingness_weights=MISSINGNESS_WEIGHTS,
+        nonseasonal_wander_probability=NONSEASONAL_WANDER_PROBABILITY,
+        seasonal_wander_probability=SEASONAL_WANDER_PROBABILITY,
+        reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
     paths = generator.generate(NUM_TABLES)
     print(f"Saved {len(paths)} tables under {paths[0].parent}")

@@ -126,6 +126,20 @@ class AugmentationIsolationTests(unittest.TestCase):
             actual = evaluation_records(metadata, metadata)
             self.assertEqual({r["source"] for r in actual}, set(sources) - excluded)
 
+    def test_aggregates_exclude_the_whole_family(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = [
+                "original",
+                "original_aggregate_min_2",
+                "original_aggregate_max_3",
+                "original_aggregate_mean_5",
+            ]
+            for name in names:
+                (root / name).mkdir()
+            sources = [str(root / name / "data.parquet") for name in names]
+            self.assertEqual(excluded_evaluation_sources(sources), set(sources))
+
     def test_new_copies_are_detected_without_stale_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
