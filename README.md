@@ -67,6 +67,7 @@ src/
   05_model_training/
   06_holdout_test/
   07_forecasting/
+  08_model_export/               # Portable (pure PyTorch / FLA) model exports
 data/
   01_generated/YYYY-MM-DD/.../data.parquet
   02_processed/
@@ -98,6 +99,51 @@ The folder rename preserves existing binary data and checkpoint contents. It doe
 not convert the archived 447M weights into the default 395M architecture. The
 [path migration audit](docs/audits/2026-10-31/model_folder_names/REPORT.md) records
 the directory changes and text-reference updates.
+
+## Portable model exports
+
+The trained model runs on custom CUDA kernels. For sharing (for example on the
+Hugging Face Hub) the evaluated checkpoint can be converted into two
+self-contained folders under `results/model/portable/`:
+
+| Folder | Needs | Runs on |
+|---|---|---|
+| `basin-rwkv7-pytorch` | `torch`, `safetensors` | CPU or GPU, any OS, no compiler |
+| `basin-rwkv7-fla` | `flash-linear-attention` (Triton) | NVIDIA GPU on Linux/WSL, gcc or clang |
+
+```bash
+python src/08_model_export/export_models.py           # write both folders (CPU only)
+python experiments/portable_models/run_pytorch.py     # demo forecast, plot and error metrics
+python experiments/portable_models/run_fla.py         # same with FLA (relaunches in WSL)
+python -m unittest discover -s tests -p test_model_export.py
+```
+
+The demo scripts forecast the last 20% of `data/00_public/airline-passengers.csv`
+from the first 80%; `--data`, `--column`, `--device` and `--dtype` change that.
+In Python:
+
+```python
+import sys
+
+sys.path.insert(0, "results/model/portable/basin-rwkv7-pytorch")
+from modeling_basin_pytorch import BasinPyTorch
+
+model = BasinPyTorch.from_pretrained(
+    "results/model/portable/basin-rwkv7-pytorch", device="cpu"
+)
+forecast = model.forecast(
+    context, horizon=64, past_covariates=covariates
+)  # [target, time] tensors
+forecast.point, forecast.quantiles
+```
+
+Both variants keep the trained mixed precision (bfloat16 with float32 inside the
+recurrence, gates and norms) and hold the exact weights the holdout evaluated.
+Their forecasts differ from the original by about 0.4% of a series' standard
+deviation, the same as the original's own two code paths differ from each other.
+Median latency per forecast on the RTX 5070: original 7.9 ms, FLA 43.6 ms, pure
+PyTorch 61.9 ms (213 ms on CPU). Method, evidence and limits are in the
+[portable models audit](docs/audits/2026-11-13/portable_models/REPORT.md).
 
 ## Development checks
 
