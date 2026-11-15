@@ -1,7 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/basin_logo_dark.png">
-    <img src="assets/basin_logo.png" alt="Basin logo" width="320">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/basin_wordmark_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/basin_wordmark_light.png">
+    <img src="assets/basin_wordmark_light.png" alt="Basin logo" width="480">
   </picture>
 </p>
 
