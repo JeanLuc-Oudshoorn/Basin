@@ -88,6 +88,14 @@ the [technical overview](docs/TECHNICAL_OVERVIEW.md).
 
 ---
 
+## What do you consider operational data?
+
+Sensor data and other measurements from cyber-physical systems: machines,
+plants and infrastructure where physical processes are monitored and
+controlled by software. Think of temperatures, pressures, flows and vibration
+in a factory, the compressor of a train, the pumps in a water network, or
+the load on a power grid.
+
 ## Why a TSFM only for the operational domain?
 
 Most TSFMs try to do it all: one model for finance, weather, retail,
@@ -176,6 +184,35 @@ architecture compares with the transformers that dominate today's TSFMs.
 The current model is a hybrid that keeps RWKV-7 as its backbone and adds a
 small amount of attention across time and across variables. See the
 [220M hybrid architecture notes](docs/model_training/HYBRID_220M_2026-11-15.md).
+
+## Why only train on synthetic data?
+
+**Licensing.** Training only on data we generate ourselves guarantees that
+Basin never accidentally learns from a dataset whose license doesn't allow
+it.
+
+**Variety.** Real operational data does exist online, for example the
+[MetroPT-3 dataset](https://archive.ics.uci.edu/dataset/791/metropt+3+dataset)
+from the Porto metro. But such a dataset is a large amount of data from a
+*single* cyber-physical system. To generalise broadly, a model needs data
+from many *different* kinds of systems, and there are not many open-source
+datasets of cyber-physical systems. Synthetic data solves this: Basin's
+generator builds new structural causal models on the spot, each one a
+different system with its own sensors, causal links, control loops,
+episodes and faults.
+
+**Availability.** The large bundled collections that do exist, such as
+[GIFT-Eval Pretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain),
+mix data from many domains. Filtering them down to only the operational
+domain would be cumbersome.
+
+## Why is the project named Basin?
+
+It is a loose analogy to a *data lake*. A TSFM's real competitive advantage
+is its training data: the key is to train on a wide variety of the typical
+cases *and* the rare, unusual ones that the model may come across in real
+life within its domain. A basin is narrow compared with a lake but deep, and
+that depth stands for the depth of the training data within one domain.
 
 ---
 
