@@ -39,6 +39,10 @@ class StartupCacheTests(unittest.TestCase):
                     weights_digest(path, weights, field="best_state_dict"), first
                 )
             path.write_bytes(b"checkpoint version two")
+            # Same size; make sure the rewrite is a later timestamp even on
+            # filesystems that keep the old one for a same-instant write.
+            mtime = path.stat().st_mtime_ns + 1_000_000_000
+            os.utime(path, ns=(mtime, mtime))
             weights["weight"][0] = 2
             self.assertNotEqual(
                 weights_digest(path, weights, field="best_state_dict"), first
