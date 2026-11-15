@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/basin_logo.png" alt="Basin logo" width="320">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/basin_logo_dark.png">
+    <img src="assets/basin_logo.png" alt="Basin logo" width="320">
+  </picture>
 </p>
 
 # Basin
