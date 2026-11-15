@@ -1,0 +1,402 @@
+﻿Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+Saved 1 tables under unused
+tables=3000
+== mechanism frequency, share of tables ==
+feedback_loop                             0.2977
+op_delay                                  0.2043
+op_diffusion                              0.0503
+op_erlang                                 0.0637
+op_first_order_lag                        0.2013
+op_hysteresis                             0.0657
+op_integrator                             0.2207
+op_pid                                    0.0617
+op_rate_limiter                           0.0613
+op_regime_switch                          0.0643
+op_resonance                              0.0613
+op_volatility_coupling                    0.0633
+operation_episode                         0.0173
+operation_none                            0.9007
+operation_reset                           0.0310
+operation_shutdown                        0.0510
+outcome_event_shock                       0.7020
+outcome_has_season                        0.9843
+outcome_quantized                         0.2473
+outcome_ringing                           0.2497
+outcome_sensor_bounds                     0.0157
+outcome_volatility                        0.2087
+relay_in_feedback_loop                    0.0077
+seasons_0                                 0.0157
+seasons_1                                 0.4240
+seasons_2                                 0.3083
+seasons_3                                 0.2520
+settling_after_step                       0.0397
+step_into_slow_state_tau_ge_20            0.0007
+step_source_reaches_outcome               0.3947
+trend_accelerating                        0.0617
+trend_broken                              0.1550
+trend_decelerating                        0.0637
+trend_linear                              0.1003
+trend_multiplicative                      0.1193
+trend_none                                0.5000
+underdamped_step                          0.0067
+univariate                                0.2607
+visible_0plus                             0.2607
+visible_1plus                             0.3653
+visible_2plus                             0.2330
+visible_3plus                             0.1410
+mean sampling attempts 1.0856666666666666
+
+== synthetic outcome ==
+{
+  "windows": 3000,
+  "constant": 0.0023333333333333335,
+  "flat_run_ge_16": 0.07233333333333333,
+  "flat_share_ge_0.5": 0.030738389575676577,
+  "unique_le_12": 0.008686936184430337,
+  "zero_share_ge_0.1": 0.04310056799198129,
+  "pinned_at_extreme_ge_0.02": 0.06615436017373873,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.06080855329101236,
+  "hf_noise_lt_0.05": 0.18309388573337787,
+  "peak_share_ge_0.3": 0.637821583695289,
+  "peak_share_lt_0.1": 0.039759438690277316,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.0162,
+    0.0657,
+    0.1446,
+    0.3093,
+    0.6218
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.0394,
+    0.0963,
+    0.1876,
+    0.3861,
+    0.6821
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.1098,
+    0.2428,
+    0.3799,
+    0.5279,
+    0.7265
+  ]
+}
+
+== synthetic outcome, rows>=1024 ==
+{
+  "windows": 1587,
+  "constant": 0.003780718336483932,
+  "flat_run_ge_16": 0.06742281033396345,
+  "flat_share_ge_0.5": 0.02340290955091714,
+  "unique_le_12": 0.0056925996204933585,
+  "zero_share_ge_0.1": 0.0392156862745098,
+  "pinned_at_extreme_ge_0.02": 0.058823529411764705,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.058191018342821,
+  "hf_noise_lt_0.05": 0.1733080328905756,
+  "peak_share_ge_0.3": 0.5825426944971537,
+  "peak_share_lt_0.1": 0.05186590765338393,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.0161,
+    0.0685,
+    0.1467,
+    0.3034,
+    0.621
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.0378,
+    0.0956,
+    0.1874,
+    0.3819,
+    0.676
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.0994,
+    0.2224,
+    0.346,
+    0.4905,
+    0.6825
+  ]
+}
+
+== real windows (data/00_public) ==
+{
+  "windows": 1616,
+  "constant": 0.004331683168316832,
+  "flat_run_ge_16": 0.33601485148514854,
+  "flat_share_ge_0.5": 0.1423244251087632,
+  "unique_le_12": 0.014294592914853946,
+  "zero_share_ge_0.1": 0.14108141702921068,
+  "pinned_at_extreme_ge_0.02": 0.23057799875699192,
+  "monotone": 0.06525792417650715,
+  "hf_noise_lt_0.02": 0.5748912367930391,
+  "hf_noise_lt_0.05": 0.8576755748912368,
+  "peak_share_ge_0.3": 0.8241143567433188,
+  "peak_share_lt_0.1": 0.009944064636420136,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.0,
+    0.0099,
+    0.0176,
+    0.0331,
+    0.0992
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.0172,
+    0.0419,
+    0.0571,
+    0.0715,
+    0.1441
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.2004,
+    0.3371,
+    0.4366,
+    0.5323,
+    0.7188
+  ]
+}
+
+== real: TravelTime_387.csv ==
+{
+  "windows": 1,
+  "constant": 0.0,
+  "flat_run_ge_16": 0.0,
+  "flat_share_ge_0.5": 0.0,
+  "unique_le_12": 0.0,
+  "zero_share_ge_0.1": 0.0,
+  "pinned_at_extreme_ge_0.02": 0.0,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.0,
+  "hf_noise_lt_0.05": 0.0,
+  "peak_share_ge_0.3": 0.0,
+  "peak_share_lt_0.1": 1.0,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.3455,
+    0.3455,
+    0.3455,
+    0.3455,
+    0.3455
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.4714,
+    0.4714,
+    0.4714,
+    0.4714,
+    0.4714
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.0923,
+    0.0923,
+    0.0923,
+    0.0923,
+    0.0923
+  ]
+}
+
+== real: ec2_cpu_utilization_24ae8d.csv ==
+{
+  "windows": 1,
+  "constant": 0.0,
+  "flat_run_ge_16": 0.0,
+  "flat_share_ge_0.5": 0.0,
+  "unique_le_12": 0.0,
+  "zero_share_ge_0.1": 0.0,
+  "pinned_at_extreme_ge_0.02": 1.0,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.0,
+  "hf_noise_lt_0.05": 0.0,
+  "peak_share_ge_0.3": 0.0,
+  "peak_share_lt_0.1": 1.0,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.9997,
+    0.9997,
+    0.9997,
+    0.9997,
+    0.9997
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    1.0241,
+    1.0241,
+    1.0241,
+    1.0241,
+    1.0241
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.0059,
+    0.0059,
+    0.0059,
+    0.0059,
+    0.0059
+  ]
+}
+
+== real: ec2_cpu_utilization_fe7f93.csv ==
+{
+  "windows": 1,
+  "constant": 0.0,
+  "flat_run_ge_16": 0.0,
+  "flat_share_ge_0.5": 0.0,
+  "unique_le_12": 0.0,
+  "zero_share_ge_0.1": 0.0,
+  "pinned_at_extreme_ge_0.02": 0.0,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.0,
+  "hf_noise_lt_0.05": 0.0,
+  "peak_share_ge_0.3": 0.0,
+  "peak_share_lt_0.1": 1.0,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.4279,
+    0.4279,
+    0.4279,
+    0.4279,
+    0.4279
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.5213,
+    0.5213,
+    0.5213,
+    0.5213,
+    0.5213
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.0356,
+    0.0356,
+    0.0356,
+    0.0356,
+    0.0356
+  ]
+}
+
+== real: elb_request_count_8c0756.csv ==
+{
+  "windows": 1,
+  "constant": 0.0,
+  "flat_run_ge_16": 0.0,
+  "flat_share_ge_0.5": 0.0,
+  "unique_le_12": 0.0,
+  "zero_share_ge_0.1": 0.0,
+  "pinned_at_extreme_ge_0.02": 0.0,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.0,
+  "hf_noise_lt_0.05": 0.0,
+  "peak_share_ge_0.3": 0.0,
+  "peak_share_lt_0.1": 1.0,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.8553,
+    0.8553,
+    0.8553,
+    0.8553,
+    0.8553
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.8725,
+    0.8725,
+    0.8725,
+    0.8725,
+    0.8725
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.069,
+    0.069,
+    0.069,
+    0.069,
+    0.069
+  ]
+}
+
+== real: energydata_complete.csv ==
+{
+  "windows": 234,
+  "constant": 0.0,
+  "flat_run_ge_16": 0.6538461538461539,
+  "flat_share_ge_0.5": 0.2564102564102564,
+  "unique_le_12": 0.038461538461538464,
+  "zero_share_ge_0.1": 0.038461538461538464,
+  "pinned_at_extreme_ge_0.02": 0.0811965811965812,
+  "monotone": 0.0,
+  "hf_noise_lt_0.02": 0.4829059829059829,
+  "hf_noise_lt_0.05": 0.7863247863247863,
+  "peak_share_ge_0.3": 0.6666666666666666,
+  "peak_share_lt_0.1": 0.05128205128205128,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.0068,
+    0.0141,
+    0.0207,
+    0.0433,
+    0.4591
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.0203,
+    0.0361,
+    0.0475,
+    0.0797,
+    0.4827
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.1012,
+    0.2497,
+    0.3699,
+    0.5069,
+    0.6667
+  ]
+}
+
+== real: time_series_15min_singleindex.csv ==
+{
+  "windows": 1378,
+  "constant": 0.0050798258345428155,
+  "flat_run_ge_16": 0.2830188679245283,
+  "flat_share_ge_0.5": 0.12326768781911014,
+  "unique_le_12": 0.010211524434719184,
+  "zero_share_ge_0.1": 0.15900802334062727,
+  "pinned_at_extreme_ge_0.02": 0.25601750547045954,
+  "monotone": 0.07658643326039387,
+  "hf_noise_lt_0.02": 0.5922684172137126,
+  "hf_noise_lt_0.05": 0.8723559445660102,
+  "peak_share_ge_0.3": 0.8533916849015317,
+  "peak_share_lt_0.1": 0.0,
+  "hf_noise_quantiles_5_25_50_75_95": [
+    0.0,
+    0.0095,
+    0.017,
+    0.0316,
+    0.0825
+  ],
+  "roughness_quantiles_5_25_50_75_95": [
+    0.0169,
+    0.0433,
+    0.0578,
+    0.0707,
+    0.1101
+  ],
+  "peak_share_quantiles_5_25_50_75_95": [
+    0.2361,
+    0.3503,
+    0.4474,
+    0.5374,
+    0.7233
+  ]
+}

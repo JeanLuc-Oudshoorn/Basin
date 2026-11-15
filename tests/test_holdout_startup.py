@@ -51,7 +51,7 @@ class HoldoutStartupTests(unittest.TestCase):
             source = "data/01_generated/2026-11-06/table/data.parquet"
             split = {
                 "seed": config["seed"],
-                "requested_test_fraction": config["training"]["holdout_fraction"],
+                "requested_test_tables": config["training"]["holdout_tables"],
                 "input_signature": signature(config),
                 "train_sources": ["train"],
                 "test_sources": [source],

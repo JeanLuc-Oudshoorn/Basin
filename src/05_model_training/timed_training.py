@@ -1,6 +1,7 @@
 """Hourly validation/checkpointing with exact optimizer-update-boundary resume."""
 
 import math
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from time import perf_counter
 from uuid import uuid4
@@ -37,7 +38,13 @@ def fit_timed(
     *,
     clock=None,
 ):
-    from epoch_training import EarlyStopping, accumulated_update, training_options
+    from epoch_training import (
+        EarlyStopping,
+        accumulated_update,
+        monitored_value,
+        training_options,
+    )
+    from weight_average import WeightAverage, weight_average_options
 
     clock = clock or perf_counter
     run_started = clock()
@@ -92,6 +99,11 @@ def fit_timed(
         )
     scheduler, schedule_plan = make_scheduler(optimizer, t, total_budget)
     early = EarlyStopping(options["patience_epochs"], options["min_delta"])
+    average_options = weight_average_options(t)
+    # Starts as a copy of the initial weights; a resume replaces it below.
+    average = (
+        WeightAverage(model, optimizer, **average_options) if average_options else None
+    )
     identity = checkpoint_identity(
         model, records, validation_records, config, optimizer
     )
@@ -105,7 +117,7 @@ def fit_timed(
         "validation_batch_size": t.get("validation_batch_size", 16),
         "checkpoint_interval_seconds": checkpoint_interval,
         "validation_interval_seconds": validation_interval,
-        "dtype": str(next(model.parameters()).dtype),
+        "dtype": str(getattr(model, "compute_dtype", next(model.parameters()).dtype)),
         "device_type": next(model.parameters()).device.type,
         "torch_version": str(torch.__version__),
         "compile_variate": t.get("compile_variate", False),
@@ -140,7 +152,14 @@ def fit_timed(
     previous = resume_path(config)
     if previous is not None:
         restored = restore_checkpoint(
-            previous, model, optimizer, scheduler, identity, schedule_plan, best_path
+            previous,
+            model,
+            optimizer,
+            scheduler,
+            identity,
+            schedule_plan,
+            best_path,
+            weight_average=average,
         )
         if restored.get("loop_state") is None:
             raise ValueError(
@@ -214,6 +233,11 @@ def fit_timed(
         "storage_locality": t.get("storage_locality", False),
         "batch_shape_plan_reused_across_epochs": True,
         "scheduler": schedule_plan,
+        "monitor": options["monitor"],
+        "weight_average": average_options,
+        "validated_weights": "exponential moving average"
+        if average is not None
+        else "current training weights",
         "history_policy": "latest 1000 updates in checkpoint/JSON; full stream in timestamped training JSONL",
     }
     write_json(directory / "training_plan.json", plan)
@@ -247,6 +271,7 @@ def fit_timed(
             early.best is None,
             stop_reason,
             loop_state=dict(state),
+            weight_average=average,
         )
         write_json(directory / "loss_history.json", history)
         write_json(
@@ -267,15 +292,25 @@ def fit_timed(
 
     def evaluate(*, baseline=False):
         nonlocal best_step, reason
-        before = rng_state()
-        was_training = model.training
-        try:
-            result = dict(validation_fn(model, validation_records))
-        finally:
-            model.train(was_training)
-            restore_rng(before)
-        if not all(math.isfinite(result[k]) for k in ("loss", "rmse")):
-            raise FloatingPointError("Nonfinite timed validation metrics")
+        # With averaging on, validate and save as best the averaged weights:
+        # they are what gets exported. The training weights return afterwards.
+        with average.applied() if average is not None else nullcontext():
+            before = rng_state()
+            was_training = model.training
+            try:
+                result = dict(validation_fn(model, validation_records))
+            finally:
+                model.train(was_training)
+                restore_rng(before)
+            if not all(math.isfinite(result[k]) for k in ("loss", "rmse")):
+                raise FloatingPointError("Nonfinite timed validation metrics")
+            monitored = monitored_value(result, options["monitor"])
+            improved, stopped = early.observe(
+                monitored, 0 if baseline else state["epoch"]
+            )
+            if improved:
+                best_step = state["step"]
+                atomic_torch_save({"state_dict": model.state_dict()}, best_path)
         rows = result.pop("tables", [])
         index = 0 if baseline else state["validation_checks"] + 1
         completed_at = datetime.now(timezone.utc)
@@ -287,16 +322,10 @@ def fit_timed(
         )
         path = directory / f"{name}.parquet"
         pd.DataFrame(rows).to_parquet(path, index=False)
-        improved, stopped = early.observe(
-            result[options["monitor"]], 0 if baseline else state["epoch"]
-        )
-        if improved:
-            best_step = state["step"]
-            atomic_torch_save({"state_dict": model.state_dict()}, best_path)
         if not baseline:
             state["validation_checks"] += 1
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(result[options["monitor"]])
+                scheduler.step(monitored)
         row = {
             "epoch": 0 if baseline else state["epoch"],
             "step": state["step"],
@@ -308,6 +337,9 @@ def fit_timed(
             if state["epoch_mass"]
             else None,
             **result,
+            "monitor": options["monitor"],
+            "monitored_value": monitored,
+            "validated_weights": plan["validated_weights"],
             "table_metrics_path": str(path),
             "improved": improved,
             "bad_epochs": early.bad_epochs,
@@ -344,9 +376,11 @@ def fit_timed(
             dataset_disjoint=True,
         )
         logger.info(
-            "VALIDATION check={} step={} loss={} RMSE={} forecasts={} tables={} seconds={} improved={}",
+            "VALIDATION check={} step={} {}={} | loss={} RMSE={} forecasts={} tables={} seconds={} improved={}",
             index,
             state["step"],
+            options["monitor"],
+            monitored,
             result["loss"],
             result["rmse"],
             len(validation_records),
@@ -417,6 +451,8 @@ def fit_timed(
                 result = accumulated_update(
                     model, group, optimizer, t["gradient_clip"], prepared
                 )
+                if average is not None:
+                    average.update()
                 result["preparation_wait_seconds"] = max(0.0, prepared_at - started)
                 result["optimizer_update_seconds"] = max(0.0, clock() - prepared_at)
                 state["active_training_seconds"] += max(0.0, clock() - started)
@@ -586,6 +622,17 @@ def fit_timed(
             >= checkpoint_interval
         ):
             persist()
+    if (
+        reason in ("step_limit", "epoch_limit")
+        and schedule_plan["name"] == "warmup_cosine"
+        and state["last_validation_step"] != state["step"]
+    ):
+        # A warm-up/cosine run ends at its lowest learning rate, usually with
+        # its best weights. Validate them so they compete for selection instead
+        # of exporting the last periodic check.
+        budget_reason = reason
+        evaluate()
+        reason = budget_reason
     logger.info(
         "TIMED TRAIN stopping: reason={} update={} epoch={} next_batch={} active_training={} elapsed_run={}",
         reason,

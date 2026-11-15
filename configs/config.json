@@ -20,7 +20,7 @@
       "2026-11-07"
     ],
     "context_length": 2048,
-    "horizon": 64,
+    "horizon": 112,
     "targets": [
       "outcome"
     ],
@@ -37,9 +37,9 @@
   },
   "model": {
     "patch_size": 16,
-    "width": 1024,
-    "layers": 28,
-    "variate_heads": 16,
+    "width": 768,
+    "layers": 24,
+    "variate_heads": 12,
     "max_patches": 128,
     "quantiles": [
       0.1,
@@ -55,40 +55,61 @@
     "objective": "next_patch",
     "context_length": 2048,
     "gradient_checkpointing": true,
-    "output_patches": 4,
-    "horizon_loss_weights": [
-      0.8,
-      0.16,
-      0.03,
-      0.01
-    ]
+    "output_patches": 7,
+    "horizon_loss_weights": "equal",
+    "head": "direct",
+    "variate_every": 4,
+    "temporal_every": 4,
+    "gated_mixing": true,
+    "value_transform": "asinh",
+    "fp32_io": true,
+    "rwkv_init": "upstream"
   },
   "training": {
     "checkpoint_interval_seconds": 3600,
-    "validation_interval_seconds": 14400,
+    "validation_interval_seconds": 18000,
     "max_run_hours": null,
     "validation_sampling": {
       "tables": 25000,
       "seed": 7,
-      "percentiles": [1, 25, 50, 75, 99]
+      "percentiles": [
+        1,
+        25,
+        50,
+        75,
+        99
+      ]
     },
     "steps": null,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
+    "optimizer": {
+      "parameter_groups": "rwkv7",
+      "memory_decay_learning_rate_scale": 2.0,
+      "betas": [
+        0.9,
+        0.999
+      ],
+      "eps": 1e-08
+    },
+    "weight_average": {
+      "decay": 0.9999,
+      "update_every": 4,
+      "warmup_updates": 10
+    },
     "gradient_clip": 1.0,
     "train_embeddings": true,
-    "epochs": null,
+    "epochs": 3,
     "checkpoint_every": 0,
     "resume": "auto",
     "cpu_threads": 4,
     "shuffle": true,
     "scheduler": {
-      "name": "reduce_on_plateau",
-      "factor": 0.5,
-      "patience_checks": 1,
+      "name": "warmup_cosine",
+      "warmup_steps": 5000,
       "min_learning_rate": 1e-05
     },
-    "holdout_fraction": 0.025,
+    "holdout_tables": 50000,
     "batch_size": 8,
     "gradient_accumulation_steps": 1,
     "microbatch_size": 8,
@@ -105,11 +126,11 @@
     "bucket_by_length": true,
     "storage_locality": true,
     "prefetch": true,
-    "checkpoint_token_threshold": 1792,
+    "checkpoint_token_threshold": 3072,
     "early_stopping": {
-      "patience_checks": 3,
+      "patience_checks": 12,
       "min_delta": 0.0,
-      "monitor": "loss"
+      "monitor": "table_mase_profile"
     },
     "token_inventory": {
       "mode": "cached"
@@ -122,7 +143,7 @@
     "shape_run_batches": 128,
     "training_graph_min_reuse": 8,
     "training_graph_max_tokens": 32,
-    "inference_graph_memory_gib": 1.5
+    "inference_graph_memory_gib": 2.5
   },
   "holdout": {
     "benchmark_models": [

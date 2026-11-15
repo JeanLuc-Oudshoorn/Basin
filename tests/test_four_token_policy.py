@@ -79,7 +79,7 @@ class FourTokenTests(unittest.TestCase):
         from holdout import evaluate_holdout
         from transform import file_digest
 
-        config = load_config()
+        config = load_config("configs/legacy_500m.json")
         config["plot"]["max_plots"] = 0
         config["holdout"].update(
             benchmark_models=["naive", "chronos", "timestral"],
@@ -184,7 +184,7 @@ class FourTokenTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(model.head.skip.weight.grad).all())
 
     def test_training_tail_reservation_and_full_validation_batch_equivalence(self):
-        config = copy.deepcopy(load_config())
+        config = copy.deepcopy(load_config("configs/legacy_500m.json"))
         config["data"]["validation_policy"] = "reserved_tail"
         config["data"].pop("generated_dates", None)
         config["validation"]["enabled"] = False

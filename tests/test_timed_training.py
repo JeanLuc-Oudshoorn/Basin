@@ -43,7 +43,7 @@ def setup(directory):
     validation = [
         dict(records[0], source="reserved_validation_table", validation_origin=32)
     ]
-    config = copy.deepcopy(load_config())
+    config = copy.deepcopy(load_config("configs/legacy_500m.json"))
     config["paths"]["training"] = str(directory)
     config["training"].update(
         epochs=None,

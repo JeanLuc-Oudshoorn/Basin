@@ -51,15 +51,14 @@
 - Fix scaling in production (any stdev below some threshold is set to 1.0 now) - DONE
 - Learned tendency to repeat the same 16 timestep token (more weight on forecasting all tokens correctly)?
 - Or are we overfeeding seasonality in data generation? - DONE
-- Can you pre-package graph replay with a model?
-- Or is it cache that only starts working after you made forecasts with a specific shape?
 - In start/stop tables, the active part is broadly always centered - DONE
 - Start/stop tables always look broadly symmetric, but we should also see long tails or abrupt stops - DONE
 - More state machine behavior? -> the series transitions between different levels - DONE
 - Size on disk of different models? RAM consumption during inference?
 
 - Checkpoint every one hour + save optimizer state for easy restart - DONE
-- No coarse copy or sign-inverted tables in the test set
+- No coarse copy or sign-inverted tables in the test set - DONE
 - FakeBench-TS: a benchmark of entirely unpredictable datasets
-- Affine transformations on dataset? (i.e. log transform all values)
-- Distribution needs to be tail heavy? (more 2048+ contexts)
+- Affine transformations on dataset? (i.e. log transform all values) - X
+- Distribution needs to be tail heavy? (more 2048+ contexts) - DONE
+- Enable padding to common lengths to benefit more from graph replay - DONE

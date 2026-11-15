@@ -36,7 +36,7 @@ from transform import load_config, read_artifact, transform_next_patch
 
 class RollingTrainingValidationTests(unittest.TestCase):
     def test_full_training_data_five_origins_and_streamed_validation(self):
-        config = copy.deepcopy(load_config())
+        config = copy.deepcopy(load_config("configs/legacy_500m.json"))
         config["data"].pop("generated_dates", None)
         config["data"].update(
             validation_policy="sampled_training_origins", context_length=256

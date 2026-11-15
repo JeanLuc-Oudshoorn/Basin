@@ -18,7 +18,7 @@ from transform import file_digest, load_config, read_artifact, signature
 
 class LazyEmbeddingTests(unittest.TestCase):
     def fixture(self, base, count=2):
-        config = copy.deepcopy(load_config())
+        config = copy.deepcopy(load_config("configs/legacy_500m.json"))
         config["paths"].update(
             processed=str(base / "processed"), embedded=str(base / "embedded")
         )

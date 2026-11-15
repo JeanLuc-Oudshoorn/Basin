@@ -42,7 +42,7 @@ def setup(directory, *, epochs=None):
     random.seed(7)
     np.random.seed(7)
     model = StochasticForecaster()
-    config = copy.deepcopy(load_config())
+    config = copy.deepcopy(load_config("configs/legacy_500m.json"))
     config["paths"]["training"] = str(directory)
     config["training"].update(
         resume="auto",

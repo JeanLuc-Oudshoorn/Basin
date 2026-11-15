@@ -93,7 +93,7 @@ class AugmentationIsolationTests(unittest.TestCase):
                 for s in sources
                 for split in ("train", "evaluation")
             ]
-            config = load_config()
+            config = load_config("configs/legacy_500m.json")
             config["training"]["holdout_fraction"] = 0.25
             config["training"]["validation_sampling"]["tables"] = 3
             for policy in ("reserved_tail", "sampled_training_origins"):
@@ -112,6 +112,61 @@ class AugmentationIsolationTests(unittest.TestCase):
                     self.assertEqual(audit["validation_tables"], 3)
                 reverse = split_datasets(list(reversed(records)), config)
                 self.assertEqual(audit["test_sources"], reverse[3]["test_sources"])
+
+    def test_fixed_counts_draw_only_copy_free_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            families = {
+                "coarse": "_coarse_4_2",
+                "mirror": "_sign_inverted",
+                "minimum": "_aggregate_min_3",
+                "average": "_aggregate_mean_5",
+            }
+            names = [f"independent_{i}" for i in range(20)]
+            for original, suffix in families.items():
+                names += [original, original + suffix]
+            sources = []
+            for name in names:
+                (root / name).mkdir()
+                sources.append(str(root / name / "data.parquet"))
+            copied = set(sources[20:])
+            records = [
+                dict(source=s, source_rows=192, source_sha256=s, split=split, id=s)
+                for s in sources
+                for split in ("train", "evaluation")
+            ]
+            config = load_config("configs/legacy_500m.json")
+            config["data"]["validation_policy"] = "sampled_training_origins"
+            config["training"]["holdout_tables"] = 6
+            config["training"]["validation_sampling"]["tables"] = 4
+            train, validation, test, audit = split_datasets(records, config)
+            held = {r["source"] for r in test}
+            checked = {r["source"] for r in validation}
+            trained = {r["source"] for r in train}
+            self.assertEqual((len(held), len(checked)), (6, 4))
+            self.assertEqual(audit["requested_test_tables"], 6)
+            self.assertIsNone(audit["requested_test_fraction"])
+            # Originals and copies alike stay in training.
+            self.assertFalse(copied & (held | checked))
+            self.assertTrue(copied <= trained)
+            self.assertFalse(held & checked or held & trained or checked & trained)
+            # The count wins over a fraction, and membership is order-independent.
+            config["training"]["holdout_fraction"] = 0.5
+            again = split_datasets(list(reversed(records)), config)[3]
+            self.assertEqual(again["test_sources"], audit["test_sources"])
+            # Never a smaller test set than configured.
+            config["training"]["holdout_tables"] = 20
+            with self.assertRaisesRegex(ValueError, "only 20 of 28"):
+                split_datasets(records, config)
+            for invalid in (0, True, 2.5):
+                config["training"]["holdout_tables"] = invalid
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    split_datasets(records, config)
+
+    def test_production_config_reserves_fixed_evaluation_sets(self):
+        training = load_config()["training"]
+        self.assertEqual(training["holdout_tables"], 50000)
+        self.assertEqual(training["validation_sampling"]["tables"], 25000)
 
     def test_old_checkpoint_holdout_is_filtered_before_sampling(self):
         with tempfile.TemporaryDirectory() as directory:

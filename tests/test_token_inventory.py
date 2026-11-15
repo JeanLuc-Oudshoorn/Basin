@@ -30,7 +30,7 @@ from transform import file_digest, load_config
 
 class TokenInventoryTests(unittest.TestCase):
     def fixture(self, root, length=64):
-        config = copy.deepcopy(load_config())
+        config = copy.deepcopy(load_config("configs/legacy_500m.json"))
         config["data"]["validation_policy"] = "reserved_tail"
         config["model"].update(
             width=128, layers=2, variate_heads=4, context_length=32, max_patches=16
@@ -189,7 +189,10 @@ class TokenInventoryTests(unittest.TestCase):
             )
 
     def test_analytic_parameter_budget_matches_measured_architectures(self):
-        config = load_config()
+        config = load_config("configs/legacy_500m.json")
+        self.assertEqual(parameter_budget(config)["parameters"], 500056352)
+        # The earlier one-patch models had no lead embeddings.
+        config["model"].update(output_patches=1, horizon_loss_weights=None)
         for width, layers, expected in ((960, 19, 301774368), (1024, 25, 447482144)):
             config["model"].update(width=width, layers=layers)
             self.assertEqual(parameter_budget(config)["parameters"], expected)

@@ -15,11 +15,28 @@ class FP32MasterAdamW(torch.optim.AdamW):
         ):
             raise ValueError("gradient_bucket_bytes must be a positive integer")
         self.gradient_bucket_bytes = gradient_bucket_bytes
-        self.model_parameters = list(parameters)
-        masters = [
-            torch.nn.Parameter(p.detach().float().clone())
-            for p in self.model_parameters
-        ]
+        parameters = list(parameters)
+        if parameters and isinstance(parameters[0], dict):
+            # Parameter groups (per-group learning rate / weight decay). Masters
+            # keep the same grouping and order as the model parameters.
+            groups = [dict(group, params=list(group["params"])) for group in parameters]
+            self.model_parameters = [p for group in groups for p in group["params"]]
+            masters = [
+                dict(
+                    group,
+                    params=[
+                        torch.nn.Parameter(p.detach().float().clone())
+                        for p in group["params"]
+                    ],
+                )
+                for group in groups
+            ]
+        else:
+            self.model_parameters = parameters
+            masters = [
+                torch.nn.Parameter(p.detach().float().clone())
+                for p in self.model_parameters
+            ]
         super().__init__(masters, **kwargs)
         logger.info(
             "FP32 optimizer gradient staging budget={:.1f} MiB; masters and moments remain FP32",

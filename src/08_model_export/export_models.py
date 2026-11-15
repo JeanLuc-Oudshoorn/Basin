@@ -49,7 +49,31 @@ def weights_digest(weights):
     return digest.hexdigest()
 
 
+# Model options the portable ports implement: the archived 500M architecture.
+PORTED_ARCHITECTURE = {
+    "head": "lead_offset",
+    "variate_every": 1,
+    "temporal_every": 0,
+    "gated_mixing": False,
+    "value_transform": "none",
+    "fp32_io": False,
+}
+
+
 def portable_config(model, state):
+    unsupported = {
+        key: model[key]
+        for key, value in PORTED_ARCHITECTURE.items()
+        if model.get(key, value) != value
+    }
+    if unsupported:
+        # Fail before writing anything: a port that ignores these options would
+        # load without error only by accident and forecast something else.
+        raise NotImplementedError(
+            "The portable ports implement the archived 500M architecture only; "
+            f"this checkpoint uses {unsupported}. Use configs/legacy_500m.json, or "
+            "extend src/08_model_export for the hybrid direct-head model."
+        )
     att = "blocks.1.att."
     return BasinConfig(
         patch_size=model["patch_size"],

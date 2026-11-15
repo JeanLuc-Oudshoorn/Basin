@@ -97,9 +97,14 @@ def load_holdout_metadata(checkpoint, config):
     del metadata
     logger.info("HOLDOUT reading saved training split={}", split_path)
     split = load_split(split_path)
-    if split.get("seed") != config["seed"] or split.get(
-        "requested_test_fraction"
-    ) != config["training"].get("holdout_fraction", 0.1):
+    from training_protocol import holdout_request
+
+    tables, fraction = holdout_request(config)
+    if (
+        split.get("seed") != config["seed"]
+        or split.get("requested_test_tables") != tables
+        or (tables is None and split.get("requested_test_fraction") != fraction)
+    ):
         raise ValueError(
             "Saved dataset split does not match the training checkpoint policy"
         )

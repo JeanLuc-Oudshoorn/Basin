@@ -1,0 +1,120 @@
+[
+  {
+    "shape": "500M archived (1024x28, mix every block)",
+    "parameters_m": 500.1,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 137.4,
+    "tables_per_second": 58.2,
+    "peak_gib": 9.34
+  },
+  {
+    "shape": "500M archived (1024x28, mix every block)",
+    "parameters_m": 500.1,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "error": "out of memory"
+  },
+  {
+    "shape": "768x24, mix every 4",
+    "parameters_m": 221.5,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 94.8,
+    "tables_per_second": 84.4,
+    "peak_gib": 4.56
+  },
+  {
+    "shape": "768x24, mix every 4",
+    "parameters_m": 221.5,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "ms_per_update": 145.9,
+    "tables_per_second": 54.8,
+    "peak_gib": 7.83
+  },
+  {
+    "shape": "768x24, mix every 4, no temporal attention",
+    "parameters_m": 203.8,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 95.4,
+    "tables_per_second": 83.9,
+    "peak_gib": 4.22
+  },
+  {
+    "shape": "768x24, mix every 4, no temporal attention",
+    "parameters_m": 203.8,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "ms_per_update": 139.7,
+    "tables_per_second": 57.3,
+    "peak_gib": 7.3
+  },
+  {
+    "shape": "832x20, mix every 4",
+    "parameters_m": 219.3,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 85.7,
+    "tables_per_second": 93.4,
+    "peak_gib": 4.34
+  },
+  {
+    "shape": "832x20, mix every 4",
+    "parameters_m": 219.3,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "ms_per_update": 133.7,
+    "tables_per_second": 59.9,
+    "peak_gib": 7.44
+  },
+  {
+    "shape": "896x17, mix every 4",
+    "parameters_m": 214.9,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 69.8,
+    "tables_per_second": 114.6,
+    "peak_gib": 4.16
+  },
+  {
+    "shape": "896x17, mix every 4",
+    "parameters_m": 214.9,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "ms_per_update": 134.7,
+    "tables_per_second": 59.4,
+    "peak_gib": 6.95
+  },
+  {
+    "shape": "1024x13, mix every 4",
+    "parameters_m": 215.4,
+    "tables": 8,
+    "variables": 1,
+    "gradient_checkpointing": true,
+    "ms_per_update": 63.5,
+    "tables_per_second": 126.0,
+    "peak_gib": 4.0
+  },
+  {
+    "shape": "1024x13, mix every 4",
+    "parameters_m": 215.4,
+    "tables": 8,
+    "variables": 3,
+    "gradient_checkpointing": true,
+    "ms_per_update": 122.1,
+    "tables_per_second": 65.5,
+    "peak_gib": 6.44
+  }
+]

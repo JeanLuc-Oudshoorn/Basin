@@ -3,6 +3,20 @@
 Default protocol effective 2026-11-06, implemented through the normal `train.py`.
 No alternate pipeline folder or training entrypoint is needed.
 
+Update, 2026-11-15: the default model and recipe changed (220M hybrid model, 7
+forecast tokens, optimizer parameter groups, warm-up/cosine schedule, weight
+averaging, robust validation monitor). The timed trainer, checkpoints, clocks and
+recovery described here are unchanged. Differences that matter when reading this
+guide: validation forecasts span 7 tokens instead of 4; each check also reports
+the 10th, 50th and 90th percentile of table MASE and their geometric mean
+`table_mase_profile`, which selects the best weights and counts the strikes
+towards early stopping; with `training.weight_average` set, the
+averaged weights are what is validated and saved as best; a warm-up/cosine run
+needs a fixed `epochs` or `steps` budget and validates its final weights when
+that budget ends. Settings quoted below are those of the archived 500M run
+(`configs/legacy_500m.json`). See
+[the 220M architecture and recipe](HYBRID_220M_2026-11-15.md).
+
 ## Configuration
 
 Relevant settings in `configs/config.json`:
@@ -15,7 +29,7 @@ Relevant settings in `configs/config.json`:
     "epochs": null,
     "steps": null,
     "checkpoint_interval_seconds": 3600,
-    "validation_interval_seconds": 14400,
+    "validation_interval_seconds": 18000,
     "max_run_hours": null,
     "validation_sampling": {
       "tables": 25000,
@@ -152,9 +166,14 @@ redrawn at every checkpoint.
 `training/dataset_split.json` records separate `train_sources`,
 `validation_sources` and `test_sources`, actual counts/fractions, plus the
 `dataset_disjoint_v1` policy. `training.validation_sampling.tables` sets the
-validation count; `training.holdout_fraction` sets the reserved test fraction of
-independent tables. Test selection happens first and is unaffected by changing
-the validation count. Augmented families remain training-only.
+validation count (25,000). `training.holdout_tables` sets a fixed number of
+independent test tables (50,000); training stops with an error rather than
+shrink that set when too few independent tables exist. Without it,
+`training.holdout_fraction` sets the reserved test fraction of independent
+tables. Test selection happens first and is unaffected by changing the
+validation count. Augmented families remain training-only: neither a coarse,
+aggregate or sign-inverted copy nor the original it was made from can enter
+validation or test.
 
 Start a fresh run with `training.resume=false` (or a new training output
 directory) when migrating from overlapping in-sample validation: those weights
@@ -237,8 +256,28 @@ stochastic RNG assignment. Exact numerical continuation assumes the same
 execution environment and deterministic behavior of its kernels; it is not a
 promise of bitwise equivalence across different hardware or library versions.
 
+### Graph replay for validation (measured 2026-11-15, off by default)
+
+`training.validation_cuda_graphs=true` replays one CUDA graph per full
+validation batch shape; leftover batches use the plain forward. Weights are read
+at replay time, so graphs survive optimizer updates and the weight average
+without recapture (checked by changing every weight in place: no recapture,
+forecasts within the usual rounding distance of the plain path).
+`validation_graph_memory_gib` (default 2.0) bounds the cache and
+`validation_graph_retain=false` frees it after each check.
+
+It is off because it does not pay. At the validation batch size of 16 the GPU
+work dominates the launch overhead that replay removes: on the 221.5M model,
+replay was faster only for the smallest shapes (one to three variables, at most
+512 points) and equal or 3-8% slower for the rest, about 9% less forward time
+overall. That forward time is small to begin with: about 29 ms per batch, or
+roughly four minutes for all 125,000 forecasts. Graphs for batches are also
+large; capturing every shape overflowed the 12 GB card. A slow validation check
+is therefore spent outside the model's forward pass. Script and first-run log:
+`experiments/claude_review/validation_graph_replay.py`.
+
 The current config checkpoints after one hour of active training and validates
-after four hours. These cadence settings may also change on resume without
+after five hours. These cadence settings may also change on resume without
 discarding model weights, optimizer state or the saved batch cursor. When the
 validation interval changes, a saved pending check is recalculated against the
 new interval and the last completed validation time. For example, an interrupted

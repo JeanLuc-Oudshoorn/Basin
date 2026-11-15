@@ -1,0 +1,245 @@
+{
+  "seed": 7,
+  "paths": {
+    "raw": "data/01_generated",
+    "processed": "data/02_processed/500m_model",
+    "embedded": "data/03_embedded/500m_model",
+    "training": "results/500m_model/training",
+    "holdout_test": "results/500m_model_rerun/holdout_test",
+    "forecasts": "results/500m_model_rerun/forecasts",
+    "logs": "logs"
+  },
+  "logging": {
+    "level": "INFO",
+    "preview_values": 8
+  },
+  "data": {
+    "validation_policy": "sampled_training_origins",
+    "generated_dates": [
+      "2026-11-06",
+      "2026-11-07"
+    ],
+    "context_length": 2048,
+    "horizon": 64,
+    "targets": [
+      "outcome"
+    ],
+    "past_covariates": "auto",
+    "known_covariates": [],
+    "time_column": "time_index",
+    "max_tables": null,
+    "train_windows_per_table": 2,
+    "stride": 16,
+    "excluded_column_patterns": [
+      "(?i)(?:^|_)lag(?:ged)?(?:_?\\d+)?(?:_|$)"
+    ],
+    "export_processed_tables": false
+  },
+  "model": {
+    "patch_size": 16,
+    "width": 1024,
+    "layers": 28,
+    "variate_heads": 16,
+    "max_patches": 128,
+    "quantiles": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ],
+    "objective": "next_patch",
+    "context_length": 2048,
+    "gradient_checkpointing": true,
+    "output_patches": 4,
+    "horizon_loss_weights": [
+      0.8,
+      0.16,
+      0.03,
+      0.01
+    ]
+  },
+  "training": {
+    "checkpoint_interval_seconds": 3600,
+    "validation_interval_seconds": 14400,
+    "max_run_hours": null,
+    "validation_sampling": {
+      "tables": 25000,
+      "seed": 7,
+      "percentiles": [
+        1,
+        25,
+        50,
+        75,
+        99
+      ]
+    },
+    "steps": null,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "train_embeddings": true,
+    "epochs": null,
+    "checkpoint_every": 0,
+    "resume": "auto",
+    "cpu_threads": 4,
+    "shuffle": true,
+    "scheduler": {
+      "name": "reduce_on_plateau",
+      "factor": 0.5,
+      "patience_checks": 1,
+      "min_learning_rate": 1e-05
+    },
+    "holdout_fraction": 0.025,
+    "batch_size": 8,
+    "gradient_accumulation_steps": 1,
+    "microbatch_size": 8,
+    "microbatch_token_limit": 3072,
+    "auto_microbatch": true,
+    "cuda_memory_limit_gib": 11.0,
+    "cuda_memory_headroom_gib": 0.5,
+    "validation_batch_size": 16,
+    "validate_before_training": true,
+    "fused_optimizer": true,
+    "compile_variate": true,
+    "compile_variate_inference": true,
+    "compile_cache_dir": ".cache/torchinductor",
+    "bucket_by_length": true,
+    "storage_locality": true,
+    "prefetch": true,
+    "checkpoint_token_threshold": 1792,
+    "early_stopping": {
+      "patience_checks": 3,
+      "min_delta": 0.0,
+      "monitor": "loss"
+    },
+    "token_inventory": {
+      "mode": "cached"
+    },
+    "inference_cuda_graphs": true,
+    "inference_graph_cache_size": 256,
+    "training_cuda_graphs": false,
+    "training_graph_cache_shapes": 2,
+    "training_graph_memory_gib": 1.5,
+    "shape_run_batches": 128,
+    "training_graph_min_reuse": 8,
+    "training_graph_max_tokens": 32,
+    "inference_graph_memory_gib": 1.5
+  },
+  "holdout": {
+    "benchmark_models": [
+      "naive",
+      "chronos",
+      "timestral"
+    ],
+    "sample_percent": 15.0,
+    "sample_seed": 7,
+    "model_cache_dir": ".cache/huggingface",
+    "foundation_device": "cuda",
+    "chronos": {
+      "model_id": "amazon/chronos-2",
+      "revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+      "batch_size": 32
+    },
+    "timestral": {
+      "model_id": "mistralai/Timestral-209M",
+      "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
+    },
+    "percentiles": [
+      1,
+      25,
+      50,
+      75,
+      99
+    ],
+    "mase_seasonality": 1,
+    "latency": {
+      "warmup_requests": 1,
+      "repeats": 1
+    },
+    "progress_every_tables": 100,
+    "graph_min_profile_requests": 8
+  },
+  "plot": {
+    "width": 12,
+    "height": 5,
+    "dpi": 140,
+    "max_plots": 10,
+    "sample_seed": 7,
+    "context_points": 128,
+    "error_distribution": {
+      "enabled": true,
+      "axis": "log1p",
+      "grid_points": 512
+    },
+    "latency_distribution": {
+      "enabled": true,
+      "axis": "log1p",
+      "grid_points": 512
+    }
+  },
+  "prophet": {
+    "use_covariates": true,
+    "covariate_forecast": "prophet",
+    "enabled": true,
+    "start_date": "2000-01-01",
+    "frequency": "D",
+    "yearly_seasonality": false,
+    "weekly_seasonality": false,
+    "daily_seasonality": false,
+    "seasonality_mode": "additive",
+    "changepoint_prior_scale": 0.05,
+    "seasonality_prior_scale": 10.0,
+    "seasonality_period": 16,
+    "fourier_order": 3,
+    "uncertainty_samples": 0
+  },
+  "validation": {
+    "engine": "chronos2",
+    "auto_run": true,
+    "max_relative_degradation": 0.15,
+    "mase_seasonality": 1,
+    "forecast_horizon": 16,
+    "chronos2": {
+      "model_id": "autogluon/chronos-2-small",
+      "revision": "ddec01313e50b6bc58ebaa92ede81bc24a3d9f9a",
+      "batch_size": 64,
+      "context_length": 2048,
+      "device": "auto",
+      "cpu_threads": 4,
+      "cache_dir": ".cache/huggingface"
+    },
+    "enabled": false,
+    "workers": null,
+    "metrics_path": "results/02_data_validation/metrics.parquet",
+    "run_folders": true,
+    "train_fraction": 0.8,
+    "covariate_mode": "forecast",
+    "step_duration": "1D",
+    "seasonal_periods": [],
+    "prophet_options": {
+      "daily_seasonality": false,
+      "weekly_seasonality": false,
+      "yearly_seasonality": false,
+      "seasonality_mode": "additive",
+      "uncertainty_samples": 0
+    }
+  },
+  "transform": {
+    "batch_size_tables": 100000,
+    "batch_memory_limit_mb": 512,
+    "checkpoint_every_tables": 100000,
+    "checkpoint_interval_seconds": null
+  },
+  "embedding": {
+    "cpu_threads": 6,
+    "batch_size_records": 10000,
+    "checkpoint_every_records": 100000,
+    "checkpoint_interval_seconds": null,
+    "progress_every": 10000
+  }
+}

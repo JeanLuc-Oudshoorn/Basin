@@ -26,13 +26,14 @@ loads with `configs/legacy_500m.json`. Its
 describes that protocol.
 
 The default trainer uses full training tables, with no reserved validation tail.
-Every hour of active training it saves a resumable checkpoint; every four hours it validates
+Every hour of active training it saves a resumable checkpoint; every five hours it validates
 25,000 fixed reserved validation tables at five origins each (125,000 forecasts),
 using Basin only. Training, validation and test tables are disjoint: no window
 from a validation table enters gradient training. Originals with coarse or
 sign-inverted copies and their copies are training-only. Every validation and
 holdout forecast spans the model's full 7-token block. Best weights are chosen
-on the trimmed table loss, which a handful of extreme forecasts cannot move.
+on the 10th, 50th and 90th percentile of table MASE, which a handful of
+extreme forecasts cannot move. Missing values are forecast but never scored.
 Checkpoints retain optimizer moments/settings, scheduler and RNG states, plus
 the exact shuffled batch cursor for continuation within an epoch.
 For large sharded corpora, `training.storage_locality=true` visits each shard

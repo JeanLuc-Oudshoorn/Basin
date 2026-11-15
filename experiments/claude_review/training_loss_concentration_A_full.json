@@ -1,0 +1,54 @@
+{
+  "config": "results/pilot_v2/A_full.json",
+  "value_transform": "asinh",
+  "tables": 3311,
+  "labels": 33266599,
+  "mean_loss": 0.2076733136764835,
+  "by_label_size": [
+    {
+      "standardised_label_size": "<= 3",
+      "share_of_labels": 0.9404786164044001,
+      "share_of_loss_value": 0.8346872794518345,
+      "share_of_head_gradient": 0.9289545299469735,
+      "mean_loss_per_label": 0.18431282772816956
+    },
+    {
+      "standardised_label_size": "3 - 10",
+      "share_of_labels": 0.05198770093690672,
+      "share_of_loss_value": 0.10274360559492134,
+      "share_of_head_gradient": 0.0612740225465236,
+      "mean_loss_per_label": 0.4104260170855051
+    },
+    {
+      "standardised_label_size": "10 - 100",
+      "share_of_labels": 0.005756464614852874,
+      "share_of_loss_value": 0.03494932815219534,
+      "share_of_head_gradient": 0.007408570736248287,
+      "mean_loss_per_label": 1.2608507606224073
+    },
+    {
+      "standardised_label_size": "100 - 10,000",
+      "share_of_labels": 0.0014887906034518287,
+      "share_of_loss_value": 0.017682696572191473,
+      "share_of_head_gradient": 0.0019663104455449124,
+      "mean_loss_per_label": 2.4665820588661567
+    },
+    {
+      "standardised_label_size": "> 10,000",
+      "share_of_labels": 0.00028842744038848095,
+      "share_of_loss_value": 0.009937090228857349,
+      "share_of_head_gradient": 0.00039656632470976656,
+      "mean_loss_per_label": 7.154896404272321
+    }
+  ],
+  "worst_1_percent_of_tables": {
+    "tables": 33,
+    "share_of_loss_value": 0.02243761011656328,
+    "share_of_labels": 0.012979836021109342
+  },
+  "anchors_without_any_observed_history": {
+    "share_of_labels": 0.0004304617974323134,
+    "share_of_loss_value": 0.0017433460218304947,
+    "share_of_head_gradient": 0.00047970405099413905
+  }
+}

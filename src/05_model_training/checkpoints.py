@@ -64,6 +64,10 @@ def checkpoint_identity(model, records, validation_records, config, optimizer):
         policy["storage_locality"] = True
     policy["monitor"] = early.get("monitor", "loss")
     policy["min_delta"] = early.get("min_delta", 0.0)
+    # Recorded only when configured, so checkpoints of earlier runs still match.
+    for key in ("optimizer", "weight_average", "holdout_tables"):
+        if training.get(key) is not None:
+            policy[key] = training[key]
     digest = hashlib.sha256()
     from sharded_records import RecordSelection
 
@@ -184,8 +188,31 @@ def resume_path(config):
     return path
 
 
+# Model options added after the 500M run, with the values that describe it.
+LEGACY_MODEL_DEFAULTS = {
+    "output_patches": 1,
+    "multi_horizon_weight": 0.5,
+    "horizon_loss_weights": None,
+    "head": "lead_offset",
+    "variate_every": 1,
+    "temporal_every": 0,
+    "gated_mixing": False,
+    "value_transform": "none",
+    "fp32_io": False,
+    "rwkv_init": "constructor",
+}
+
+
 def restore_checkpoint(
-    path, model, optimizer, scheduler, identity, schedule_plan, best_path
+    path,
+    model,
+    optimizer,
+    scheduler,
+    identity,
+    schedule_plan,
+    best_path,
+    *,
+    weight_average=None,
 ):
     started = perf_counter()
     logger.info("Loading resumable epoch checkpoint {}", path)
@@ -202,9 +229,8 @@ def restore_checkpoint(
     # Older one-patch checkpoints predate direct-lead options. Only their exact
     # legacy defaults may be filled in; a 16-lead model still cannot resume them.
     saved_identity["model"] = dict(saved_identity["model"])
-    saved_identity["model"].setdefault("output_patches", 1)
-    saved_identity["model"].setdefault("multi_horizon_weight", 0.5)
-    saved_identity["model"].setdefault("horizon_loss_weights", None)
+    for key, value in LEGACY_MODEL_DEFAULTS.items():
+        saved_identity["model"].setdefault(key, value)
     # Physical microbatch limits may need lowering after an activation OOM.
     # They do not change the logical batch cursor or point-weighted objective.
     # Different tensor sizes can change floating-point rounding/RNG assignment;
@@ -254,6 +280,10 @@ def restore_checkpoint(
     model.load_state_dict(state["state_dict"])
     optimizer.load_state_dict(state["optimizer_state_dict"])
     scheduler.load_state_dict(state["scheduler_state_dict"])
+    if weight_average is not None:
+        if state.get("weight_average") is None:
+            raise ValueError("Resume checkpoint has no saved weight average")
+        weight_average.load_state_dict(state["weight_average"])
     # Best weights travel inside the resume artifact: no dependency on a possibly
     # newer external best_weights.pt after an interrupted epoch-end write.
     atomic_torch_save({"state_dict": state["best_state_dict"]}, best_path)
@@ -318,6 +348,7 @@ def save_checkpoint(
     stop_reason,
     *,
     loop_state=None,
+    weight_average=None,
 ):
     started = perf_counter()
     logger.info("Writing resumable training checkpoint {}", path)
@@ -359,6 +390,9 @@ def save_checkpoint(
             "validation_history": validation_history,
             "rng_state": rng_state(),
             "stop_reason": stop_reason,
+            "weight_average": weight_average.state_dict()
+            if weight_average is not None
+            else None,
         },
         path,
     )

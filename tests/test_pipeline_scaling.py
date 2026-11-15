@@ -151,7 +151,7 @@ class PipelineScalingTests(unittest.TestCase):
     def test_split_scans_metadata_twice_and_returns_compact_disjoint_training(self):
         with tempfile.TemporaryDirectory() as temporary:
             records = corpus(Path(temporary))
-            config = load_config()
+            config = load_config("configs/legacy_500m.json")
             config["training"]["validation_sampling"]["tables"] = 2
             config["training"]["holdout_fraction"] = 0.2
             with patch(

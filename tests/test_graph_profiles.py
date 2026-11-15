@@ -42,6 +42,38 @@ class GraphProfileTests(unittest.TestCase):
                 },
             )
 
+    def test_contexts_near_a_standard_length_share_its_graph(self):
+        config = {
+            "data": {"context_length": 2048},
+            "holdout": {"horizon_probabilities": [0.8, 0.16, 0.03, 0.01]},
+        }
+        model = SimpleNamespace(
+            context_length=2048, patch_size=16, width=768, output_patches=4
+        )
+
+        def shape(points, covariates=1):
+            record = {
+                "source": "table",
+                "source_rows": 4096,
+                "targets": ["outcome"],
+                "roles": {"past": ["cov"] * covariates},
+            }
+            with patch("graph_profiles.sampled_origins", return_value=[points]):
+                (key,) = profile_counts([record], model, config, "cuda:0")
+            return key[0]
+
+        for standard in (2048, 1536, 1024, 512):
+            expected = (1, 2, standard // 16, 768)
+            # At most 10% shorter: padded up to the standard length.
+            for points in (standard, standard - 1, -(-9 * standard // 10)):
+                self.assertEqual(shape(points), expected, points)
+            # Clearly shorter contexts use a smaller graph, not more padding.
+            self.assertLess(shape(standard - 256)[2], standard // 16)
+            # A different covariate count is a different shape at any length.
+            self.assertEqual(shape(standard, covariates=3)[1], 4)
+        # Every padded length is a whole number of 16-patch kernel blocks.
+        self.assertEqual({shape(n)[2] % 16 for n in range(32, 2049, 37)}, {0})
+
 
 if __name__ == "__main__":
     unittest.main()

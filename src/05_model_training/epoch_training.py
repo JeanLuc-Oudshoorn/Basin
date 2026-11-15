@@ -18,14 +18,44 @@ from checkpoints import (
 )
 from learning_rate import make_scheduler, scheduler_snapshot
 from loguru import logger
-from performance import prepare_update, prepared_updates, split_prepared_batches
+from performance import (
+    optimizer_options,
+    prepare_update,
+    prepared_updates,
+    split_prepared_batches,
+)
 from training_log import emit_training_event
 from training_progress import duration, epoch_progress
 from training_protocol import validate
 from transform import location, write_json
 
+# Validation statistics that may drive best-weight selection, early stopping and
+# a plateau schedule. The table statistics exist for sampled-origin validation.
+MONITORS = (
+    "loss",
+    "rmse",
+    "table_mase_profile",
+    "trimmed_table_loss",
+    "median_table_loss",
+    "median_table_mase",
+)
+
+
+def monitored_value(validation, monitor):
+    value = validation.get(monitor)
+    if value is None:
+        raise ValueError(
+            f"Validation did not report early_stopping.monitor={monitor!r}; the table "
+            "statistics need data.validation_policy=sampled_training_origins"
+        )
+    return value
+
 
 def training_options(training):
+    from weight_average import weight_average_options
+
+    optimizer_options(training)
+    weight_average_options(training)
     for key in (
         "checkpoint_interval_seconds",
         "validation_interval_seconds",
@@ -120,6 +150,22 @@ def training_options(training):
             training.get(key, False if key == "training_cuda_graphs" else True), bool
         ):
             raise ValueError(f"training.{key} must be boolean")
+    for key, default in (
+        ("validation_cuda_graphs", False),
+        ("validation_graph_retain", True),
+    ):
+        if not isinstance(training.get(key, default), bool):
+            raise ValueError(f"training.{key} must be boolean")
+    budget = training.get("validation_graph_memory_gib", 2.0)
+    if (
+        isinstance(budget, bool)
+        or not isinstance(budget, (int, float))
+        or not math.isfinite(budget)
+        or budget <= 0
+    ):
+        raise ValueError(
+            "training.validation_graph_memory_gib must be positive and finite"
+        )
     shapes = training.get("training_graph_cache_shapes", 2)
     memory = training.get("training_graph_memory_gib", 0.75)
     if isinstance(shapes, bool) or not isinstance(shapes, int) or shapes < 1:
@@ -163,7 +209,7 @@ def training_options(training):
         or patience < 1
         or not math.isfinite(delta)
         or delta < 0
-        or monitor not in ("loss", "rmse")
+        or monitor not in MONITORS
     ):
         raise ValueError("Invalid early stopping patience_epochs, min_delta or monitor")
     return {
@@ -272,8 +318,9 @@ def accumulated_update(
             )
     # An optimizer OOM can partially change parameters/state. It MUST propagate,
     # rather than replaying the update as if no weights had changed.
-    with torch.profiler.record_function("training.optimizer"):
-        optimizer.step()
+    if result.get("supervised", True):
+        with torch.profiler.record_function("training.optimizer"):
+            optimizer.step()
     result["oom_retries"] = retries
     if device.type == "cuda":
         result["cuda_allocated_gib"] = torch.cuda.memory_allocated(device) / 2**30
@@ -296,22 +343,60 @@ def _accumulated_gradients(
     total_points = sum(p for _, _, p in prepared_batches)
     weights = getattr(model.config, "horizon_loss_weights", None)
     if weights is not None:
-        from multi_horizon import weighted_label_mass
+        from multi_horizon import anchors_with_history, weighted_label_mass
 
+        # The direct head leaves out anchors without any observed history;
+        # count the same labels here so microbatch weights stay exact.
+        direct = getattr(model.config, "head", "lead_offset") == "direct"
         masses = [
-            float(weighted_label_mass(labels, weights))
-            for _, labels, _ in prepared_batches
+            float(
+                weighted_label_mass(
+                    labels,
+                    weights,
+                    anchors_with_history(
+                        prepared["features"],
+                        prepared["targets"],
+                        model.config.patch_size,
+                    )
+                    if direct
+                    else None,
+                )
+            )
+            for prepared, labels, _ in prepared_batches
         ]
     else:
         masses = [points for _, _, points in prepared_batches]
     total_mass = sum(masses)
     optimizer.zero_grad(set_to_none=True)
+    if total_mass <= 0:
+        # Every target value this update could learn from is missing. There
+        # is no gradient: report an empty update and leave the weights alone.
+        logger.warning(
+            "Optimizer update without any observed label ({} tables): skipped",
+            sum(map(len, microbatches)),
+        )
+        return {
+            "loss": 0.0,
+            "target_points": 0,
+            "target_loss_weight": 0.0,
+            "microbatches": 0,
+            "windows": sum(map(len, microbatches)),
+            "gradient_norm": 0.0,
+            "embedding_skip_gradient_norm": 0.0,
+            "embedding_shapes": [],
+            "embedding_shape": None,
+            "device": str(device),
+            "training_graphs": None,
+            "supervised": False,
+        }
     weighted_loss = torch.zeros((), device=device)
     losses, shapes = [], []
     graphs = getattr(model, "training_graphs", None)
     if graphs is not None:
         graphs.begin_update()
     for microstep, (prepared, labels, points) in enumerate(prepared_batches, 1):
+        if masses[microstep - 1] <= 0:
+            continue  # nothing observed in this microbatch; it has no gradient
         graphs = getattr(model, "training_graphs", None)
         if graphs is not None:
             graphs.prepare(prepared)
@@ -369,7 +454,7 @@ def _accumulated_gradients(
         "loss": metrics[0],
         "target_points": total_points,
         "target_loss_weight": total_mass,
-        "microbatches": len(prepared_batches),
+        "microbatches": len(shapes),
         "windows": sum(map(len, microbatches)),
         "gradient_norm": metrics[1],
         "embedding_skip_gradient_norm": metrics[2],
@@ -408,6 +493,11 @@ def fit_epochs(
     )
     t = config["training"]
     options = training_options(t)
+    if t.get("weight_average") is not None:
+        raise ValueError(
+            "training.weight_average requires data.validation_policy="
+            "sampled_training_origins (the timed trainer)"
+        )
     if not records or not validation_records:
         raise ValueError("Need both training and validation records")
     directory = location(config, "training")
@@ -718,7 +808,7 @@ def fit_epochs(
         pd.DataFrame(table_metrics).to_parquet(table_path, index=False)
         validation["table_count"] = len(validation_records)
         validation["table_metrics_path"] = str(table_path)
-        value = validation[options["monitor"]]
+        value = monitored_value(validation, options["monitor"])
         improved, stop = early.observe(value, epoch)
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             scheduler.step(value)

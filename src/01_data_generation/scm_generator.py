@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.signal import lfilter
 
 try:
     from .generation_runtime import (
@@ -95,6 +96,7 @@ try:
         DEFAULT_PLANT_WEIGHTS,
         LIFECYCLE_KINDS,
         lifecycle_path,
+        physical_dag_view,
         sample_lifecycle,
         sample_plant,
         simulate_plant,
@@ -112,6 +114,7 @@ except ImportError:
         DEFAULT_PLANT_WEIGHTS,
         LIFECYCLE_KINDS,
         lifecycle_path,
+        physical_dag_view,
         sample_lifecycle,
         sample_plant,
         simulate_plant,
@@ -460,6 +463,9 @@ class OperationalSCMGenerator:
         calendar_gate_probability=0.0,
         plant_probability=0.0,
         plant_weights=None,
+        max_dominant_drivers=None,
+        persistent_hidden_probability=0.0,
+        shared_state_probability=0.0,
         startup_transient_probability=0.0,
         redundant_sensor_probability=0.0,
         measurement_probability=0.0,
@@ -558,6 +564,8 @@ class OperationalSCMGenerator:
             "lifecycle_trend_probability",
             "calendar_gate_probability",
             "plant_probability",
+            "persistent_hidden_probability",
+            "shared_state_probability",
             "startup_transient_probability",
             "redundant_sensor_probability",
             "measurement_probability",
@@ -575,6 +583,13 @@ class OperationalSCMGenerator:
         ):
             raise ValueError("visible_covariate_lambda must be finite and nonnegative")
         self.visible_covariate_lambda = float(visible_covariate_lambda)
+        if max_dominant_drivers is not None and (
+            isinstance(max_dominant_drivers, bool)
+            or not isinstance(max_dominant_drivers, int)
+            or max_dominant_drivers < 1
+        ):
+            raise ValueError("max_dominant_drivers must be None or a positive integer")
+        self.max_dominant_drivers = max_dominant_drivers
         if not np.isfinite(covariate_delay_scale) or covariate_delay_scale <= 0:
             raise ValueError("covariate_delay_scale must be finite and positive")
         self.covariate_delay_scale = float(covariate_delay_scale)
@@ -1026,6 +1041,11 @@ class OperationalSCMGenerator:
             result = cls._quantize(latent, spec["step"], spec["offset"]) - latent
         else:
             raise ValueError(f"Unknown noise family: {kind}")
+        if "memory_tau" in spec:
+            # Unit-DC causal filtering prefers inferable, persistent hidden
+            # disturbances. Compiled filtering adds no Python loop per row.
+            alpha = -math.expm1(-1 / spec["memory_tau"])
+            result = lfilter([alpha], [1, alpha - 1], result)
         return spec["location"] + spec["scale"] * result
 
     @staticmethod
@@ -1274,11 +1294,11 @@ class OperationalSCMGenerator:
             "numeric_limit": self.joint_numeric_limit,
         }
 
-    def _sample_discrete(self, name, rows):
+    def _sample_discrete(self, name, rows, family=None):
         r = self.rng
         families = list(self.discrete_weights)
         weights = np.array(list(self.discrete_weights.values()), float)
-        family = str(r.choice(families, p=weights / weights.sum()))
+        family = family or str(r.choice(families, p=weights / weights.sum()))
         node = {
             "name": name,
             "kind": "bernoulli" if family == "bernoulli" else "markov",
@@ -1760,6 +1780,22 @@ class OperationalSCMGenerator:
                 else self._sample_switch(rows)
             )
 
+        shared_mode = None
+        if (
+            self.shared_state_probability
+            and count - len(nodes) >= 2
+            and r.random() < self.shared_state_probability
+        ):
+            mode = self._sample_discrete(
+                f"covariate_{len(nodes):02d}", rows, family="categorical_markov"
+            )
+            # Integer codes denote mutually exclusive modes, not independent
+            # flags. Multiple downstream equations read this same state.
+            mode["values"] = list(range(len(mode["values"])))
+            mode["shared_mode"] = True
+            nodes.append(mode)
+            shared_mode = mode["name"]
+
         def sample_edge(parent, lag=0):
             source = next((n for n in nodes if n["name"] == parent), {})
             edge = self._edge(parent, lag, input_domain=source.get("domain", "real"))
@@ -1842,6 +1878,8 @@ class OperationalSCMGenerator:
                     forced = [processes[0]["name"]]
                 elif len(processes) == 3:
                     forced = [n["name"] for n in processes[1:3]]
+            if shared_mode and len(processes) < 2:
+                forced.append(shared_mode)
             for parent in forced:
                 if not any(e["parent"] == parent for e in node["edges"]):
                     node["edges"].append(
@@ -1863,6 +1901,10 @@ class OperationalSCMGenerator:
         remaining = [n for n in predictors if n not in selected]
         while len(selected) < minimum:
             selected.append(remaining.pop(int(r.integers(len(remaining)))))
+        if shared_mode:
+            mode_node = next(n for n in nodes if n["name"] == shared_mode)
+            if mode_node not in selected:
+                selected.append(mode_node)
         outcome = {
             **self._dynamics(event),
             "edges": [
@@ -2089,15 +2131,18 @@ class OperationalSCMGenerator:
             if self.rng.random() < self.sensor_bounds_probability:
                 spec["sensor"] = self._sample_sensor(spec, spec is outcome)
         # Draw observation randomness first so changing ONLY visibility cannot
-        # change the simulated process, even if subset sampling consumes RNG.
+        # change the simulated process, even if subset sampling consumes RNG,
+        # unless the explicitly visibility-aware hidden-persistence policy is on.
         observation_seed = int(r.integers(0, 2**63))
         sampled_visible_count = self._sample_visibility(nodes, visible_covariate_count)
+        driver_policy = self._budget_drivers(nodes, outcome, observation_seed)
         model = {
             "version": 3,
             "observation_seed": observation_seed,
             "rows": rows,
             "trend_free": trend_free,
             "univariate": not any(node["visible"] for node in nodes),
+            "driver_policy": driver_policy,
             "visibility": {
                 "distribution": "poisson"
                 if visible_covariate_count is None
@@ -2153,6 +2198,74 @@ class OperationalSCMGenerator:
             model, recorded, row_gaps, seasonal_table, noise_profile
         )
 
+    def _budget_drivers(self, nodes, outcome, seed):
+        """Budget independent inputs at sampling time, without screening tables.
+
+        This is an excitation budget, not a guarantee of realized importance:
+        nonlinear gates can amplify a weak input. Feedback and all causal edges
+        remain. The target's own innovation is retained as ordinary measurement/
+        process uncertainty; event nodes remain rare impulses rather than being
+        turned into sustained binary states.
+        """
+        if self.max_dominant_drivers is None and not self.persistent_hidden_probability:
+            return {}
+        r = np.random.default_rng([seed, 0xD21])
+        candidates = [n for n in nodes if n["kind"] not in ("event", "switch")]
+        selected = candidates
+        if self.max_dominant_drivers is not None:
+            indices = r.choice(
+                len(candidates),
+                min(len(candidates), self.max_dominant_drivers),
+                replace=False,
+            )
+            selected = [candidates[i] for i in indices]
+        strong = {n["name"] for n in selected}
+        gains = {}
+        for node in candidates:
+            gain = 1.0 if node["name"] in strong else float(r.uniform(0.03, 0.15))
+            gains[node["name"]] = gain
+            if gain < 1:
+                # Budget every outgoing edge together. This includes categorical
+                # and formula inputs, not just Gaussian innovation sources.
+                for target in nodes + [outcome]:
+                    for edge in target.get("edges", []):
+                        if edge["parent"] == node["name"]:
+                            edge["weight"] *= gain
+            if node["visible"] or r.random() >= self.persistent_hidden_probability:
+                continue
+            if node["kind"] == "bernoulli":
+                probability = node.pop("probability")
+                exit_rate = float(r.uniform(0.01, 0.08))
+                node.update(
+                    kind="markov",
+                    family="binary_markov",
+                    values=[0, 1],
+                    transition=[
+                        [1 - exit_rate * probability, exit_rate * probability],
+                        [
+                            exit_rate * (1 - probability),
+                            1 - exit_rate * (1 - probability),
+                        ],
+                    ],
+                    initial_state=int(r.random() < probability),
+                )
+            elif node["kind"] == "markov":
+                matrix = np.asarray(node["transition"])
+                retain = float(r.uniform(0.5, 0.9))
+                node["transition"] = (
+                    (1 - retain) * matrix + retain * np.eye(len(matrix))
+                ).tolist()
+            elif "noise" in node and node["noise"]["scale"]:
+                node["noise"]["memory_tau"] = float(r.uniform(8, 80))
+                # White sensor jitter need not become a dominant hidden input.
+                node["white_noise_scale"] = node.get("white_noise_scale", 0) * 0.2
+        return {
+            "max_dominant_drivers": self.max_dominant_drivers,
+            "dominant_sources": sorted(strong),
+            "outgoing_gains": gains,
+            "persistent_hidden_probability": self.persistent_hidden_probability,
+        }
+
     def _sample_recording(self, model, recorded, row_gaps, seasonal_table, profile):
         """Closed-loop unit and recording layer. Absent keys replay as before."""
         r, nodes = self.rng, model["nodes"]
@@ -2184,7 +2297,7 @@ class OperationalSCMGenerator:
             if n["visible"]
         ]
         columns += [
-            {"name": e["name"], "discrete": e["channel"] == "status"}
+            {"name": e["name"], "discrete": e["channel"] in ("status", "mode")}
             for e in model.get("plant", {}).get("exports", [])
         ]
         if (
@@ -3264,6 +3377,11 @@ class OperationalSCMGenerator:
         """
         import networkx as nx
 
+        if model.get("plant", {}).get("family") in (
+            "coupled_storage",
+            "rotating_machine",
+        ):
+            return physical_dag_view(model["plant"])
         full = self.graph_spec(model)
         graph, badges = nx.DiGraph(), set()
         incoming = {}

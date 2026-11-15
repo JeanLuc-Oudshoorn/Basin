@@ -67,7 +67,7 @@ class EpochTrainingTests(unittest.TestCase):
         model = ToyForecaster()
         records = examples(model)
         with tempfile.TemporaryDirectory() as temporary:
-            config = copy.deepcopy(load_config())
+            config = copy.deepcopy(load_config("configs/legacy_500m.json"))
             config["paths"]["training"] = temporary
             config["training"].update(
                 epochs=None,
@@ -107,7 +107,7 @@ class EpochTrainingTests(unittest.TestCase):
         initial = copy.deepcopy(model.state_dict())
         records = examples(model)
         with tempfile.TemporaryDirectory() as temporary:
-            config = copy.deepcopy(load_config())
+            config = copy.deepcopy(load_config("configs/legacy_500m.json"))
             config["paths"]["training"] = temporary
             config["training"].update(
                 epochs=1,
@@ -194,7 +194,7 @@ class EpochTrainingTests(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as temporary:
-            config = copy.deepcopy(load_config())
+            config = copy.deepcopy(load_config("configs/legacy_500m.json"))
             config["paths"]["training"] = temporary
             config["training"].update(
                 validate_before_training=False,
@@ -291,7 +291,7 @@ class EpochTrainingTests(unittest.TestCase):
         model = ToyForecaster()
         records = examples(model)
         with tempfile.TemporaryDirectory() as temporary:
-            config = copy.deepcopy(load_config())
+            config = copy.deepcopy(load_config("configs/legacy_500m.json"))
             config["paths"]["training"] = temporary
             config["training"].update(
                 validate_before_training=False,

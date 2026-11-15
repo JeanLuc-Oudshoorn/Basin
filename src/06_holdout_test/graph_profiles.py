@@ -21,7 +21,7 @@ def profile_counts(records, model_config, config, device):
             length,
             patch,
             settings.get("percentiles", [1, 25, 50, 75, 99]),
-            prediction_patches=4,
+            prediction_patches=len(evaluation_weights(config)),
         ):
             horizon = len(evaluation_weights(config))
             for start in range(0, horizon, model_config.output_patches):

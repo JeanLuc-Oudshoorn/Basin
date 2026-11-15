@@ -2,6 +2,12 @@
 
 Effective 2026-11-02 for new runs using `configs/config.json`.
 
+Superseded as the default on 2026-11-15: `configs/config.json` now trains a 220M
+hybrid model that forecasts seven tokens (112 timesteps) with equal weight per
+timestep through a direct head. This document describes the four-token,
+80/16/3/1 protocol of the archived 500M model, which `configs/legacy_500m.json`
+still selects. See [the 220M architecture and recipe](HYBRID_220M_2026-11-15.md).
+
 Default protocol update, 2026-11-06: the model architecture and four loss weights
 remain the same, but full training tables now replace reserved-tail training.
 The fixed 25,000-table in-sample panel is evaluated hourly at five origins.

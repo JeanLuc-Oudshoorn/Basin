@@ -188,7 +188,12 @@ def load_split(path):
             ):
                 kind = prefix.split("_", 1)[0]
                 memberships[kind].extend(source_digest(value))
-            elif prefix in ("seed", "requested_test_fraction", "input_signature"):
+            elif prefix in (
+                "seed",
+                "requested_test_fraction",
+                "requested_test_tables",
+                "input_signature",
+            ):
                 result[prefix] = value
             elif event == "string":
                 for key in ("source_keys", "source_sha256"):

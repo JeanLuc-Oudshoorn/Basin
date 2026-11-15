@@ -29,15 +29,21 @@ def parameter_budget(config):
     """
     m = config["model"]
     d, p, layers = m["width"], m["patch_size"], m["layers"]
-    output = p * len(m["quantiles"])
+    leads = m.get("output_patches", 1)
+    direct = m.get("head", "lead_offset") == "direct"
+    output = p * len(m["quantiles"]) * (leads if direct else 1)
     ranks = [max(32, round(factor * d**0.5 / 32) * 32) for factor in (2.5, 2.5, 1.7, 5)]
+    temporal_every = m.get("temporal_every", 0)
     groups = {
         "embedding": 5 * (3 * p) * d + 4 * d * d + 6 * d,
         "roles": 3 * d,
         "rwkv_blocks": layers * (12 * d * d + 19 * d + 2 * d * sum(ranks)) + 2 * d,
-        "variate_mixing": layers * (4 * d * d + 6 * d),
+        "variate_mixing": layers // m.get("variate_every", 1) * (4 * d * d + 6 * d),
+        "temporal_attention": (layers // temporal_every if temporal_every else 0)
+        * (5 * d * d + d),
         "norm": 2 * d,
         "head": 4 * d * d + 5 * d * output + 4 * d + 2 * output,
+        "lead_embedding": 0 if direct else (leads - 1) * d,
     }
     return {"parameters": sum(groups.values()), "method": "analytic", "groups": groups}
 
@@ -248,7 +254,7 @@ def _add_test(index, record, config):
         len(frame),
         patch,
         config.get("holdout", {}).get("percentiles", [1, 25, 50, 75, 99]),
-        prediction_patches=4
+        prediction_patches=config["model"].get("output_patches", 4)
         if config["data"].get("validation_policy") == "sampled_training_origins"
         else 1,
     )
@@ -280,7 +286,7 @@ def _add_test(index, record, config):
         if variable < len(targets):
             for start in origins:
                 patches = (
-                    4
+                    config["model"].get("output_patches", 4)
                     if config["data"].get("validation_policy")
                     == "sampled_training_origins"
                     else 1

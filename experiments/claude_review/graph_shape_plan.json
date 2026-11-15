@@ -1,0 +1,356 @@
+{
+ "tables": 7302,
+ "minimum_requests": 8,
+ "profiles": [
+  {
+   "variables": 2,
+   "patches": 16,
+   "requests": 3165
+  },
+  {
+   "variables": 2,
+   "patches": 32,
+   "requests": 2471
+  },
+  {
+   "variables": 3,
+   "patches": 16,
+   "requests": 2426
+  },
+  {
+   "variables": 1,
+   "patches": 16,
+   "requests": 2149
+  },
+  {
+   "variables": 2,
+   "patches": 64,
+   "requests": 1861
+  },
+  {
+   "variables": 3,
+   "patches": 32,
+   "requests": 1837
+  },
+  {
+   "variables": 1,
+   "patches": 32,
+   "requests": 1566
+  },
+  {
+   "variables": 2,
+   "patches": 96,
+   "requests": 1564
+  },
+  {
+   "variables": 4,
+   "patches": 16,
+   "requests": 1435
+  },
+  {
+   "variables": 3,
+   "patches": 64,
+   "requests": 1418
+  },
+  {
+   "variables": 2,
+   "patches": 128,
+   "requests": 1269
+  },
+  {
+   "variables": 1,
+   "patches": 64,
+   "requests": 1181
+  },
+  {
+   "variables": 3,
+   "patches": 96,
+   "requests": 1155
+  },
+  {
+   "variables": 4,
+   "patches": 32,
+   "requests": 1129
+  },
+  {
+   "variables": 1,
+   "patches": 96,
+   "requests": 972
+  },
+  {
+   "variables": 3,
+   "patches": 128,
+   "requests": 948
+  },
+  {
+   "variables": 4,
+   "patches": 64,
+   "requests": 865
+  },
+  {
+   "variables": 1,
+   "patches": 128,
+   "requests": 803
+  },
+  {
+   "variables": 4,
+   "patches": 96,
+   "requests": 759
+  },
+  {
+   "variables": 2,
+   "patches": 48,
+   "requests": 720
+  },
+  {
+   "variables": 5,
+   "patches": 16,
+   "requests": 622
+  },
+  {
+   "variables": 4,
+   "patches": 128,
+   "requests": 607
+  },
+  {
+   "variables": 3,
+   "patches": 48,
+   "requests": 522
+  },
+  {
+   "variables": 5,
+   "patches": 32,
+   "requests": 462
+  },
+  {
+   "variables": 1,
+   "patches": 48,
+   "requests": 439
+  },
+  {
+   "variables": 2,
+   "patches": 80,
+   "requests": 364
+  },
+  {
+   "variables": 5,
+   "patches": 64,
+   "requests": 349
+  },
+  {
+   "variables": 3,
+   "patches": 80,
+   "requests": 303
+  },
+  {
+   "variables": 5,
+   "patches": 96,
+   "requests": 298
+  },
+  {
+   "variables": 4,
+   "patches": 48,
+   "requests": 279
+  },
+  {
+   "variables": 6,
+   "patches": 16,
+   "requests": 272
+  },
+  {
+   "variables": 5,
+   "patches": 128,
+   "requests": 250
+  },
+  {
+   "variables": 1,
+   "patches": 80,
+   "requests": 234
+  },
+  {
+   "variables": 6,
+   "patches": 32,
+   "requests": 182
+  },
+  {
+   "variables": 4,
+   "patches": 80,
+   "requests": 176
+  },
+  {
+   "variables": 2,
+   "patches": 112,
+   "requests": 166
+  },
+  {
+   "variables": 5,
+   "patches": 48,
+   "requests": 127
+  },
+  {
+   "variables": 3,
+   "patches": 112,
+   "requests": 116
+  },
+  {
+   "variables": 6,
+   "patches": 64,
+   "requests": 109
+  },
+  {
+   "variables": 6,
+   "patches": 96,
+   "requests": 101
+  },
+  {
+   "variables": 1,
+   "patches": 112,
+   "requests": 96
+  },
+  {
+   "variables": 6,
+   "patches": 128,
+   "requests": 79
+  },
+  {
+   "variables": 4,
+   "patches": 112,
+   "requests": 75
+  },
+  {
+   "variables": 7,
+   "patches": 16,
+   "requests": 70
+  },
+  {
+   "variables": 5,
+   "patches": 80,
+   "requests": 67
+  },
+  {
+   "variables": 7,
+   "patches": 32,
+   "requests": 59
+  },
+  {
+   "variables": 7,
+   "patches": 64,
+   "requests": 53
+  },
+  {
+   "variables": 6,
+   "patches": 48,
+   "requests": 50
+  },
+  {
+   "variables": 7,
+   "patches": 96,
+   "requests": 45
+  },
+  {
+   "variables": 7,
+   "patches": 128,
+   "requests": 40
+  },
+  {
+   "variables": 5,
+   "patches": 112,
+   "requests": 30
+  },
+  {
+   "variables": 6,
+   "patches": 80,
+   "requests": 26
+  },
+  {
+   "variables": 8,
+   "patches": 16,
+   "requests": 21
+  },
+  {
+   "variables": 8,
+   "patches": 32,
+   "requests": 20
+  },
+  {
+   "variables": 8,
+   "patches": 64,
+   "requests": 16
+  },
+  {
+   "variables": 8,
+   "patches": 96,
+   "requests": 14
+  },
+  {
+   "variables": 8,
+   "patches": 128,
+   "requests": 13
+  },
+  {
+   "variables": 7,
+   "patches": 48,
+   "requests": 12
+  },
+  {
+   "variables": 6,
+   "patches": 112,
+   "requests": 11
+  },
+  {
+   "variables": 9,
+   "patches": 16,
+   "requests": 7
+  },
+  {
+   "variables": 7,
+   "patches": 80,
+   "requests": 6
+  },
+  {
+   "variables": 9,
+   "patches": 32,
+   "requests": 6
+  },
+  {
+   "variables": 7,
+   "patches": 112,
+   "requests": 5
+  },
+  {
+   "variables": 8,
+   "patches": 48,
+   "requests": 4
+  },
+  {
+   "variables": 9,
+   "patches": 64,
+   "requests": 4
+  },
+  {
+   "variables": 9,
+   "patches": 96,
+   "requests": 3
+  },
+  {
+   "variables": 9,
+   "patches": 128,
+   "requests": 3
+  },
+  {
+   "variables": 8,
+   "patches": 80,
+   "requests": 2
+  },
+  {
+   "variables": 9,
+   "patches": 80,
+   "requests": 1
+  },
+  {
+   "variables": 9,
+   "patches": 112,
+   "requests": 1
+  }
+ ]
+}

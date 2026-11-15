@@ -1,4 +1,4 @@
-"""Dataset-disjoint four-token evaluation with training-weighted lead scores."""
+"""Dataset-disjoint full-block evaluation with training-weighted lead scores."""
 
 import json
 import logging
@@ -20,6 +20,7 @@ from inference import forecast_contexts
 from latency import RequestTimer
 from loguru import logger
 from plotting import write_holdout_plot
+from rolling_validation import table_mase_profile
 from training_log import emit_training_event
 from training_progress import duration
 from training_protocol import sampled_origins
@@ -283,13 +284,14 @@ def evaluate_holdout(model, records, config):
     ]
     if len(records) != requested_tables:
         logger.warning(
-            "Skipping {} short holdout tables: need at least {} points for two context tokens plus four forecast tokens",
+            "Skipping {} short holdout tables: need at least {} points for two context tokens plus {} forecast tokens",
             requested_tables - len(records),
             minimum,
+            len(probabilities),
         )
     if not records:
         raise ValueError(
-            f"No holdout tables have at least {minimum} points for a full four-token forecast"
+            f"No holdout tables have at least {minimum} points for a full {len(probabilities)}-token forecast"
         )
     plot_indices, plot_selection = select_plot_tables(records, config)
     write_json(directory / "plot_selection.json", plot_selection, level="DEBUG")
@@ -297,7 +299,7 @@ def evaluate_holdout(model, records, config):
     benchmarks = FoundationBenchmarks(config, cap)
     benchmarks.metadata["rwkv"] = {
         "parameters": sum(p.numel() for p in model.parameters()),
-        "dtype": str(next(model.parameters()).dtype),
+        "dtype": str(getattr(model, "compute_dtype", next(model.parameters()).dtype)),
         "device": str(device),
         "point_forecast": "median of configured quantiles",
         "inputs": "historical targets and time-matched past covariates",
@@ -307,6 +309,7 @@ def evaluate_holdout(model, records, config):
     if graph_plan is not None:
         logger.info("Holdout graph profile admission: {}", graph_plan)
     rows, origin_metrics, table_metrics = [], [], []
+    origins_without_history = origins_without_labels = unscored_tables = 0
     was_training = model.training
     model.eval()
     started = perf_counter()
@@ -333,6 +336,25 @@ def evaluate_holdout(model, records, config):
             origins = sampled_origins(
                 len(frame), patch, percentiles, prediction_patches=len(probabilities)
             )
+            # Missing values are never scored, and never a reason to drop a
+            # table. Every model still forecasts an origin whose labels are
+            # all missing; it just has nothing to score. The one request no
+            # model can be compared on is a target without any observed
+            # history: the naive forecast and the MASE scale do not exist.
+            values = frame[targets].to_numpy(dtype=float)
+            with_history = [
+                bool(np.isfinite(values[max(0, origin - cap) : origin]).any(0).all())
+                for origin in origins
+            ]
+            origins_without_history += len(origins) - sum(with_history)
+            origins = [origin for origin, keep in zip(origins, with_history) if keep]
+            if not origins:
+                unscored_tables += 1
+                logger.warning(
+                    "Holdout table has no origin with observed target history: {}",
+                    record["source"],
+                )
+                continue
             contexts = []
             for origin in origins:
                 history = frame.iloc[max(0, origin - cap) : origin]
@@ -441,10 +463,6 @@ def evaluate_holdout(model, records, config):
                     total_weight = sum(
                         w for w, count in zip(probabilities, available) if count
                     )
-                    if total_weight == 0:
-                        raise ValueError(
-                            f"No observed holdout labels: {record['source']} origin={origin}"
-                        )
                     for offset, value in enumerate(actual):
                         token = offset // patch
                         current_rows.append(
@@ -477,11 +495,11 @@ def evaluate_holdout(model, records, config):
                                 else np.nan,
                             }
                         )
-                    if not current_rows:
-                        raise ValueError(
-                            f"No observed holdout labels: {record['source']} origin={origin}"
-                        )
+                    # Forecasts are kept for every point, observed or not.
                     table_rows.extend(current_rows)
+                    if total_weight == 0:
+                        origins_without_labels += 1
+                        continue  # every label of this target is missing here
                     metric = {
                         "source": record["source"],
                         "target": target,
@@ -501,6 +519,14 @@ def evaluate_holdout(model, records, config):
                 completed_origins += 1
             table_frame = pd.DataFrame(table_rows)
             rows.extend(table_rows)
+            if not np.isfinite(table_frame.actual).any():
+                # Forecast everywhere, observed nowhere: predictions are saved,
+                # but the table has no score.
+                unscored_tables += 1
+                table_frame.to_parquet(
+                    directory / f"test_table_{table_index:03d}.parquet", index=False
+                )
+                continue
             metric = {
                 "source": record["source"],
                 "origins": len(origins),
@@ -533,14 +559,16 @@ def evaluate_holdout(model, records, config):
                 "eta_seconds": elapsed / completed * (len(records) - completed),
                 "progress_percent": 100 * completed / len(records),
                 "last_table": metric,
-                "primary_metric": "mase",
+                "primary_metric": "table_mase_median",
             }
             # Append only new requests; do not rewrite the entire timing history per table.
             with latency_journal.open("a", encoding="utf-8") as journal:
                 for row in timer.rows[latency_cursor:]:
                     journal.write(json.dumps(row) + "\n")
             latency_cursor = len(timer.rows)
-            if completed % progress_every == 0 or completed == len(records):
+            if completed % progress_every == 0 or completed + unscored_tables == len(
+                records
+            ):
                 latency_summary = timer.summary()
                 logger.info(
                     "HOLDOUT tables {:,}/{:,} ({:.1f}%) | origins={:,} | elapsed {} | ETA {}",
@@ -568,8 +596,19 @@ def evaluate_holdout(model, records, config):
             directory / "request_latencies.parquet", index=False
         )
         result = {
-            "scoring_protocol_version": "four_token_complete_weighted_v2",
-            "primary_metric": "mase",
+            # The name is kept for the four-token models so earlier results stay comparable.
+            "scoring_protocol_version": "four_token_complete_weighted_v2"
+            if len(probabilities) == 4
+            else "complete_block_weighted_v3",
+            # One score per table, then the middle and both ends of the
+            # tables. The pooled mean ("mase") stays for continuity; a single
+            # request with a near-zero scale can decide it for every model.
+            "primary_metric": "table_mase_median",
+            "primary_metrics": [
+                "table_mase_median",
+                "table_mase_p10",
+                "table_mase_p90",
+            ],
             "mase_definition": {
                 "seasonality": lag,
                 "scale": "mean absolute lag-m difference of finite historical target pairs within the capped context at each origin",
@@ -578,11 +617,11 @@ def evaluate_holdout(model, records, config):
             },
             "latency_protocol": timer.metadata(),
             "latency": timer.summary(),
-            "protocol": "dataset-disjoint, sampled patch origins, always four forecast tokens, training-weighted scoring",
+            "protocol": f"dataset-disjoint, sampled patch origins, always {len(probabilities)} forecast tokens, training-weighted scoring",
             "horizon_policy": {
                 "loss_weights": probabilities,
                 "forecast_tokens": len(probabilities),
-                "boundary": "all origins reserve four full future tokens; final origin is the latest patch-aligned start with 64 points remaining; missing actuals alone are excluded from scoring",
+                "boundary": f"all origins reserve {len(probabilities)} full future tokens; final origin is the latest patch-aligned start with {len(probabilities) * patch} points remaining; missing actuals alone are excluded from scoring",
                 "counts_by_tokens": {
                     str(k): len(
                         {
@@ -595,11 +634,15 @@ def evaluate_holdout(model, records, config):
                 },
             },
             "percentiles": percentiles,
-            "origin_selection": "first eligible after two context tokens, nearest row percentiles among starts with four full future tokens, final eligible; all eligible origins for short tables",
+            "origin_selection": f"first eligible after two context tokens, nearest row percentiles among starts with {len(probabilities)} full future tokens, final eligible; all eligible origins for short tables",
             "patch_size": patch,
             "context_limit": cap,
             "initial_context_tokens": 2,
             "minimum_table_points": minimum,
+            "missing_values": "never scored; forecasts are still made and saved for them",
+            "skipped_origins_without_observed_history": origins_without_history,
+            "unscored_origin_targets_without_observed_labels": origins_without_labels,
+            "unscored_tables": unscored_tables,
             "selected_tables_before_length_filter": requested_tables,
             "skipped_short_tables": requested_tables - len(records),
             "models": methods,
@@ -607,7 +650,7 @@ def evaluate_holdout(model, records, config):
             "benchmark_metadata": benchmarks.metadata,
             "plot_selection": plot_selection,
             "baseline_covariates": "Naive uses historical targets; foundation models use past covariates directly; Prophet uses configured historical regressors with forecast-derived future values, no observed future covariates",
-            "table_count": len(records),
+            "table_count": len(table_metrics),
             "origin_target_count": len(origin_metrics),
             "seconds": perf_counter() - started,
             "pooled": summarize(all_predictions),
@@ -626,6 +669,12 @@ def evaluate_holdout(model, records, config):
             [
                 {
                     "model": name,
+                    "table_mase_profile": table_mase_profile(
+                        *(
+                            result["table_summary"]["models"][name]["mase"][key]
+                            for key in ("p10", "median", "p90")
+                        )
+                    ),
                     "mase": result["pooled"][name]["mase"],
                     "median_absolute_scaled_error": result["pooled"][name][
                         "median_absolute_scaled_error"
@@ -647,7 +696,10 @@ def evaluate_holdout(model, records, config):
                 }
                 for name in methods
             ],
-            key=lambda item: (item["mase"] is None, item["mase"] or 0),
+            key=lambda item: (
+                item["table_mase_median"] is None,
+                item["table_mase_median"] or 0,
+            ),
         )
         result["paired_latency"] = timer.paired_comparison()
         result["rwkv_inference"] = inference_execution_summary(model)

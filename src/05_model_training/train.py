@@ -66,22 +66,56 @@ class ForecastOutput:
     loss_mass: torch.Tensor | None = None
 
 
+def apply_upstream_rwkv_init(blocks):
+    """Initial weights of the upstream RWKV-7 training recipe.
+
+    The vendored block constructors apply the initialisation upstream gives for
+    using the blocks standalone. Upstream's own training entry point then
+    overwrites part of it (`generate_init_weight` in the vendored model.py):
+    orthogonal projections at a 3.5x larger scale than the constructor's uniform
+    draw, and a per-layer gain on the time-mix GroupNorm that grows with depth.
+    The decay, gate and mixing-ratio parameters keep their constructor values in
+    both, so they are not touched here.
+    """
+    for index, block in enumerate(blocks):
+        att, ffn = getattr(block, "att", None), getattr(block, "ffn", None)
+        if att is None or ffn is None or att.receptance.weight.is_meta:
+            continue  # test doubles, or weights about to be loaded from a file
+        nn.init.orthogonal_(att.receptance.weight, gain=1.0)
+        nn.init.orthogonal_(att.key.weight, gain=0.1)
+        nn.init.orthogonal_(att.value.weight, gain=1.0)
+        nn.init.zeros_(att.output.weight)
+        nn.init.orthogonal_(ffn.key.weight, gain=1.0)
+        nn.init.zeros_(ffn.value.weight)
+        nn.init.constant_(att.ln_x.weight, ((1 + index) / len(blocks)) ** 0.7)
+
+
 class VariateMix(nn.Module):
-    def __init__(self, width, heads):
+    def __init__(self, width, heads, *, gated=False):
         super().__init__()
         self.norm = nn.LayerNorm(width)
         self.attention = nn.MultiheadAttention(width, heads, batch_first=True)
         self.compiled_forward = None
         self.compile_training = True
         self.compile_inference = False
+        # Gated: the branch starts closed and a table with one variable, which
+        # has nothing to mix, skips it. Not a parameter, so nothing is saved.
+        self.gated = gated
+        if gated:
+            nn.init.zeros_(self.attention.out_proj.weight)
+            nn.init.zeros_(self.attention.out_proj.bias)
 
     def forward(self, x):
+        if self.gated and x.shape[1] == 1:
+            return x
         graphs = getattr(self, "training_graphs", None)
         if graphs is not None and self.training and torch.is_grad_enabled():
             return graphs.run(self.training_graph_index, x)
         return self.forward_ungraphed(x)
 
     def forward_ungraphed(self, x):
+        if self.gated and x.shape[1] == 1:
+            return x
         # Compile only the short variable axes measured in the throughput audit;
         # wider attention retains the default kernel's memory characteristics.
         if (
@@ -125,22 +159,89 @@ class RWKVForecaster(PatchEncoder):
             grad_cp=0,
         )
         self.blocks = nn.ModuleList([rwkv.Block(args, i) for i in range(config.layers)])
+        # Mixing follows every Nth RWKV block. The archived models mix variables
+        # after every block (variate.<i> then belongs to block i); newer ones
+        # mix less often and can add causal temporal attention at those points.
+        variate_layers = [
+            layer
+            for layer in range(config.layers)
+            if (layer + 1) % config.variate_every == 0
+        ]
+        temporal_layers = [
+            layer
+            for layer in range(config.layers)
+            if config.temporal_every and (layer + 1) % config.temporal_every == 0
+        ]
         self.variate = nn.ModuleList(
             [
-                VariateMix(config.width, config.variate_heads)
-                for _ in range(config.layers)
+                VariateMix(
+                    config.width, config.variate_heads, gated=config.gated_mixing
+                )
+                for _ in variate_layers
             ]
         )
+        if temporal_layers:
+            from temporal_attention import TemporalAttention
+
+            self.temporal = nn.ModuleList(
+                [
+                    TemporalAttention(config.width, config.max_patches)
+                    for _ in temporal_layers
+                ]
+            )
+        # Plain lookup lists (the modules are registered above): per block, the
+        # temporal attention and the variable mixing that follow it, or None.
+        self.temporal_after = [None] * config.layers
+        self.variate_after = [None] * config.layers
+        for module, layer in zip(self.variate, variate_layers):
+            self.variate_after[layer] = module
+        for module, layer in zip(getattr(self, "temporal", ()), temporal_layers):
+            self.temporal_after[layer] = module
         self.norm = nn.LayerNorm(config.width)
-        self.head = ResidualProjection(
-            config.width, config.patch_size * len(config.quantiles), 4 * config.width
-        )
-        if config.output_patches > 1:
+        outputs = config.patch_size * len(config.quantiles)
+        if config.head == "direct":
+            # One projection emits every lead: each lead has its own output
+            # rows, instead of an additive offset that LayerNorm can wash out.
+            outputs *= config.output_patches
+        self.head = ResidualProjection(config.width, outputs, 4 * config.width)
+        if config.head == "lead_offset" and config.output_patches > 1:
             self.lead_embedding = nn.Embedding(config.output_patches - 1, config.width)
             nn.init.normal_(self.lead_embedding.weight, std=0.02)
         self.register_buffer(
             "levels", torch.tensor(config.quantiles, dtype=torch.float32)
         )
+        if config.rwkv_init == "upstream":
+            apply_upstream_rwkv_init(self.blocks)
+
+    @property
+    def hybrid(self):
+        return any(module is not None for module in self.temporal_after)
+
+    @property
+    def compute_dtype(self):
+        """The backbone's dtype; with fp32_io the first parameter is float32."""
+        return self.roles.weight.dtype
+
+    def mix(self, layer, x, *, ungraphed=False):
+        """Mixing that follows RWKV block `layer`; x is [batch, variable, time, width]."""
+        temporal, variate = self.temporal_after[layer], self.variate_after[layer]
+        if temporal is not None:
+            x = temporal(x)
+        if variate is not None:
+            x = variate.forward_ungraphed(x) if ungraphed else variate(x)
+        return x
+
+    def _apply(self, fn, recurse=True):
+        # Every dtype cast funnels through here (.to, .bfloat16, .float, ...).
+        # With fp32_io the first and last layers stay float32 whatever the
+        # backbone is cast to: they are where rounding touches the data itself.
+        super()._apply(fn, recurse)
+        if self.config.fp32_io:
+            for module in (self.embedding, self.norm, self.head):
+                for parameter in module.parameters():
+                    if parameter.dtype in (torch.bfloat16, torch.float16):
+                        parameter.data = parameter.data.float()
+        return self
 
     def forward(self, context, horizon, **kwargs):
         if self.config.objective == "next_patch":
@@ -182,11 +283,13 @@ class RWKVForecaster(PatchEncoder):
         roles = prepared["roles"]
         p = self.config.patch_size
         v_first = torch.empty_like(x.reshape(b * len(roles), padded_tokens, -1))
-        for block, mix in zip(self.blocks, self.variate):
+        for layer, block in enumerate(self.blocks):
             flat = x.reshape(b * len(roles), padded_tokens, -1).contiguous()
             flat, v_first = block(flat, v_first)
-            x = mix(flat.reshape(b, len(roles), padded_tokens, -1))
-        raw = self.head(self.norm(x[:, :targets, cp:tokens])).float()
+            x = self.mix(layer, flat.reshape(b, len(roles), padded_tokens, -1))
+        raw = self.head(
+            self.norm(x[:, :targets, cp:tokens].to(self.norm.weight.dtype))
+        ).float()
         raw = raw.reshape(b, targets, hp * p, len(self.config.quantiles))[
             :, :, :horizon
         ]
@@ -221,22 +324,34 @@ class RWKVForecaster(PatchEncoder):
             self.checkpoint_token_threshold * len(self.blocks) // (b * v * t),
         )
         v_first = torch.empty_like(x.reshape(b * v, t, d))
-        for layer, (block, mix) in enumerate(zip(self.blocks, self.variate)):
+        for layer, block in enumerate(self.blocks):
             flat = x.reshape(b * v, t, d).contiguous()
+            variate = self.variate_after[layer]
+            mixes = self.temporal_after[layer] is not None or (
+                variate is not None and not (variate.gated and v == 1)
+            )
             if (
                 self.training
                 and self.config.gradient_checkpointing
                 and layer >= uncheckpointed_layers
             ):
                 flat, v_first = checkpoint(block, flat, v_first, use_reentrant=False)
-                # Graphs keep their own static backward buffers; retain ordinary
-                # checkpoint recomputation for the layers that need memory savings.
-                x = checkpoint(
-                    mix.forward_ungraphed, flat.reshape(b, v, t, d), use_reentrant=False
-                )
+                x = flat.reshape(b, v, t, d)
+                if mixes:
+                    # Graphs keep their own static backward buffers; retain ordinary
+                    # checkpoint recomputation for the layers that need memory savings.
+                    x = checkpoint(
+                        lambda value, layer=layer: self.mix(
+                            layer, value, ungraphed=True
+                        ),
+                        x,
+                        use_reentrant=False,
+                    )
             else:
                 flat, v_first = block(flat, v_first)
-                x = mix(flat.reshape(b, v, t, d))
+                x = flat.reshape(b, v, t, d)
+                if mixes:
+                    x = self.mix(layer, x)
         n, targets, p = prepared["tokens"], prepared["targets"], self.config.patch_size
         loc, scale = prepared["loc"][:, :targets], prepared["scale"][:, :targets]
         selected = x[:, :targets, :n]
@@ -251,6 +366,8 @@ class RWKVForecaster(PatchEncoder):
             # running the projection and sorting quantiles for the entire past.
             selected, loc, scale = selected[:, :, -1:], loc[:, :, -1:], scale[:, :, -1:]
             n = 1
+        if self.config.head == "direct":
+            return self.forward_direct(selected, prepared, loc, scale, future_target)
         prediction_patches = prepared.get("prediction_patches", 1)
         if prediction_patches > 1:
             from multi_horizon import direct_quantiles
@@ -283,7 +400,7 @@ class RWKVForecaster(PatchEncoder):
                 per_sample_loss,
                 mass,
             )
-        raw = self.head(self.norm(selected)).float()
+        raw = self.read_out(selected).float()
         raw = (
             raw.reshape(b, targets, n, p, len(self.config.quantiles))
             .sort(dim=-1)
@@ -341,6 +458,69 @@ class RWKVForecaster(PatchEncoder):
             loss,
             per_sample_loss,
             loss_mass,
+        )
+
+    def read_out(self, hidden):
+        """Final norm and head; with fp32_io both compute in float32."""
+        return self.head(self.norm(hidden.to(self.norm.weight.dtype)))
+
+    def forward_direct(self, selected, prepared, loc, scale, future_target=None):
+        """Direct head: every selected position forecasts all leads in one projection.
+
+        Training supervises every causal anchor on every lead that still has
+        labels inside the chunk. Evaluation reads one position per request.
+        """
+        from multi_horizon import (
+            anchors_with_history,
+            direct_training_loss,
+            from_model_space,
+            lead_quantiles,
+            weighted_forecast_loss,
+        )
+
+        median = self.config.quantiles.index(0.5)
+        if prepared["is_training"]:
+            loss, per_sample_loss, mass, first = direct_training_loss(
+                self,
+                selected,
+                prepared["labels"],
+                loc,
+                scale,
+                supervised=anchors_with_history(
+                    prepared["features"], prepared["targets"], self.config.patch_size
+                ),
+            )
+            # Callers of a training pass use the loss. Keep the next-patch
+            # forecast available at every anchor, as the legacy head did.
+            prediction = (
+                from_model_space(self, first) * scale[..., None] + loc[..., None]
+            )
+            return ForecastOutput(
+                prediction[..., median], prediction, loss, per_sample_loss, mass
+            )
+        patches = prepared.get("prediction_patches", 1)
+        if patches < 1 or patches > self.config.output_patches:
+            raise ValueError("Requested block exceeds trained output_patches")
+        b, targets = selected.shape[:2]
+        normalized = lead_quantiles(self, selected, patches).reshape(
+            b, targets, patches * self.config.patch_size, len(self.config.quantiles)
+        )
+        loc, scale = loc[:, :, -1], scale[:, :, -1]
+        prediction = (
+            from_model_space(self, normalized) * scale[..., None] + loc[..., None]
+        )
+        loss = per_sample_loss = mass = None
+        if future_target is not None:
+            steps = future_target.shape[-1]
+            prediction, normalized = (
+                prediction[..., :steps, :],
+                normalized[..., :steps, :],
+            )
+            loss, per_sample_loss, mass = weighted_forecast_loss(
+                self, prediction, future_target, loc, scale, normalized=normalized
+            )
+        return ForecastOutput(
+            prediction[..., median], prediction, loss, per_sample_loss, mass
         )
 
     @torch.inference_mode()
@@ -445,7 +625,7 @@ def architecture_report(model):
     for name, info in parameters.items():
         key = (
             ".".join(name.split(".")[:2])
-            if name.startswith(("blocks.", "variate."))
+            if name.startswith(("blocks.", "variate.", "temporal."))
             else name.split(".")[0]
         )
         groups[key] = groups.get(key, 0) + info["parameters"]
@@ -462,8 +642,21 @@ def architecture_report(model):
         "rwkv_heads": model.config.width // 64,
         "variate_head_size": model.config.width // model.config.variate_heads,
         "tied_embeddings": False,
+        "variate_mixing_after_blocks": [
+            layer
+            for layer, module in enumerate(model.variate_after)
+            if module is not None
+        ],
+        "temporal_attention_after_blocks": [
+            layer
+            for layer, module in enumerate(model.temporal_after)
+            if module is not None
+        ],
+        "float32_modules": ["embedding", "norm", "head"]
+        if model.config.fp32_io
+        else [],
         "input_feature_dimension": 3 * model.config.patch_size,
-        "output_dimension": model.config.patch_size * len(model.config.quantiles),
+        "output_dimension": model.head.skip.out_features,
         "direct_forecast_timesteps": model.config.patch_size
         * model.config.output_patches,
     }
@@ -617,7 +810,7 @@ def train(config):
         "model_initialized",
         parameters=report["total_parameters"],
         architecture=report,
-        dtype=str(next(model.parameters()).dtype),
+        dtype=str(model.compute_dtype),
         device=str(next(model.parameters()).device),
     )
     write_json(location(config, "training") / "architecture.json", report)
@@ -639,7 +832,7 @@ def train(config):
     logger.info(
         "Device={} dtype={} parameters={} trainable={}",
         torch.cuda.get_device_name(),
-        next(model.parameters()).dtype,
+        model.compute_dtype,
         sum(p.numel() for p in model.parameters()),
         sum(p.numel() for p in model.parameters() if p.requires_grad),
     )

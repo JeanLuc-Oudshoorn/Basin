@@ -1,0 +1,269 @@
+{
+  "pilots": [
+    {
+      "pilot": "A_full",
+      "parameters_m": 221.5,
+      "updates": 3338,
+      "training_minutes": 9.3,
+      "checks": [
+        [
+          0,
+          0.4125
+        ],
+        [
+          865,
+          0.2531
+        ],
+        [
+          1798,
+          0.2464
+        ],
+        [
+          2597,
+          0.2414
+        ],
+        [
+          3338,
+          0.2399
+        ]
+      ],
+      "final_step": 3338,
+      "trimmed_table_loss": 0.2399,
+      "median_table_loss": 0.2441,
+      "median_table_mase": 5.799,
+      "table_loss_p99": 0.54,
+      "holdout_table_mase_median": 5.019,
+      "holdout_median_ase": 3.205,
+      "holdout_pooled_mase": 6764419799.44,
+      "holdout_median_ase_by_token": [
+        1.87,
+        2.79,
+        3.21,
+        3.55,
+        3.87,
+        4.02,
+        4.24
+      ]
+    },
+    {
+      "pilot": "B_no_temporal_attention",
+      "parameters_m": 203.8,
+      "updates": 3338,
+      "training_minutes": 7.9,
+      "checks": [
+        [
+          0,
+          0.414
+        ],
+        [
+          942,
+          0.2529
+        ],
+        [
+          2081,
+          0.2451
+        ],
+        [
+          3211,
+          0.2413
+        ],
+        [
+          3338,
+          0.241
+        ]
+      ],
+      "final_step": 3338,
+      "trimmed_table_loss": 0.241,
+      "median_table_loss": 0.2443,
+      "median_table_mase": 5.829,
+      "table_loss_p99": 0.553,
+      "holdout_table_mase_median": 5.118,
+      "holdout_median_ase": 3.234,
+      "holdout_pooled_mase": 6742133864.97,
+      "holdout_median_ase_by_token": [
+        1.86,
+        2.8,
+        3.32,
+        3.61,
+        3.94,
+        4.08,
+        4.27
+      ]
+    },
+    {
+      "pilot": "C_constructor_init",
+      "parameters_m": 221.5,
+      "updates": 3338,
+      "training_minutes": 8.2,
+      "checks": [
+        [
+          0,
+          0.4125
+        ],
+        [
+          965,
+          0.2537
+        ],
+        [
+          2017,
+          0.2461
+        ],
+        [
+          3052,
+          0.242
+        ],
+        [
+          3338,
+          0.2413
+        ]
+      ],
+      "final_step": 3338,
+      "trimmed_table_loss": 0.2413,
+      "median_table_loss": 0.2467,
+      "median_table_mase": 5.843,
+      "table_loss_p99": 0.546,
+      "holdout_table_mase_median": 5.119,
+      "holdout_median_ase": 3.244,
+      "holdout_pooled_mase": 6750101860.68,
+      "holdout_median_ase_by_token": [
+        1.89,
+        2.85,
+        3.32,
+        3.59,
+        3.92,
+        4.01,
+        4.22
+      ]
+    },
+    {
+      "pilot": "D_wide_1024x13",
+      "parameters_m": 215.4,
+      "updates": 3338,
+      "training_minutes": 6.2,
+      "checks": [
+        [
+          0,
+          0.4149
+        ],
+        [
+          1308,
+          0.2512
+        ],
+        [
+          2667,
+          0.242
+        ],
+        [
+          3338,
+          0.2407
+        ]
+      ],
+      "final_step": 3338,
+      "trimmed_table_loss": 0.2407,
+      "median_table_loss": 0.2454,
+      "median_table_mase": 5.758,
+      "table_loss_p99": 0.552,
+      "holdout_table_mase_median": 5.151,
+      "holdout_median_ase": 3.213,
+      "holdout_pooled_mase": 6769223572.42,
+      "holdout_median_ase_by_token": [
+        1.87,
+        2.76,
+        3.23,
+        3.57,
+        3.91,
+        4.04,
+        4.3
+      ]
+    },
+    {
+      "pilot": "E_no_asinh",
+      "parameters_m": 221.5,
+      "updates": 3338,
+      "training_minutes": 8.6,
+      "checks": [
+        [
+          0,
+          0.6741
+        ],
+        [
+          920,
+          0.4383
+        ],
+        [
+          1877,
+          0.4328
+        ],
+        [
+          2868,
+          0.4265
+        ],
+        [
+          3338,
+          0.4264
+        ]
+      ],
+      "final_step": 3338,
+      "trimmed_table_loss": 0.4264,
+      "median_table_loss": 0.3692,
+      "median_table_mase": 5.809,
+      "table_loss_p99": 7.711,
+      "holdout_table_mase_median": 5.175,
+      "holdout_median_ase": 3.356,
+      "holdout_pooled_mase": 6808753495.25,
+      "holdout_median_ase_by_token": [
+        2.0,
+        2.94,
+        3.42,
+        3.72,
+        4.02,
+        4.11,
+        4.36
+      ]
+    }
+  ],
+  "references": {
+    "naive": {
+      "holdout_table_mase_median": 6.057,
+      "holdout_median_ase": 3.734,
+      "holdout_pooled_mase": 6745314918.14,
+      "holdout_median_ase_by_token": [
+        1.92,
+        3.28,
+        3.8,
+        4.32,
+        4.7,
+        4.8,
+        5.0
+      ]
+    },
+    "chronos": {
+      "holdout_table_mase_median": 4.574,
+      "holdout_median_ase": 2.45,
+      "holdout_pooled_mase": 6745311241.57,
+      "holdout_median_ase_by_token": [
+        1.25,
+        2.06,
+        2.51,
+        2.77,
+        3.11,
+        3.27,
+        3.4
+      ]
+    },
+    "timestral": {
+      "holdout_table_mase_median": 4.178,
+      "holdout_median_ase": 2.136,
+      "holdout_pooled_mase": 6745311240.85,
+      "holdout_median_ase_by_token": [
+        0.97,
+        1.76,
+        2.21,
+        2.43,
+        2.68,
+        2.9,
+        3.13
+      ]
+    }
+  }
+}

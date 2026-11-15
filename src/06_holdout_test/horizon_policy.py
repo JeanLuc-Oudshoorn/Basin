@@ -1,4 +1,4 @@
-"""Four-token evaluation weights and legacy horizon-draw compatibility helpers."""
+"""Per-lead evaluation weights and legacy horizon-draw compatibility helpers."""
 
 import hashlib
 import math
@@ -6,12 +6,16 @@ import math
 
 def evaluation_weights(config):
     """Evaluate every lead, using the training objective's weights, never draws."""
-    weights = config.get("model", {}).get(
-        "horizon_loss_weights", [0.8, 0.16, 0.03, 0.01]
-    )
+    model = config.get("model", {})
+    weights = model.get("horizon_loss_weights", [0.8, 0.16, 0.03, 0.01])
+    # One weight per forecast token of the model's direct block. Models saved
+    # before the block length was configurable forecast four tokens.
+    tokens = model.get("output_patches", 4) if "horizon_loss_weights" in model else 4
+    if weights == "equal":
+        weights = [1.0 / tokens] * tokens
     if (
         not isinstance(weights, (list, tuple))
-        or len(weights) != 4
+        or len(weights) != tokens
         or any(
             isinstance(w, bool)
             or not isinstance(w, (int, float))
@@ -22,7 +26,8 @@ def evaluation_weights(config):
         or not math.isclose(sum(weights), 1.0, abs_tol=1e-8)
     ):
         raise ValueError(
-            "model.horizon_loss_weights must contain four positive weights summing to one"
+            "model.horizon_loss_weights must contain one positive weight per output "
+            "patch, summing to one (or the string 'equal')"
         )
     return list(weights)
 

@@ -31,8 +31,8 @@ graph. Architecture and lead weights come from the loaded checkpoint. Old
 447M exports remain one-patch models; old 307M exports remain 16-patch models.
 The new default config does not retroactively change those weights or limits.
 
-The inference cache now allows up to 256 profiles, with a 1.5-GiB tracked cache
-budget, configured by `training.inference_graph_cache_size` and
+The inference cache now allows up to 256 profiles, with a 2.5-GiB tracked cache
+budget (1.5 GiB until 2026-11-15, see below), configured by `training.inference_graph_cache_size` and
 `training.inference_graph_memory_gib`. The earlier eight-profile limit left
 most requests in a varied holdout uncached. Profiles distinguish variable count,
 padded context length and requested output patches. No continual eviction or
@@ -40,6 +40,29 @@ recapture is performed. Admission uses observed allocator/device-memory growth
 and input storage; the cache budget is separate from total process VRAM and
 does not include model weights or unrelated compiler/driver memory. First-use
 captures can still cause slower individual requests.
+
+### Padding to common lengths and the cache budget (2026-11-15)
+
+Every context is right-padded to the next multiple of 16 patches (256 points)
+for the RWKV kernel, in training batches, validation and holdout alike. The
+padded length is part of the graph key, so all real lengths in one bucket share
+a graph. The buckets end at 256, 512, 768, 1024, 1280, 1536, 1792 and 2048
+points. A context that is at most 10% shorter than 2048, 1536, 1024 or 512
+therefore always replays the graph of that length (the windows are 12%, 17%,
+25% and 50% wide); `tests/test_graph_profiles.py` pins this. Variable count
+stays part of the key: series with different covariate counts are never padded
+into one attention block.
+
+On 7,500 tables sampled from the 2026-11-13 generator the holdout planner needs
+70 shapes for 36,510 requests, 59 of them recurring at least eight times and
+covering 99.9% of requests. Padding costs 3.7% extra variable-patches in
+training. Shape variety is therefore not what limits replay; the cache budget
+was. Capturing all 70 shapes for the 221.5M model took 2.03 GiB
+(`experiments/claude_review/inference_graph_memory.py`, RTX 5070), while the
+former 1.5-GiB budget is used up after about 33 shapes covering about 95% of
+requests. The archived 500M holdout shows the same: 33 of 51 admitted shapes
+captured, 95.3% replay, 4,091 `memory_limit` fallbacks. The budget is now 2.5 GiB. Replay took 6.8 ms per request against
+17.9 ms forward-only, weighted by request shape, on an untrained model.
 
 For holdout specifically, `holdout.graph_min_profile_requests` defaults to 8.
 The evaluator counts expected profile reuse from table lengths, roles, existing

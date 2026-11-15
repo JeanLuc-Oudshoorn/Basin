@@ -231,3 +231,28 @@ Links below are relative to this document. Function names are the durable anchor
 - [Mechanism tests](../../../tests/test_generator_realism.py), [effect tests](../../../tests/test_effect_mechanisms.py), and [process-driver tests](../../../tests/test_process_drivers.py): existing behavior and replay expectations.
 
 External links support the measurement/physics examples. Assessments of current support and the proposed extensions are inferences from the repository source, not claims made by those external sources. No generator changes accompany this review.
+
+
+## Implementation follow-up: 2026-11-15
+
+The review above describes the earlier snapshot. The generator now includes a
+small two-inventory conservation template and a rotating-machine template with
+speed-integrated phase. Both coordinate channels through one persistent
+categorical mode; the general SCM sampler can also share a categorical mode
+between multiple equations. No arbitrary time-varying equations were added.
+
+The runner caps full-strength covariate sources at two and favors persistent
+hidden inputs. This is a sampling prior, not a guarantee of forecastability:
+nonlinear amplification and rare unseen events remain possible. None of these
+additions introduces a new screening or rejection test. See the main README's
+shared-state section for controls and the latent-versus-measured conservation
+qualification.
+
+A Parquet-only serial benchmark used five seeds with 128 originals per seed,
+including the existing augmentation copies. Median batch time was 11.573 s
+before and 11.820 s after (+2.13%); median time per saved table was 83.26 ms
+before and 83.19 ms after (-0.08%). These are measured mixture-level timings,
+not a guarantee for every individual SCM or machine. The benchmark also checked
+exact replay of 32 pre-change SCMs. The audit script is
+`src/01_data_generation/benchmark_shared_physics.py`; its JSON report is written
+to `results/data_generation/shared_physics_benchmark.json`.

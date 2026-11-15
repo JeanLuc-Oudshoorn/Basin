@@ -32,7 +32,8 @@ def load_kernel():
 
 
 def empty_state(model, batch, variables):
-    weight = next(model.parameters())
+    # The backbone's dtype: with fp32_io the first parameter is float32.
+    weight = model.roles.weight
     width = model.config.width
     return [
         (
@@ -59,9 +60,16 @@ def recurrent_hidden(model, x, states=None):
     backend = sys.modules[type(model.blocks[0]).__module__]
     recurrence = load_kernel()
     b, variables, tokens, width = x.shape
+    if states is not None and model.hybrid:
+        # Temporal attention reads every earlier patch; a rollout that keeps
+        # only RWKV state cannot supply them.
+        raise NotImplementedError(
+            "Stateful recurrent rollout is unavailable for models with temporal "
+            "attention; use the default full-context forecast"
+        )
     first = None
-    for block, mix, state in zip(
-        model.blocks, model.variate, states or [None] * len(model.blocks)
+    for layer, (block, state) in enumerate(
+        zip(model.blocks, states or [None] * len(model.blocks))
     ):
         flat = x.reshape(b * variables, tokens, width).contiguous()
         if block.layer_id == 0:
@@ -109,8 +117,34 @@ def recurrent_hidden(model, x, states=None):
         else:
             flat = flat + block.ffn(torch.cat((previous_ffn, normalized), dim=1))[:, 1:]
             previous_ffn.copy_(normalized[:, -1:])
-        x = mix(flat.reshape(b, variables, tokens, width))
+        x = model.mix(layer, flat.reshape(b, variables, tokens, width))
     return x
+
+
+def stateless_block(model, prepared):
+    """Forecast block for scoring: (quantiles, model-space quantiles, loc, scale).
+
+    Validation measures the loss in model space, exactly as training does, so
+    the direct head returns its quantiles before they are mapped back to the
+    original units. Heads without a model space return quantiles only.
+    """
+    x = recurrent_hidden(model, prepared["encoded"])
+    b, targets = prepared["b"], prepared["targets"]
+    patches = prepared.get("prediction_patches", 1)
+    indices = prepared["last_token_indices"].view(b, 1, 1, 1)
+    selected = x[:, :targets].gather(2, indices.expand(b, targets, 1, x.shape[-1]))
+    loc = prepared["loc"][:, :targets].gather(2, indices.expand(b, targets, 1, 1))
+    scale = prepared["scale"][:, :targets].gather(2, indices.expand(b, targets, 1, 1))
+    loc, scale = loc[:, :, 0], scale[:, :, 0]
+    from multi_horizon import direct_quantiles, from_model_space, lead_quantiles
+
+    if model.config.head != "direct":
+        return direct_quantiles(model, selected, loc, scale, patches), loc, scale
+    normalized = lead_quantiles(model, selected, patches).reshape(
+        b, targets, patches * model.config.patch_size, len(model.config.quantiles)
+    )
+    prediction = from_model_space(model, normalized) * scale[..., None] + loc[..., None]
+    return prediction, normalized, loc, scale
 
 
 def stateless_quantiles(model, prepared):
@@ -121,7 +155,7 @@ def stateless_quantiles(model, prepared):
     selected = x[:, :targets].gather(2, indices.expand(b, targets, 1, x.shape[-1]))
     loc = prepared["loc"][:, :targets].gather(2, indices.expand(b, targets, 1, 1))
     scale = prepared["scale"][:, :targets].gather(2, indices.expand(b, targets, 1, 1))
-    if prepared.get("prediction_patches", 1) > 1:
+    if prepared.get("prediction_patches", 1) > 1 or model.config.head == "direct":
         from multi_horizon import direct_quantiles
 
         return direct_quantiles(
@@ -129,10 +163,10 @@ def stateless_quantiles(model, prepared):
             selected,
             loc[:, :, 0],
             scale[:, :, 0],
-            prepared["prediction_patches"],
+            prepared.get("prediction_patches", 1),
         )
     raw = (
-        model.head(model.norm(selected))
+        model.read_out(selected)
         .float()
         .reshape(b, targets, model.config.patch_size, len(model.config.quantiles))
         .sort(dim=-1)
@@ -146,10 +180,21 @@ def recurrent_quantiles(model, prepared, states, *, last_only=False):
     if last_only:
         features = features[:, :, -1:]
     x = model.embedding(features.to(model.embedding.skip.weight.dtype))
-    x = x + model.roles(prepared["roles"])[None, :, None, :]
+    roles = model.roles(prepared["roles"])[None, :, None, :]
+    x = x.to(roles.dtype) + roles
     x = recurrent_hidden(model, x, states)
     targets = prepared["targets"]
-    raw = model.head(model.norm(x[:, :targets, -1:])).float()
+    if model.config.head == "direct":
+        from multi_horizon import direct_quantiles
+
+        return direct_quantiles(
+            model,
+            x[:, :targets, -1:],
+            prepared["loc"][:, :targets, -1],
+            prepared["scale"][:, :targets, -1],
+            1,
+        )
+    raw = model.read_out(x[:, :targets, -1:]).float()
     raw = (
         raw.reshape(
             prepared["b"], targets, model.config.patch_size, len(model.config.quantiles)

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # User settings (one fresh structural causal model per table).
-NUM_TABLES = 1000
+NUM_TABLES = 500
 SEED = 1  # Use None for a fresh random seed each execution.
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
 MIN_ROWS = 96
@@ -191,6 +191,10 @@ STARTUP_TRANSIENT_PROBABILITY = 0.6  # Shutdown tables: coast-down and inrush.
 LIFECYCLE_TREND_PROBABILITY = 0.35
 # Closed-loop units, among trend-free tables. The classic outcome becomes the
 # unit's demand; the recorded outcome is its level/pressure/controller output.
+# Budget influential covariate sources; weak secondary drivers remain possible.
+MAX_DOMINANT_DRIVERS = 2  # None disables the excitation budget.
+PERSISTENT_HIDDEN_PROBABILITY = 0.8
+SHARED_STATE_PROBABILITY = 0.2  # One categorical mode drives multiple channels.
 PLANT_PROBABILITY = 0.3
 # A totalizer (running total of a flow) only counts up, so it is drawn for
 # TRENDING tables instead, with probability PLANT_PROBABILITY x its weight share.
@@ -202,6 +206,8 @@ PLANT_WEIGHTS = {
     "totalizer": 0.1,
     "stick_slip": 0.08,
     "interlock": 0.08,
+    "coupled_storage": 0.10,
+    "rotating_machine": 0.10,
 }
 # Recording layer, applied after simulation (see measurement_layer.py).
 REDUNDANT_SENSOR_PROBABILITY = 0.12  # Per table: 1-2 extra sensors on a signal.
@@ -217,10 +223,10 @@ ROW_GAP_PROBABILITY = 0.04  # Rows absent from the file: the series jumps.
 # hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
 REJECT_CONSTANT_OUTCOME = True
 BURN_IN = 128  # Unrecorded history for warm-up and valid initial lag columns.
-SAVE_SCM = True
-SAVE_PLOT = True
-SAVE_DAG = True  # Causal structure with hidden nodes and explicit history proxies.
-PLOT_COVARIATES = True  # False plots only the outcome.
+SAVE_SCM = False
+SAVE_PLOT = False
+SAVE_DAG = False  # Causal structure with hidden nodes and explicit history proxies.
+PLOT_COVARIATES = False  # False plots only the outcome.
 RENDER_WORKERS = (
     None  # Automatically use up to four plot processes; 1 renders serially.
 )
@@ -319,6 +325,9 @@ def main():
         calendar_gate_probability=CALENDAR_GATE_PROBABILITY,
         plant_probability=PLANT_PROBABILITY,
         plant_weights=PLANT_WEIGHTS,
+        max_dominant_drivers=MAX_DOMINANT_DRIVERS,
+        persistent_hidden_probability=PERSISTENT_HIDDEN_PROBABILITY,
+        shared_state_probability=SHARED_STATE_PROBABILITY,
         startup_transient_probability=STARTUP_TRANSIENT_PROBABILITY,
         redundant_sensor_probability=REDUNDANT_SENSOR_PROBABILITY,
         measurement_probability=MEASUREMENT_PROBABILITY,

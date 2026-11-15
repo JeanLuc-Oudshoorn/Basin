@@ -309,6 +309,18 @@ def configure_training_graphs(model, options):
     previous = getattr(model, "training_graphs", None)
     if previous is not None:
         previous.close()
+    settings = getattr(model, "config", None)
+    if options.get("training_cuda_graphs", False) and (
+        getattr(settings, "variate_every", 1) != 1
+        or getattr(settings, "temporal_every", 0)
+        or getattr(settings, "gated_mixing", False)
+    ):
+        # The capture plan indexes variate layers as RWKV block numbers and
+        # replays unconditional attention; neither holds for these layouts.
+        raise ValueError(
+            "training.training_cuda_graphs supports only models that mix variables "
+            "after every block (variate_every=1, no temporal attention, no gating)"
+        )
     active = (
         options.get("training_cuda_graphs", False)
         and model.training

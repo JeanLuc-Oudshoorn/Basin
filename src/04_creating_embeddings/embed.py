@@ -45,8 +45,56 @@ class ForecastConfig:
     output_patches: int = 1
     multi_horizon_weight: float = 0.5
     horizon_loss_weights: tuple[float, ...] | None = None
+    # Every field below defaults to the architecture of the archived 447M/500M
+    # models, so their checkpoints load unchanged. See
+    # docs/model_training/ARCHITECTURE_V2_2026-11-15.md for the reasons.
+    head: str = "lead_offset"  # "direct": one projection emits every lead
+    variate_every: int = 1  # cross-variable mixing after every Nth RWKV block
+    temporal_every: int = 0  # causal temporal attention after every Nth block
+    gated_mixing: bool = False  # mixing branches start closed (zero output init)
+    value_transform: str = "none"  # "asinh" after causal standardisation
+    fp32_io: bool = False  # float32 patch embedding, final norm and head
+    rwkv_init: str = "constructor"  # "upstream": RWKV-7 training-recipe init
 
     def __post_init__(self):
+        if self.horizon_loss_weights == "equal":
+            # Every forecast timestep carries the same weight. The count is
+            # validated below, after the weights have their final form.
+            object.__setattr__(
+                self,
+                "horizon_loss_weights",
+                (1.0 / self.output_patches,) * self.output_patches
+                if isinstance(self.output_patches, int) and self.output_patches > 0
+                else None,
+            )
+        if self.head not in ("lead_offset", "direct"):
+            raise ValueError("head must be 'lead_offset' or 'direct'")
+        if self.head == "direct" and (
+            self.objective != "next_patch" or self.horizon_loss_weights is None
+        ):
+            raise ValueError(
+                "The direct head requires next_patch and horizon_loss_weights"
+            )
+        for name in ("variate_every", "temporal_every"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < (1 if name == "variate_every" else 0)
+            ):
+                raise ValueError(f"{name} must be a nonnegative integer layer interval")
+        if self.temporal_every and self.objective != "next_patch":
+            raise ValueError("Temporal attention requires the next_patch objective")
+        for name in ("gated_mixing", "fp32_io"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be boolean")
+        if self.value_transform not in ("none", "asinh"):
+            raise ValueError("value_transform must be 'none' or 'asinh'")
+        if self.value_transform != "none" and self.head != "direct":
+            # Only the direct head's loss and decoding work in transformed space.
+            raise ValueError("value_transform requires head='direct'")
+        if self.rwkv_init not in ("constructor", "upstream"):
+            raise ValueError("rwkv_init must be 'constructor' or 'upstream'")
         if self.horizon_loss_weights is not None:
             weights = tuple(self.horizon_loss_weights)
             object.__setattr__(self, "horizon_loss_weights", weights)
@@ -291,6 +339,10 @@ class PatchEncoder(nn.Module):
         ).float()
         loc = loc.float()
         values = ((patches - loc) / scale).nan_to_num().clamp(-1e4, 1e4)
+        if self.config.value_transform == "asinh":
+            # Near-linear around zero, logarithmic for extreme standardised
+            # values. Labels and quantile outputs use the same space.
+            values = torch.asinh(values)
         time = (
             torch.arange(history.shape[-1], device=history.device)
             .float()
@@ -333,7 +385,10 @@ class PatchEncoder(nn.Module):
 
     def encode_tokens(self, prepared):
         x = self.embedding(prepared["features"].to(self.embedding.skip.weight.dtype))
-        x = x + self.roles(prepared["roles"])[None, :, None, :]
+        roles = self.roles(prepared["roles"])[None, :, None, :]
+        # With fp32_io the projection reads the raw features in float32; the
+        # sum is rounded once, to the backbone's dtype.
+        x = x.to(roles.dtype) + roles
         return F.pad(x, (0, 0, 0, prepared["padded_tokens"] - prepared["tokens"]))
 
 

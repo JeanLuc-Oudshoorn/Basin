@@ -71,15 +71,31 @@ def sampled_origins(
     return [eligible[i] for i in indices + [len(eligible) - 1]]
 
 
+def holdout_request(config):
+    """(tables, fraction): a fixed table count takes precedence over a fraction.
+
+    The saved split records the same pair, so the holdout stage can refuse a
+    split that was made under a different policy.
+    """
+    training = config["training"]
+    tables = training.get("holdout_tables")
+    if tables is not None:
+        if isinstance(tables, bool) or not isinstance(tables, int) or tables < 1:
+            raise ValueError("training.holdout_tables must be a positive integer")
+        return tables, None
+    fraction = training.get("holdout_fraction", 0.1)
+    if isinstance(fraction, bool) or not 0 < fraction < 1:
+        raise ValueError("training.holdout_fraction must be between zero and one")
+    return None, fraction
+
+
 def split_datasets(records, config):
     """Split whole admitted sources, never windows from the same source."""
     from augmentation_families import POLICY, excluded_evaluation_sources
 
     patch = config["model"]["patch_size"]
     minimum = max(48, 3 * patch)
-    fraction = config["training"].get("holdout_fraction", 0.1)
-    if isinstance(fraction, bool) or not 0 < fraction < 1:
-        raise ValueError("training.holdout_fraction must be between zero and one")
+    tables, fraction = holdout_request(config)
     logger.info(
         "Split startup: scanning {:,} record metadata entries for eligible sources",
         len(records),
@@ -110,9 +126,22 @@ def split_datasets(records, config):
         raise ValueError(
             "Need at least two independent datasets for validation/test; augmentation families are training-only"
         )
-    count = min(
-        len(independent_sources) - 1, math.ceil(len(independent_sources) * fraction)
-    )
+    if tables is None:
+        count = min(
+            len(independent_sources) - 1,
+            math.ceil(len(independent_sources) * fraction),
+        )
+    elif tables >= len(independent_sources):
+        # A fixed test set is never silently shrunk: a smaller one would not
+        # be comparable with runs that report the configured size.
+        raise ValueError(
+            f"training.holdout_tables={tables:,} needs more than {tables:,} "
+            f"independent tables, but only {len(independent_sources):,} of "
+            f"{len(sources):,} admitted tables have no coarse, aggregate or "
+            "sign-inverted copy; generate more tables or lower the setting"
+        )
+    else:
+        count = tables
     logger.info(
         "Split startup: selecting {:,} test tables from {:,} independent sources using bounded ranking",
         count,
@@ -187,9 +216,12 @@ def split_datasets(records, config):
         "schema": 1,
         "seed": config["seed"],
         "requested_test_fraction": fraction,
+        "requested_test_tables": tables,
         "actual_test_fraction": count / len(sources),
         "minimum_timesteps": minimum,
-        "rounding": "ceil, at least one test table and one training table",
+        "rounding": "ceil, at least one test table and one training table"
+        if tables is None
+        else "fixed table count; error when too few independent tables exist",
         "admitted_eligible_tables": len(sources),
         "train_tables": len(train_sources),
         "test_tables": count,
@@ -228,7 +260,7 @@ def split_datasets(records, config):
         audit["validation_tables"] = len(validation_sources)
         audit["actual_validation_fraction"] = len(validation_sources) / len(sources)
         audit["validation"] = (
-            "dataset-disjoint: fixed reserved tables at five complete four-token forecast origins; no windows or labels from these tables enter gradient training"
+            f"dataset-disjoint: fixed reserved tables at five complete {sampling['forecast_tokens']}-token forecast origins; no windows or labels from these tables enter gradient training"
         )
         audit["validation_sampling"] = sampling
     logger.info(

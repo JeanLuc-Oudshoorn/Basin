@@ -86,7 +86,7 @@ class MaseTests(unittest.TestCase):
         json.dumps(summarize(frame), allow_nan=False)
 
     def test_all_adapters_have_single_origin_same_full_horizon_and_timing(self):
-        config = load_config()
+        config = load_config("configs/legacy_500m.json")
         config["plot"]["max_plots"] = 0
         config["holdout"].update(
             benchmark_models=["naive", "chronos", "timestral"],
@@ -150,7 +150,7 @@ class MaseTests(unittest.TestCase):
                 .splitlines()
             ]
             self.assertEqual(len(requests), len(journal))
-            self.assertEqual(result["primary_metric"], "mase")
+            self.assertEqual(result["primary_metric"], "table_mase_median")
             self.assertEqual(result["pooled"]["observations"], 192)
             self.assertTrue((requests.horizon == 64).all())
             self.assertTrue((requests.scored_horizon == 64).all())

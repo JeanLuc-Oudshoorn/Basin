@@ -133,7 +133,8 @@ context-length settings must agree.
 
 Transformation prepares records for all admitted sources. **The training stage
 performs the actual training/test split by source dataset**, using the seed and
-`training.holdout_fraction`. Records from test sources are excluded from gradient
+`training.holdout_tables` (a fixed count, currently 50,000) or, when that is
+absent, `training.holdout_fraction`. Records from test sources are excluded from gradient
 updates. Augmentation families receive additional training-only restrictions.
 A record marked `split="train"` in `windows.pt` therefore does not by itself
 mean its source will be used to update the final model.

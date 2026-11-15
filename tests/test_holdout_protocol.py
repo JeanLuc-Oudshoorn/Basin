@@ -22,7 +22,8 @@ from transform import file_digest
 
 
 def load_config():
-    config = pipeline_config()
+    # These fixtures pin the archived four-token protocol.
+    config = pipeline_config("configs/legacy_500m.json")
     config["data"]["validation_policy"] = "reserved_tail"  # legacy split fixtures
     config["training"]["holdout_fraction"] = 0.1
     # Protocol unit tests do not download foundation model weights.

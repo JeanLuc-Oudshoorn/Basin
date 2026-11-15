@@ -31,6 +31,8 @@ PLANT_FAMILIES = (
     "totalizer",
     "stick_slip",
     "interlock",
+    "coupled_storage",
+    "rotating_machine",
 )
 DEFAULT_PLANT_WEIGHTS = {
     "relay": 0.4,
@@ -40,6 +42,8 @@ DEFAULT_PLANT_WEIGHTS = {
     "totalizer": 0.1,
     "stick_slip": 0.0,  # Opt-in; runner enables these lightweight families.
     "interlock": 0.0,
+    "coupled_storage": 0.0,
+    "rotating_machine": 0.0,
 }
 LIFECYCLE_KINDS = (
     "saturating",
@@ -52,6 +56,8 @@ LIFECYCLE_KINDS = (
 # Which channel becomes the recorded outcome, and how often the others are
 # exported as covariates. Binary status is a covariate, never the target.
 _OUTCOME_CHANNELS = {
+    "coupled_storage": (("pv", "inventory_b", "outflow"), (0.5, 0.3, 0.2)),
+    "rotating_machine": (("pv",), (1.0,)),
     "relay": (("pv", "actuator", "secondary"), (0.6, 0.2, 0.2)),
     "pid": (("pv", "mv"), (0.65, 0.35)),
     "batch": (("pv",), (1.0,)),
@@ -61,6 +67,15 @@ _OUTCOME_CHANNELS = {
     "interlock": (("pv", "actuator"), (0.7, 0.3)),
 }
 _EXPORTS = {
+    "coupled_storage": {
+        "pv": 0.4,
+        "inventory_b": 0.5,
+        "inflow": 0.5,
+        "transfer": 0.4,
+        "outflow": 0.5,
+        "mode": 0.6,
+    },
+    "rotating_machine": {"speed": 0.7, "mode": 0.6, "load_torque": 0.4},
     "relay": {"pv": 0.4, "status": 0.45, "actuator": 0.3, "secondary": 0.25},
     "pid": {"pv": 0.5, "setpoint": 0.6, "mv": 0.45},
     "batch": {"status": 0.3},
@@ -106,7 +121,46 @@ def sample_plant(rng, rows, weights, first_export_index):
         "process_noise": 0.0 if rng.random() < 0.4 else _log_uniform(rng, 0.001, 0.03),
         "output_gain": float(rng.choice([-1, 1]) * _log_uniform(rng, 0.5, 8)),
     }
-    if family == "relay":
+    if family in ("coupled_storage", "rotating_machine"):
+        # A single categorical state coordinates all actuator settings. It is
+        # semi-Markov (persistent dwell), not several independent binary flags.
+        count = int(rng.integers(3, 6))
+        command = _levels(rng, rows)
+        command.update(levels=list(range(count)), ramp=0)
+        spec.update(mode_command=command)
+        if family == "coupled_storage":
+            spec.update(
+                initial_inventory=rng.uniform(0.1, 1.5, 2).tolist(),
+                inlet_by_mode=rng.uniform(0.0, 0.04, count).tolist(),
+                transfer_by_mode=rng.uniform(0.005, 0.10, count).tolist(),
+                outlet_by_mode=rng.uniform(0.005, 0.10, count).tolist(),
+                equations={
+                    "inflow[t]": "max(0, inlet[mode[t]] * drive[t] * (1 + noise[t]))",
+                    "transfer[t]": "transfer_rate[mode[t]] * inventory_a[t-1]",
+                    "outflow[t]": "outlet_rate[mode[t]] * inventory_b[t-1]",
+                    "inventory_a[t]": "inventory_a[t-1] + inflow[t] - transfer[t]",
+                    "inventory_b[t]": "inventory_b[t-1] + transfer[t] - outflow[t]",
+                },
+            )
+        else:
+            harmonics = int(rng.integers(1, 5))
+            spec.update(
+                speed_by_mode=rng.uniform(0.002, 0.1 / harmonics, count).tolist(),
+                amplitude_by_mode=rng.uniform(0.2, 1.5, count).tolist(),
+                torque_by_mode=rng.uniform(0.1, 1.0, count).tolist(),
+                speed_tau=_log_uniform(rng, 3, 80),
+                initial_phase=float(rng.uniform(-np.pi, np.pi)),
+                harmonics=(
+                    rng.uniform(0.1, 1, harmonics) / np.arange(1, harmonics + 1)
+                ).tolist(),
+                harmonic_phases=rng.uniform(-np.pi, np.pi, harmonics).tolist(),
+                equations={
+                    "speed[t]": "speed[t-1] + alpha * (command_speed[mode[t]] * drive[t] - speed[t-1])",
+                    "phase[t]": "phase[t-1] + 2*pi*speed[t-1]",
+                    "pv[t]": "amplitude[mode[t]] * sum(harmonic[k] * sin(k*phase[t]+offset[k])) + noise[t]",
+                },
+            )
+    elif family == "relay":
         spec.update(
             on_time=_log_uniform(rng, 4, 300),
             off_time=_log_uniform(rng, 4, 300),
@@ -270,7 +324,11 @@ def simulate_plant(spec, demand, time):
     noise = rng.normal(0, 1, length) * spec["process_noise"]
     family = spec["family"]
     channels = {"load": load}
-    if family == "relay":
+    if family == "coupled_storage":
+        channels.update(_coupled_storage(spec, drive, noise, rng))
+    elif family == "rotating_machine":
+        channels.update(_rotating_machine(spec, drive, noise, rng))
+    elif family == "relay":
         channels.update(_relay(spec, drive, noise, time, rng))
     elif family == "pid":
         channels.update(_pid(spec, load, noise, rng))
@@ -596,3 +654,137 @@ def lifecycle_path(trend, time):
     else:
         raise ValueError(f"Unknown lifecycle trend: {kind}")
     return trend["amplitude"] * np.where(time < 0, 0.0, shape)
+
+
+def _coupled_storage(spec, drive, noise, rng):
+    """Two inventories with an explicit shared transfer, in units per sample.
+
+    Transfer appears with opposite signs in the balances, so it cannot create
+    material. Rates below one withdraw only available previous inventory; no
+    clipping correction or independent inventory noise can break conservation.
+    Random disturbances act on inlet flow, where they enter the balance.
+    """
+    mode = _command_path(spec["mode_command"], rng, len(drive)).astype(int)
+    inlet = np.asarray(spec["inlet_by_mode"])[mode]
+    transfer_rate = np.asarray(spec["transfer_by_mode"])[mode]
+    outlet_rate = np.asarray(spec["outlet_by_mode"])[mode]
+    inflow = np.maximum(0, inlet * drive * (1 + noise))
+    a, b, transfer, outflow = (np.empty(len(drive)) for _ in range(4))
+    left, right = spec["initial_inventory"]
+    for i in range(len(drive)):
+        transfer[i] = transfer_rate[i] * left
+        outflow[i] = outlet_rate[i] * right
+        left += inflow[i] - transfer[i]
+        right += transfer[i] - outflow[i]
+        a[i], b[i] = left, right
+    return dict(
+        pv=a,
+        inventory_b=b,
+        inflow=inflow,
+        transfer=transfer,
+        outflow=outflow,
+        mode=mode,
+    )
+
+
+def _rotating_machine(spec, drive, noise, rng):
+    """Integrate actual speed: changing mode never resets oscillator phase.
+
+    Speed is in revolutions/sample. Its bounded commands keep all sampled
+    harmonics below Nyquist, including the largest permitted demand gain.
+    Phase uses previous speed, so future speed cannot change earlier cycles.
+    """
+    mode = _command_path(spec["mode_command"], rng, len(drive)).astype(int)
+    command = np.asarray(spec["speed_by_mode"])[mode] * drive
+    speed = np.empty(len(drive))
+    alpha = -math.expm1(-1 / spec["speed_tau"])
+    previous = spec["speed_by_mode"][int(mode[0])] if len(mode) else 0.0
+    for i, target in enumerate(command):
+        previous += alpha * (target - previous)
+        speed[i] = previous
+    phase = np.empty(len(drive))
+    if len(phase):
+        phase[0] = spec["initial_phase"]
+        phase[1:] = phase[0] + 2 * np.pi * np.cumsum(speed[:-1])
+    wave = np.zeros(len(drive))
+    for k, (gain, offset) in enumerate(
+        zip(spec["harmonics"], spec["harmonic_phases"]), 1
+    ):
+        wave += gain * np.sin(k * phase + offset)
+    amplitude = np.asarray(spec["amplitude_by_mode"])[mode]
+    torque = np.asarray(spec["torque_by_mode"])[mode] * drive
+    return dict(
+        pv=amplitude * wave + noise,
+        speed=speed,
+        phase=phase,
+        mode=mode,
+        load_torque=torque,
+    )
+
+
+def physical_dag_view(spec):
+    """Unroll one physical update for the two shared-state SCM templates.
+
+    This runs only when rendering. The generic source SCM supplies demand;
+    inventory/phase recurrences below, rather than that latent demand, define
+    the recorded target. Export names are retained for visible channels.
+    """
+    import networkx as nx
+
+    if spec["family"] == "coupled_storage":
+        relations = [
+            ("mode", 1, "mode"),
+            ("mode", 0, "inflow"),
+            ("mode", 0, "transfer"),
+            ("mode", 0, "outflow"),
+            ("load", 0, "inflow"),
+            ("pv", 1, "transfer"),
+            ("inventory_b", 1, "outflow"),
+            ("pv", 1, "pv"),
+            ("inventory_b", 1, "inventory_b"),
+            ("inflow", 0, "pv"),
+            ("transfer", 0, "pv"),
+            ("transfer", 0, "inventory_b"),
+            ("outflow", 0, "inventory_b"),
+        ]
+    else:
+        relations = [
+            ("mode", 1, "mode"),
+            ("mode", 0, "speed"),
+            ("load", 0, "speed"),
+            ("speed", 1, "speed"),
+            ("phase", 1, "phase"),
+            ("speed", 1, "phase"),
+            ("phase", 0, "pv"),
+            ("mode", 0, "pv"),
+            ("mode", 0, "load_torque"),
+            ("load", 0, "load_torque"),
+        ]
+    exported = {e["channel"]: e["name"] for e in spec["exports"]}
+    graph = nx.DiGraph()
+
+    def vertex(channel, lag):
+        target = channel == spec["outcome_channel"]
+        variable = (
+            "outcome" if target else exported.get(channel, f"covariate_{channel}")
+        )
+        name = variable if lag == 0 else f"{variable}[t-{lag}]"
+        graph.add_node(
+            name,
+            variable=variable,
+            time_offset=-lag,
+            visible=target or channel in exported,
+            kind="history" if lag else "outcome" if target else "process",
+        )
+        return name
+
+    for parent, lag, child in relations:
+        graph.add_edge(
+            vertex(parent, lag), vertex(child, 0), lag=lag, labels=["balance/state"]
+        )
+    positions = {"outcome": np.array([0.0, 0.0])}
+    others = [name for name in graph if name != "outcome"]
+    for index, name in enumerate(others):
+        angle = 2 * np.pi * index / len(others)
+        positions[name] = 3 * np.array([np.cos(angle), np.sin(angle)])
+    return graph, positions, set()

@@ -1,0 +1,20 @@
+{
+  "hybrid": {
+    "checkpoint": "results/pilot_v2/A_full/training/model.pt",
+    "parameters": 221507808,
+    "forecast_steps": 112,
+    "loaded_vs_constructed_max_share_of_std": 0.0,
+    "fast_path_vs_plain_max_share_of_std": 0.01849786750972271,
+    "fast_path_vs_plain_mean_share_of_std": 0.0016701843589544297,
+    "fast_path_replay_coverage": 1.0,
+    "finite": true
+  },
+  "archived_500m": {
+    "parameters": 500056352,
+    "current_code_vs_pure_pytorch_port_max_share_of_std": 0.02730174921452999,
+    "current_code_vs_pure_pytorch_port_mean_share_of_std": 0.004004862392321229,
+    "fast_path_vs_plain_max_share_of_std": 0.031228719279170036,
+    "fast_path_vs_plain_mean_share_of_std": 0.004705724259838462,
+    "finite": true
+  }
+}

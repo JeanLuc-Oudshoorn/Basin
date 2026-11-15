@@ -232,7 +232,49 @@ class FastInference:
         return quantiles, next_states
 
     @torch.inference_mode()
+    def scored_block(self, prepared):
+        """Batched forecast block for validation, replayed per batch shape.
+
+        Returns (quantiles, model-space quantiles, loc, scale) for the direct
+        head and (quantiles, loc, scale) otherwise: everything the validation
+        loss needs. Weights are read at replay time, so graphs captured at one
+        validation check stay valid after later optimizer updates.
+        """
+        inputs, metadata = self._padded_inputs(prepared)
+        key = (
+            "scored",
+            tuple(inputs["encoded"].shape),
+            prepared["targets"],
+            prepared.get("prediction_patches", 1),
+            str(inputs["encoded"].device),
+        )
+
+        def forward(tensors):
+            from recurrent import stateless_block
+
+            return stateless_block(self.model, dict(metadata, **tensors))
+
+        return self.graphs.run(key, forward, inputs)
+
+    @torch.inference_mode()
     def quantiles(self, prepared):
+        inputs, metadata = self._padded_inputs(prepared)
+        key = (
+            tuple(inputs["encoded"].shape),
+            prepared["targets"],
+            prepared.get("prediction_patches", 1),
+            str(inputs["encoded"].device),
+        )
+
+        def forward(tensors):
+            from recurrent import stateless_quantiles
+
+            batch = dict(metadata, **tensors)
+            return stateless_quantiles(self.model, batch)
+
+        return self.graphs.run(key, forward, inputs)
+
+    def _padded_inputs(self, prepared):
         model = self.model
         n = prepared["padded_tokens"]
         # Preserve the embedding GEMM's exact real-token shape. Padding raw
@@ -257,20 +299,7 @@ class FastInference:
             k: v for k, v in prepared.items() if not isinstance(v, torch.Tensor)
         }
         metadata.update(tokens=n, labels=None, is_training=False)
-        key = (
-            tuple(inputs["encoded"].shape),
-            prepared["targets"],
-            prepared.get("prediction_patches", 1),
-            str(inputs["encoded"].device),
-        )
-
-        def forward(tensors):
-            from recurrent import stateless_quantiles
-
-            batch = dict(metadata, **tensors)
-            return stateless_quantiles(model, batch)
-
-        return self.graphs.run(key, forward, inputs)
+        return inputs, metadata
 
     @torch.inference_mode()
     def forecast(self, context, horizon, *, past_covariates=None, recurrent=False):
