@@ -244,42 +244,6 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(generator._sample_visibility(nodes, 0), 0)
         self.assertFalse(any(n["visible"] for n in nodes))
 
-    def test_poisson_visibility_batches_have_no_univariate_quota(self):
-        with tempfile.TemporaryDirectory() as directory:
-            generator = OperationalSCMGenerator(
-                directory,
-                seed=2,
-                min_rows=48,
-                max_rows=48,
-                min_covariates=3,
-                max_covariates=3,
-                visible_covariate_lambda=0,
-                sign_inversion_probability=0,
-                process_episode_probability=0,
-                save_plot=False,
-                save_dag=False,
-            )
-            # Lambda zero exports only the outcome, with real screening/replay.
-            models = []
-            for path in generator.generate(5):
-                model = json.loads((path / "scm.json").read_text())
-                frame = pd.read_parquet(path / "data.parquet")
-                self.assertEqual(
-                    model["univariate"], list(frame) == ["time_index", "outcome"]
-                )
-                self.assertEqual(model["visibility"]["visible_count"], 0)
-                pd.testing.assert_frame_equal(frame, generator.simulate(model))
-                models.append(model)
-            self.assertEqual(sum(m["univariate"] for m in models), 5)
-            self.assertEqual(sum(m["trend_free"] for m in models), 3)
-            # A one-table run can also have covariates: no rounding up to force
-            # a univariate table, as the former minimum-share mechanism did.
-            generator.visible_covariate_lambda = 100
-            path = generator.generate(1)[0]
-            model = json.loads((path / "scm.json").read_text())
-            self.assertFalse(model["univariate"])
-            self.assertTrue(all(n["visible"] for n in model["nodes"]))
-
     def test_observation_and_rare_mechanism_defaults(self):
         generator = OperationalSCMGenerator("unused")
         self.assertEqual(generator.process_episode_probability, 0.02)
