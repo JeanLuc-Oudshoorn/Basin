@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # This job name is the required status check in the main branch protection.
+    name: Test suite
+    # The lockfile pins CPU torch on non-Linux platforms; Linux resolves to the
+    # multi-gigabyte CUDA build. Windows matches the local development venv.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run the full test suite
+        run: uv run --frozen python -m unittest discover -s tests -v
