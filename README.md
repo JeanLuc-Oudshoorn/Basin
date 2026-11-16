@@ -166,7 +166,15 @@ horizon of 1,000+ steps adds nothing there.
 ## Why the RWKV-7 architecture?
 
 Almost every mainstream TSFM is a transformer. Basin is built on RWKV-7, a
-linear-attention (recurrent) architecture, for three reasons.
+linear-attention (recurrent) architecture, for four reasons.
+
+**It is a recurrent neural network at heart.** Under the hood, RWKV-7 is an
+RNN: it reads a sequence one step at a time and carries what it has seen
+forward in a state. RNNs were originally developed as an adaptation of
+general deep neural networks precisely to handle sequential data, and time
+series are a prime example of such data. RWKV-7 keeps that natural fit, but
+unlike older RNNs, which had to be trained step by step and were hard to
+scale, it can be trained in parallel like a transformer.
 
 **It is strong at short-range prediction.** In private language-modelling
 experiments, RWKV-7 was very competitive with a modern transformer on
