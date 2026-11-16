@@ -8,7 +8,7 @@
 
 # Basin
 
-Basin is a time-series foundation model (TSFM) for the operational domain:
+Basin is a **time-series foundation model (TSFM) for the operational domain**:
 sensor readings, process measurements, equipment telemetry, energy and
 utility loads, and similar data from running systems. It is built on
 **RWKV-7**, a linear-attention architecture, and is tuned for one thing in
