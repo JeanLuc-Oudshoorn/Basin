@@ -127,6 +127,16 @@
     "storage_locality": true,
     "prefetch": true,
     "checkpoint_token_threshold": 3072,
+    "fused_master_optimizer": true,
+    "log_every_tables": 1000,
+    "validation_cache": "~/.cache/basin/validation_panels",
+    "background_checkpoints": true,
+    "checkpoint_upload": {
+      "container": "checkpoints",
+      "prefix": null,
+      "block_mib": 16,
+      "concurrency": 4
+    },
     "early_stopping": {
       "patience_checks": 12,
       "min_delta": 0.0,

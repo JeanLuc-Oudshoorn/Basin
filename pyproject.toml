@@ -40,6 +40,8 @@ explicit = true
 data = ["numpy", "scipy", "pandas", "matplotlib", "pyarrow", "networkx"]
 validation = ["prophet>=1.1.5,<2", "numpy", "pandas", "pyarrow"]
 benchmarks = ["timestral"]
+# Optional copy of training checkpoints in Azure Blob Storage (training.checkpoint_upload).
+cloud = ["azure-storage-blob>=12.19,<13"]
 
 [tool.ruff]
 target-version = "py312"

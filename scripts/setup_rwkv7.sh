@@ -11,6 +11,8 @@ source "$BASIN_VENV/bin/activate"
 python -m pip install 'pip' 'wheel' 'setuptools==70.2.0'
 python -m pip install 'torch==2.12.0+cu130' --index-url https://download.pytorch.org/whl/cu130
 python -m pip install 'pytorch-lightning==1.9.5' 'torchmetrics==1.9.0' 'ninja==1.13.0' 'packaging==26.2'
+# Checkpoint copies in Azure Blob Storage (training.checkpoint_upload).
+python -m pip install 'azure-storage-blob>=12.19,<13'
 python -m pip install --no-deps \
     'nvidia-cuda-nvcc==13.3.73' 'nvidia-cuda-crt==13.3.73' \
     'nvidia-nvvm==13.3.73' 'nvidia-cuda-runtime==13.3.29' \

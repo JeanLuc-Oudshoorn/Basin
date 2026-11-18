@@ -19,18 +19,108 @@ FORMAT = "rwkv_epoch_checkpoint_v1"
 TIMED_FORMAT = "rwkv_timed_checkpoint_v1"
 
 
-def atomic_torch_save(payload, path):
-    """Flush beside the destination, then replace; interrupted writes preserve it."""
+class _DigestingStream:
+    """Passes writes through, hashes them and feeds an upload, in one pass.
+
+    The file is therefore never read back: on this project's hard disk a read
+    of a just-written checkpoint has been measured at 5 MB/s.
+    """
+
+    def __init__(self, stream, mirror=None):
+        self.stream = stream
+        self.mirror = mirror
+        self.mirror_error = None
+        self.sha256 = hashlib.sha256()
+        self.md5 = hashlib.md5(usedforsecurity=False)  # Azure's Content-MD5
+
+    def write(self, data):
+        self.sha256.update(data)
+        self.md5.update(data)
+        written = self.stream.write(data)
+        if self.mirror is not None:
+            try:
+                self.mirror.write(data)
+            except Exception as error:
+                # The upload failed or was abandoned. The file is what matters:
+                # keep writing it and report the upload's fate afterwards.
+                self.mirror_error, self.mirror = error, None
+        return written
+
+    def flush(self):
+        self.stream.flush()
+
+
+def atomic_torch_save(payload, path, *, digests=False, mirror=None):
+    """Flush beside the destination, then replace; interrupted writes preserve it.
+
+    With `digests`, returns the SHA-256 (hex) and MD5 (bytes) of the file, and
+    `mirror_error` if the optional `mirror` (an upload fed the same bytes)
+    raised while the file was written.
+    """
     path = Path(path)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    result = None
     try:
         with temporary.open("wb") as stream:
-            torch.save(payload, stream)
+            if digests or mirror is not None:
+                hashing = _DigestingStream(stream, mirror)
+                torch.save(payload, hashing)
+                result = {
+                    "sha256": hashing.sha256.hexdigest(),
+                    "md5": hashing.md5.digest(),
+                    "mirror_error": hashing.mirror_error,
+                }
+            else:
+                torch.save(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    return result
+
+
+HOST_MEMORY_MARGIN = 2 * 2**30
+
+
+def tensor_bytes(value):
+    """Bytes of all tensors in a nested state; shared tensors are counted once."""
+    seen, total, stack = set(), 0, [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, torch.Tensor):
+            if id(item) not in seen:
+                seen.add(id(item))
+                total += item.numel() * item.element_size()
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
+
+
+def available_host_memory():
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available
+    except Exception:  # nosec B110 - the check is a precaution, not a requirement
+        return None
+
+
+def host_copy(value):
+    """An independent copy in host memory: tensors cloned to the CPU, containers rebuilt.
+
+    Training goes on while a checkpoint is written, so the writer must not
+    share any tensor or list with the live training state.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu", copy=True)
+    if isinstance(value, dict):
+        return type(value)((key, host_copy(item)) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return type(value)(host_copy(item) for item in value)
+    return value
 
 
 def checkpoint_identity(model, records, validation_records, config, optimizer):
@@ -349,69 +439,118 @@ def save_checkpoint(
     *,
     loop_state=None,
     weight_average=None,
+    writer=None,
 ):
+    """Write a resumable checkpoint; with a `writer`, in the background.
+
+    Without a writer the call returns when the file is on disk. With one, it
+    returns after copying the state to host memory (a few seconds); the file
+    is written, and uploaded if the writer has a store, while training goes on.
+    """
     started = perf_counter()
-    logger.info("Writing resumable training checkpoint {}", path)
     current = model.state_dict()
     # torch.save deduplicates shared storage when the current epoch is also best.
-    best = (
-        current
-        if improved or not best_path.is_file()
-        else torch.load(
-            best_path, map_location="cpu", weights_only=True, mmap=os.name != "nt"
-        )["state_dict"]
-    )
+    current_is_best = bool(improved or not best_path.is_file())
     epoch, step = (
         (loop_state["epoch"], loop_state["step"])
         if loop_state is not None
         else (history[-1]["epoch"], history[-1]["step"])
     )
-    atomic_torch_save(
-        {
-            "format": TIMED_FORMAT if loop_state is not None else FORMAT,
-            "loop_state": loop_state,
-            "identity": identity,
-            "state_dict": current,
-            "best_state_dict": best,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "schedule_plan": schedule_plan,
-            "epoch": epoch,
-            "step": step,
-            "points_processed": points_processed,
-            "windows_processed": windows_processed,
-            "best_step": best_step,
-            "early_stopping": {
-                "best": early.best,
-                "best_epoch": early.best_epoch,
-                "bad_epochs": early.bad_epochs,
-            },
-            "history": history,
-            "validation_history": validation_history,
-            "rng_state": rng_state(),
-            "stop_reason": stop_reason,
-            "weight_average": weight_average.state_dict()
-            if weight_average is not None
-            else None,
+    payload = {
+        "format": TIMED_FORMAT if loop_state is not None else FORMAT,
+        "loop_state": loop_state,
+        "identity": identity,
+        "state_dict": current,
+        "best_state_dict": None,  # filled in by write()
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "schedule_plan": schedule_plan,
+        "epoch": epoch,
+        "step": step,
+        "points_processed": points_processed,
+        "windows_processed": windows_processed,
+        "best_step": best_step,
+        "early_stopping": {
+            "best": early.best,
+            "best_epoch": early.best_epoch,
+            "bad_epochs": early.bad_epochs,
         },
-        path,
-    )
-    logger.info(
-        "CHECKPOINT saved={} epoch={} global_step={} bytes={:,} seconds={:.2f}",
-        path,
-        epoch,
-        step,
-        path.stat().st_size,
-        perf_counter() - started,
-    )
-    emit_training_event(
-        "timed_training_checkpoint_saved"
-        if loop_state is not None
-        else "epoch_checkpoint_saved",
-        global_step=step,
-        epoch=epoch,
-        checkpoint_path=str(path),
-        checkpoint_bytes=path.stat().st_size,
-        resumable=True,
-        checkpoint_save_seconds=perf_counter() - started,
-    )
+        "history": history,
+        "validation_history": validation_history,
+        "rng_state": rng_state(),
+        "stop_reason": stop_reason,
+        "weight_average": weight_average.state_dict()
+        if weight_average is not None
+        else None,
+    }
+    background = writer is not None
+    if background:
+        writer.finish(abandon_upload=True)  # at most one copy of the state in memory
+        needed = tensor_bytes(payload)
+        available = available_host_memory()
+        if available is not None and available < needed + HOST_MEMORY_MARGIN:
+            # Copying the state would push the machine into swap. Write straight
+            # from the training tensors instead; training waits, as it used to.
+            logger.warning(
+                "Host memory is short ({:.1f} GiB free, the checkpoint state needs "
+                "{:.1f} GiB): writing this checkpoint without a background copy",
+                available / 2**30,
+                needed / 2**30,
+            )
+            background = False
+    if background:
+        copy_started = perf_counter()
+        payload = host_copy(payload)
+        logger.info(
+            "Checkpoint state copied to host memory in {:.2f}s; writing {} in the background",
+            perf_counter() - copy_started,
+            path,
+        )
+    else:
+        logger.info("Writing resumable training checkpoint {}", path)
+
+    def write(upload=None):
+        payload["best_state_dict"] = (
+            payload["state_dict"]
+            if current_is_best
+            else torch.load(
+                best_path, map_location="cpu", weights_only=True, mmap=os.name != "nt"
+            )["state_dict"]
+        )
+        uploading = writer is not None and writer.store is not None
+        digests = atomic_torch_save(payload, path, digests=uploading, mirror=upload)
+        size = path.stat().st_size
+        logger.info(
+            "CHECKPOINT saved={} epoch={} global_step={} bytes={:,} seconds={:.2f}",
+            path,
+            epoch,
+            step,
+            size,
+            perf_counter() - started,
+        )
+        emit_training_event(
+            "timed_training_checkpoint_saved"
+            if loop_state is not None
+            else "epoch_checkpoint_saved",
+            global_step=step,
+            epoch=epoch,
+            checkpoint_path=str(path),
+            checkpoint_bytes=size,
+            resumable=True,
+            checkpoint_save_seconds=perf_counter() - started,
+        )
+        return {
+            "path": path,
+            "bytes": size,
+            "digests": digests,
+            "metadata": {"step": step, "epoch": epoch, "stop_reason": stop_reason},
+        }
+
+    if background:
+        writer.submit(write, path)
+    elif writer is not None:
+        written = write()
+        # Only the upload, if any, is left; it has to read the file.
+        writer.submit(lambda upload=None: written, path)
+    else:
+        write()

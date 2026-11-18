@@ -2,9 +2,13 @@
 
 import hashlib
 import heapq
+import json
 import math
+import os
 from collections import defaultdict
+from pathlib import Path
 from time import perf_counter
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -13,7 +17,7 @@ from batching import pack_records
 from loguru import logger
 from training_log import emit_training_event
 from training_progress import duration
-from transform import ROOT, file_digest, frame_window
+from transform import ROOT, file_digest, frame_window, location
 
 
 def forecast_patches(config):
@@ -196,36 +200,250 @@ def select_validation_origins(records, config, *, max_tables=None):
     return result, audit
 
 
-def validation_windows(records, config, *, encoder=None):
-    """Load one source at a time; never retain a corpus of context tensors."""
+PANEL_FORMAT = "validation_panel_v1"
+PANEL_VALUES = "validation_panel.bin"
+PANEL_INDEX = "validation_panel.pt"
+
+
+def panel_key(records, config):
+    """Identity of the validation panel: every request and every source file."""
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            {
+                "format": PANEL_FORMAT,
+                "patch_size": config["model"]["patch_size"],
+                "forecast_patches": forecast_patches(config),
+                "context_length": config["data"]["context_length"],
+            },
+            sort_keys=True,
+        ).encode()
+    )
+    for descriptor in records:
+        digest.update(
+            json.dumps(
+                [
+                    descriptor["source"],
+                    descriptor["source_sha256"],
+                    descriptor["validation_origin"],
+                    descriptor["targets"],
+                    descriptor["roles"]["past"],
+                ]
+            ).encode()
+        )
+    return digest.hexdigest()
+
+
+class _PanelWriter:
+    """Appends each request's float32 windows to one file while they are read."""
+
+    def __init__(self, directory, key, horizon):
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.key, self.horizon = key, horizon
+        self.temporary = self.directory / f".{PANEL_VALUES}.{uuid4().hex}.tmp"
+        self.stream = self.temporary.open("wb")
+        self.offsets, self.lengths, self.targets, self.covariates = [0], [], [], []
+
+    def add(self, batch):
+        context, future = batch["context"], batch["future_target"]
+        past = batch.get("past_covariates")
+        if future.shape[-1] != self.horizon:
+            raise ValueError("Validation window has an unexpected horizon")
+        count = 0
+        for tensor in (context, future, past):
+            if tensor is not None:
+                values = tensor.contiguous().numpy()
+                if values.dtype != np.float32:
+                    raise ValueError("Validation windows must be float32")
+                self.stream.write(values.tobytes())
+                count += values.size
+        self.offsets.append(self.offsets[-1] + count)
+        self.lengths.append(context.shape[-1])
+        self.targets.append(context.shape[1])
+        self.covariates.append(0 if past is None else past.shape[1])
+
+    def abandon(self):
+        self.stream.close()
+        self.temporary.unlink(missing_ok=True)
+
+    def finish(self):
+        from checkpoints import atomic_torch_save
+
+        self.stream.flush()
+        os.fsync(self.stream.fileno())
+        self.stream.close()
+        # The index is written last and names the size of the values file, so
+        # a half-written panel is never mistaken for a complete one.
+        os.replace(self.temporary, self.directory / PANEL_VALUES)
+        atomic_torch_save(
+            {
+                "format": PANEL_FORMAT,
+                "key": self.key,
+                "horizon": self.horizon,
+                "bytes": 4 * self.offsets[-1],
+                "offsets": torch.tensor(self.offsets, dtype=torch.int64),
+                "lengths": torch.tensor(self.lengths, dtype=torch.int32),
+                "targets": torch.tensor(self.targets, dtype=torch.int32),
+                "covariates": torch.tensor(self.covariates, dtype=torch.int32),
+            },
+            self.directory / PANEL_INDEX,
+        )
+        logger.info(
+            "Validation panel saved: {:,} forecast requests, {:.2f} GiB in {}; "
+            "later checks read it instead of the source tables",
+            len(self.lengths),
+            4 * self.offsets[-1] / 2**30,
+            self.directory / PANEL_VALUES,
+        )
+
+
+def open_panel(directory, key, count):
+    """The saved panel for exactly these requests, or None."""
+    values_path, index_path = (
+        Path(directory) / PANEL_VALUES,
+        Path(directory) / PANEL_INDEX,
+    )
+    if not values_path.is_file() or not index_path.is_file():
+        return None
+    index = torch.load(index_path, map_location="cpu", weights_only=True)
+    if (
+        index.get("format") != PANEL_FORMAT
+        or index.get("key") != key
+        or len(index["lengths"]) != count
+        or values_path.stat().st_size != index["bytes"]
+    ):
+        return None
+    # Copy-on-write mapping: pages come from the file on demand, stay
+    # evictable, and nothing written to the arrays can reach the file.
+    values = np.memmap(values_path, dtype=np.float32, mode="c")
+    return {
+        "values": values,
+        "horizon": int(index["horizon"]),
+        "offsets": index["offsets"].tolist(),
+        "lengths": index["lengths"].tolist(),
+        "targets": index["targets"].tolist(),
+        "covariates": index["covariates"].tolist(),
+    }
+
+
+def panel_batch(panel, position):
+    """The window `frame_window` returned when the panel was built."""
+    start = panel["offsets"][position]
+    length = panel["lengths"][position]
+    targets = panel["targets"][position]
+    covariates = panel["covariates"][position]
+    horizon = panel["horizon"]
+    values = panel["values"]
+
+    def take(rows, columns):
+        nonlocal start
+        tensor = torch.from_numpy(values[start : start + rows * columns]).view(
+            1, rows, columns
+        )
+        start += rows * columns
+        return tensor
+
+    batch = {
+        "context": take(targets, length),
+        "horizon": horizon,
+        "future_target": take(targets, horizon),
+    }
+    if covariates:
+        batch["past_covariates"] = take(covariates, length)
+    return batch
+
+
+def panel_directory(config):
+    """Where `training.validation_cache` keeps the panel; None when it is off.
+
+    `true` means the training output folder. A path names another folder, for
+    example one on WSL's own disk: reading a large file through WSL's mount of
+    a Windows drive was measured at 5 MiB/s here, against 106 MiB/s for the
+    same drive read natively. Each training folder gets its own subfolder.
+    """
+    setting = config["training"].get("validation_cache", False)
+    if setting is True:
+        return location(config, "training")
+    if isinstance(setting, str) and setting.strip():
+        folder = hashlib.sha256(str(location(config, "training")).encode()).hexdigest()[
+            :16
+        ]
+        return Path(setting).expanduser() / folder
+    if setting in (False, None):
+        return None
+    raise ValueError("training.validation_cache must be true, false or a folder path")
+
+
+def validation_windows(records, config, *, encoder=None, cache_directory=None):
+    """Load one source at a time; never retain a corpus of context tensors.
+
+    With `cache_directory`, the windows of the first pass are saved there and
+    later passes over the same requests read them back instead of opening,
+    hashing and slicing every source table again (about 22 ms per table through
+    WSL's Windows-drive mount). The saved values are the float32 arrays the
+    first pass produced, so every later check scores exactly the same numbers.
+    Source files are verified against their recorded SHA-256 when the panel is
+    built; a changed request list or source hash builds a new panel.
+    """
     previous, frame = None, None
     patch = config["model"]["patch_size"]
     leads = forecast_patches(config)
-    for descriptor in records:
-        source = descriptor["source"]
-        if source != previous:
-            path = ROOT / source
-            if file_digest(path) != descriptor["source_sha256"]:
-                raise ValueError(f"Validation source changed: {path}")
-            columns = descriptor["targets"] + descriptor["roles"]["past"]
-            frame = pd.read_parquet(path, columns=columns)
-            previous = source
-        origin = descriptor["validation_origin"]
-        batch = frame_window(
-            frame,
-            cutoff=origin,
-            context_length=min(origin, config["data"]["context_length"]),
-            horizon=leads * patch,
-            targets=descriptor["targets"],
-            past_covariates=descriptor["roles"]["past"],
-        )
-        record = dict(descriptor, batch=batch)
-        if encoder is not None:
-            from index_patches import LazyPatchRecord
-
-            yield LazyPatchRecord(record, encoder)
+    panel = writer = None
+    if cache_directory is not None:
+        key = panel_key(records, config)
+        panel = open_panel(cache_directory, key, len(records))
+        if panel is None:
+            writer = _PanelWriter(cache_directory, key, leads * patch)
+            logger.info(
+                "Validation panel: reading {:,} forecast requests from their source "
+                "tables and saving them for later checks",
+                len(records),
+            )
         else:
-            yield record
+            logger.info(
+                "Validation panel: {:,} forecast requests from {} (source tables "
+                "were verified when it was saved)",
+                len(records),
+                Path(cache_directory) / PANEL_VALUES,
+            )
+    try:
+        for position, descriptor in enumerate(records):
+            if panel is not None:
+                batch = panel_batch(panel, position)
+            else:
+                source = descriptor["source"]
+                if source != previous:
+                    path = ROOT / source
+                    if file_digest(path) != descriptor["source_sha256"]:
+                        raise ValueError(f"Validation source changed: {path}")
+                    columns = descriptor["targets"] + descriptor["roles"]["past"]
+                    frame = pd.read_parquet(path, columns=columns)
+                    previous = source
+                origin = descriptor["validation_origin"]
+                batch = frame_window(
+                    frame,
+                    cutoff=origin,
+                    context_length=min(origin, config["data"]["context_length"]),
+                    horizon=leads * patch,
+                    targets=descriptor["targets"],
+                    past_covariates=descriptor["roles"]["past"],
+                )
+                if writer is not None:
+                    writer.add(batch)
+            record = dict(descriptor, batch=batch)
+            if encoder is not None:
+                from index_patches import LazyPatchRecord
+
+                yield LazyPatchRecord(record, encoder)
+            else:
+                yield record
+        if writer is not None:
+            writer.finish()
+            writer = None
+    finally:
+        if writer is not None:
+            writer.abandon()  # interrupted before the last request
 
 
 def validation_engine(model, config):
@@ -393,7 +611,10 @@ def validate_origins(model, records, config):
 
     report_at = 500
     try:
-        for record in validation_windows(records, config, encoder=model):
+        cache_directory = panel_directory(config)
+        for record in validation_windows(
+            records, config, encoder=model, cache_directory=cache_directory
+        ):
             record["prepared"] = record["prepared"]  # bounded, per-bucket reuse only
             key = (
                 len(record["targets"]),

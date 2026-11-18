@@ -1,0 +1,104 @@
+[
+  {
+    "shape": "8x4x112",
+    "tokens": 3584,
+    "passes": 2,
+    "end_to_end_ms": 184.33,
+    "peak_allocated_gib": 8.1,
+    "reserved_gib": 8.49,
+    "phases_ms": {
+      "forward": 62.69,
+      "backward": 115.01,
+      "clip_and_metrics": 3.02,
+      "optimizer": 11.09,
+      "weight_average": 1.3
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  },
+  {
+    "shape": "8x4x128",
+    "tokens": 4096,
+    "passes": 2,
+    "end_to_end_ms": 188.44,
+    "peak_allocated_gib": 8.64,
+    "reserved_gib": 9.35,
+    "phases_ms": {
+      "forward": 66.24,
+      "backward": 123.38,
+      "clip_and_metrics": 3.0,
+      "optimizer": 11.22,
+      "weight_average": 1.34
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  },
+  {
+    "shape": "8x5x80",
+    "tokens": 3200,
+    "passes": 2,
+    "end_to_end_ms": 178.77,
+    "peak_allocated_gib": 8.21,
+    "reserved_gib": 9.72,
+    "phases_ms": {
+      "forward": 65.93,
+      "backward": 121.69,
+      "clip_and_metrics": 3.15,
+      "optimizer": 11.35,
+      "weight_average": 1.33
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  },
+  {
+    "shape": "8x5x96",
+    "tokens": 3840,
+    "passes": 2,
+    "end_to_end_ms": 181.97,
+    "peak_allocated_gib": 8.34,
+    "reserved_gib": 9.31,
+    "phases_ms": {
+      "forward": 64.55,
+      "backward": 120.0,
+      "clip_and_metrics": 3.02,
+      "optimizer": 11.09,
+      "weight_average": 1.3
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  },
+  {
+    "shape": "8x5x128",
+    "tokens": 5120,
+    "passes": 2,
+    "end_to_end_ms": 212.39,
+    "peak_allocated_gib": 8.34,
+    "reserved_gib": 8.74,
+    "phases_ms": {
+      "forward": 66.1,
+      "backward": 139.58,
+      "clip_and_metrics": 3.1,
+      "optimizer": 11.29,
+      "weight_average": 1.32
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  },
+  {
+    "shape": "8x6x128",
+    "tokens": 6144,
+    "passes": 2,
+    "end_to_end_ms": 245.34,
+    "peak_allocated_gib": 9.15,
+    "reserved_gib": 9.64,
+    "phases_ms": {
+      "forward": 73.15,
+      "backward": 157.45,
+      "clip_and_metrics": 3.09,
+      "optimizer": 11.2,
+      "weight_average": 1.36
+    },
+    "label": "pass_limit_3072",
+    "repeat": 0
+  }
+]

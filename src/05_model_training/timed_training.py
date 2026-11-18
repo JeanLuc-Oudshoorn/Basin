@@ -9,6 +9,8 @@ from uuid import uuid4
 import pandas as pd
 import torch
 from batching import BatchPlanner
+from checkpoint_upload import make_checkpoint_store
+from checkpoint_writer import CheckpointWriter
 from checkpoints import (
     atomic_torch_save,
     checkpoint_identity,
@@ -38,6 +40,41 @@ def fit_timed(
     *,
     clock=None,
 ):
+    """Train; whatever happens, let a checkpoint in flight reach the disk."""
+    writers = []
+    try:
+        return _fit_timed(
+            model,
+            records,
+            validation_records,
+            config,
+            optimizer,
+            validation_fn,
+            clock=clock,
+            writers=writers,
+        )
+    except BaseException:
+        # Training failed or was interrupted. The checkpoint taken before that
+        # is still valid: finish writing it, and keep the original error.
+        for writer in writers:
+            try:
+                writer.finish()
+            except Exception as error:
+                logger.error("Checkpoint writer failed while stopping: {}", error)
+        raise
+
+
+def _fit_timed(
+    model,
+    records,
+    validation_records,
+    config,
+    optimizer,
+    validation_fn=None,
+    *,
+    clock=None,
+    writers=None,
+):
     from epoch_training import (
         EarlyStopping,
         accumulated_update,
@@ -65,10 +102,32 @@ def fit_timed(
     validation_fn = validation_fn or (lambda m, r: validate_origins(m, r, config))
     directory = location(config, "training")
     directory.mkdir(parents=True, exist_ok=True)
+    # Checkpoints are written, and optionally copied to cloud storage, on a
+    # background thread. A store that cannot be reached stops the run here,
+    # before any training time is spent.
+    store = make_checkpoint_store(config)
+    if store is not None:
+        if not t.get("background_checkpoints", True):
+            raise ValueError(
+                "training.checkpoint_upload requires training.background_checkpoints"
+            )
+        store.preflight()
+    writer = CheckpointWriter(store) if t.get("background_checkpoints", True) else None
+    if writer is not None and writers is not None:
+        writers.append(writer)
+    first_upload_pending = store is not None
+    log_every_tables = t.get("log_every_tables")
     best_path, latest_path = (
         directory / "best_weights.pt",
         directory / "latest_checkpoint.pt",
     )
+    for stale in directory.glob(f".{latest_path.name}.*.tmp"):
+        # A run that was killed while writing leaves its unfinished file here.
+        # The checkpoint itself is only ever replaced by a complete one.
+        logger.warning(
+            "Removing unfinished checkpoint file of an earlier run: {}", stale
+        )
+        stale.unlink(missing_ok=True)
     accumulation = options["gradient_accumulation_steps"]
     logger.info(
         "Batch planning: {:,} training windows; storage_locality={}",
@@ -238,7 +297,12 @@ def fit_timed(
         "validated_weights": "exponential moving average"
         if average is not None
         else "current training weights",
-        "history_policy": "latest 1000 updates in checkpoint/JSON; full stream in timestamped training JSONL",
+        "history_policy": "latest 1000 updates in checkpoint/JSON; full stream in timestamped training JSONL"
+        if log_every_tables is None
+        else f"latest 1000 updates in checkpoint/JSON; one summary per {log_every_tables} tables in timestamped training JSONL",
+        "log_every_tables": log_every_tables,
+        "checkpoint_writes": "background thread" if writer is not None else "blocking",
+        "checkpoint_upload": store.describe() if store is not None else None,
     }
     write_json(directory / "training_plan.json", plan)
     emit_training_event("training_plan", **plan)
@@ -247,6 +311,7 @@ def fit_timed(
         return run_seconds is not None and clock() - run_started >= run_seconds
 
     def persist(stop_reason=None):
+        nonlocal first_upload_pending
         optimizer.zero_grad(set_to_none=True)
         state["memory_execution"] = {
             "microbatch_limits": getattr(model, "_microbatch_limits", {}),
@@ -272,7 +337,14 @@ def fit_timed(
             stop_reason,
             loop_state=dict(state),
             weight_average=average,
+            writer=writer,
         )
+        if first_upload_pending:
+            # Prove the whole path once, with the real file, before relying on
+            # it for the rest of the run: wait for this checkpoint to be
+            # written, uploaded and verified, and stop if that fails.
+            writer.finish(require_upload=True)
+            first_upload_pending = False
         write_json(directory / "loss_history.json", history)
         write_json(
             directory / "learning_rate_scheduler.json",
@@ -288,6 +360,7 @@ def fit_timed(
             active_training_seconds=state["active_training_seconds"],
             pending_validation=state["pending_validation"],
             stop_reason=stop_reason,
+            checkpoint_write="background" if writer is not None else "blocking",
         )
 
     def evaluate(*, baseline=False):
@@ -310,6 +383,9 @@ def fit_timed(
             )
             if improved:
                 best_step = state["step"]
+                if writer is not None:
+                    # A checkpoint still being written may be reading this file.
+                    writer.finish()
                 atomic_torch_save({"state_dict": model.state_dict()}, best_path)
         rows = result.pop("tables", [])
         index = 0 if baseline else state["validation_checks"] + 1
@@ -394,6 +470,77 @@ def fit_timed(
         if stopped and not baseline:
             reason = "early_stopping"
 
+    # With training.log_every_tables set, the journal and the console get one
+    # summary per that many tables instead of one record per update.
+    interval = {}
+
+    def reset_interval():
+        interval.clear()
+        interval.update(
+            tables=0,
+            updates=0,
+            loss_sum=0.0,
+            mass=0.0,
+            points=0,
+            microbatches=0,
+            oom_retries=0,
+            preparation=0.0,
+            optimizer=0.0,
+            peak_gib=None,
+            norm_max=0.0,
+            last=None,
+        )
+
+    def add_to_interval(result, mass, learning_rate, progress):
+        interval["tables"] += result["windows"]
+        interval["updates"] += 1
+        interval["loss_sum"] += result["loss"] * mass
+        interval["mass"] += mass
+        interval["points"] += result["target_points"]
+        interval["microbatches"] += result["microbatches"]
+        interval["oom_retries"] += result.get("oom_retries", 0)
+        interval["preparation"] += result["preparation_wait_seconds"]
+        interval["optimizer"] += result["optimizer_update_seconds"]
+        interval["norm_max"] = max(interval["norm_max"], result["gradient_norm"])
+        peak = result.get("cuda_peak_allocated_gib")
+        if peak is not None:
+            interval["peak_gib"] = max(interval["peak_gib"] or 0.0, peak)
+        interval["last"] = (result, learning_rate, progress)
+
+    def emit_interval():
+        result, learning_rate, progress = interval["last"]
+        emit_training_event(
+            "metrics",
+            global_step=state["step"],
+            run_step=state["step"],
+            epoch=state["epoch"],
+            train_loss=interval["loss_sum"] / interval["mass"]
+            if interval["mass"]
+            else result["loss"],
+            train_loss_scope="mean over the updates since the previous record",
+            train_loss_last_update=result["loss"],
+            learning_rate=learning_rate,
+            gradient_norm=result["gradient_norm"],
+            gradient_norm_max=interval["norm_max"],
+            updates=interval["updates"],
+            windows=interval["tables"],
+            microbatches=interval["microbatches"],
+            oom_retries=interval["oom_retries"],
+            cuda_allocated_gib=result.get("cuda_allocated_gib"),
+            cuda_reserved_gib=result.get("cuda_reserved_gib"),
+            cuda_peak_allocated_gib=interval["peak_gib"],
+            preparation_wait_seconds=interval["preparation"],
+            optimizer_update_seconds=interval["optimizer"],
+            embedding_shapes=result.get("embedding_shapes"),
+            target_points=interval["points"],
+            active_training_seconds=state["active_training_seconds"],
+            training_target_points_processed=points_processed,
+            log_every_tables=log_every_tables,
+            **progress,
+        )
+
+    reset_interval()
+    reported_first = False
     if early.bad_epochs >= early.patience:
         reason = "early_stopping"
     if previous is None and t.get("validate_before_training", True):
@@ -505,30 +652,32 @@ def fit_timed(
                 entry.update(progress)
                 history.append(entry)
                 del history[:-1000]
-                emit_training_event(
-                    "metrics",
-                    global_step=state["step"],
-                    run_step=state["step"],
-                    epoch=state["epoch"],
-                    train_loss=result["loss"],
-                    learning_rate=learning_rate,
-                    gradient_norm=result["gradient_norm"],
-                    windows=result["windows"],
-                    microbatches=result["microbatches"],
-                    oom_retries=result.get("oom_retries", 0),
-                    cuda_allocated_gib=result.get("cuda_allocated_gib"),
-                    cuda_reserved_gib=result.get("cuda_reserved_gib"),
-                    cuda_peak_allocated_gib=result.get("cuda_peak_allocated_gib"),
-                    preparation_wait_seconds=result["preparation_wait_seconds"],
-                    optimizer_update_seconds=result["optimizer_update_seconds"],
-                    embedding_shapes=result.get("embedding_shapes"),
-                    target_points=result["target_points"],
-                    window_ids=[r["id"] for batch in group for r in batch],
-                    sources=[r["source"] for batch in group for r in batch],
-                    active_training_seconds=state["active_training_seconds"],
-                    training_target_points_processed=points_processed,
-                    **progress,
-                )
+                add_to_interval(result, mass, learning_rate, progress)
+                if log_every_tables is None:
+                    emit_training_event(
+                        "metrics",
+                        global_step=state["step"],
+                        run_step=state["step"],
+                        epoch=state["epoch"],
+                        train_loss=result["loss"],
+                        learning_rate=learning_rate,
+                        gradient_norm=result["gradient_norm"],
+                        windows=result["windows"],
+                        microbatches=result["microbatches"],
+                        oom_retries=result.get("oom_retries", 0),
+                        cuda_allocated_gib=result.get("cuda_allocated_gib"),
+                        cuda_reserved_gib=result.get("cuda_reserved_gib"),
+                        cuda_peak_allocated_gib=result.get("cuda_peak_allocated_gib"),
+                        preparation_wait_seconds=result["preparation_wait_seconds"],
+                        optimizer_update_seconds=result["optimizer_update_seconds"],
+                        embedding_shapes=result.get("embedding_shapes"),
+                        target_points=result["target_points"],
+                        window_ids=[r["id"] for batch in group for r in batch],
+                        sources=[r["source"] for batch in group for r in batch],
+                        active_training_seconds=state["active_training_seconds"],
+                        training_target_points_processed=points_processed,
+                        **progress,
+                    )
                 checkpoint_due = (
                     state["active_training_seconds"] - state["last_checkpoint_seconds"]
                     >= checkpoint_interval
@@ -537,12 +686,33 @@ def fit_timed(
                     state["active_training_seconds"] - state["last_validation_seconds"]
                     >= validation_interval
                 )
-                if (
-                    state["step"] == 1
-                    or state["step"] % 100 == 0
-                    or checkpoint_due
+                stopping = (
+                    checkpoint_due
                     or state["pending_validation"]
-                ):
+                    or expired()
+                    or (total_budget is not None and state["step"] >= total_budget)
+                )
+                if log_every_tables is None:
+                    report = (
+                        state["step"] == 1
+                        or state["step"] % 100 == 0
+                        or checkpoint_due
+                        or state["pending_validation"]
+                    )
+                else:
+                    # Also before a checkpoint, a validation or the end, so the
+                    # journal's sums cover every update.
+                    report = (
+                        interval["tables"] >= log_every_tables
+                        or not reported_first
+                        or stopping
+                    )
+                    if report:
+                        emit_interval()
+                if report:
+                    reported_first = True
+                    if writer is not None:
+                        writer.raise_if_failed()
                     logger.info(
                         "EPOCH {} | update {:,}/{:,} ({:.2f}%) | global {:,} | loss={:.6f} | epoch training ETA {} | checkpoint in {} | validation in {} | run remaining {}",
                         state["epoch"],
@@ -587,30 +757,34 @@ def fit_timed(
                             result["embedding_shapes"],
                             result["oom_retries"],
                         )
-                    recent = [
-                        h
-                        for h in history[-100:]
-                        if h["epoch"] == state["epoch"]
-                        and "preparation_wait_seconds" in h
-                    ]
+                    if log_every_tables is None:
+                        recent = [
+                            h
+                            for h in history[-100:]
+                            if h["epoch"] == state["epoch"]
+                            and "preparation_wait_seconds" in h
+                        ]
+                        count = len(recent)
+                        waited = sum(h["preparation_wait_seconds"] for h in recent)
+                        worked = sum(h["optimizer_update_seconds"] for h in recent)
+                        passes = sum(h["microbatches"] for h in recent)
+                        tables = sum(h["windows"] for h in recent)
+                    else:
+                        count, tables = interval["updates"], interval["tables"]
+                        waited, worked = interval["preparation"], interval["optimizer"]
+                        passes = interval["microbatches"]
+                    reset_interval()
                     logger.info(
                         "THROUGHPUT last {} updates | preparation wait {:.1f} ms/update | "
-                        "model/optimizer {:.1f} ms/update | physical microbatches {:.2f}/update",
-                        len(recent),
-                        1000
-                        * sum(h["preparation_wait_seconds"] for h in recent)
-                        / len(recent),
-                        1000
-                        * sum(h["optimizer_update_seconds"] for h in recent)
-                        / len(recent),
-                        sum(h["microbatches"] for h in recent) / len(recent),
+                        "model/optimizer {:.1f} ms/update | physical microbatches {:.2f}/update | "
+                        "{:.1f} tables/s",
+                        count,
+                        1000 * waited / count,
+                        1000 * worked / count,
+                        passes / count,
+                        tables / max(waited + worked, 1e-9),
                     )
-                if (
-                    checkpoint_due
-                    or state["pending_validation"]
-                    or expired()
-                    or (total_budget is not None and state["step"] >= total_budget)
-                ):
+                if stopping:
                     break
         finally:
             updates.close()
@@ -633,6 +807,9 @@ def fit_timed(
         budget_reason = reason
         evaluate()
         reason = budget_reason
+    if log_every_tables is not None and interval["updates"]:
+        emit_interval()  # updates since the last summary
+        reset_interval()
     logger.info(
         "TIMED TRAIN stopping: reason={} update={} epoch={} next_batch={} active_training={} elapsed_run={}",
         reason,
@@ -643,6 +820,27 @@ def fit_timed(
         duration(clock() - run_started),
     )
     persist(reason)
+    if writer is not None:
+        # The final checkpoint (and its cloud copy) must be complete before
+        # the run reports success.
+        writer.finish()
+        if store is not None:
+            if writer.last_upload is None or writer.upload_failures:
+                logger.warning(
+                    "Checkpoint uploads this run: {} completed, {} failed, {} abandoned. "
+                    "Check the container before relying on the cloud copy.",
+                    writer.uploads,
+                    writer.upload_failures,
+                    writer.uploads_abandoned,
+                )
+            else:
+                logger.info(
+                    "Checkpoint uploads this run: {} completed, 0 failed, {} abandoned; "
+                    "latest blob={}",
+                    writer.uploads,
+                    writer.uploads_abandoned,
+                    writer.last_upload["blob"],
+                )
     exported_step = state["step"]
     restored_best = best_step is not None and best_step > 0
     if restored_best:

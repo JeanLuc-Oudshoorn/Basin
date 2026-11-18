@@ -374,7 +374,9 @@ class PatchEncoder(nn.Module):
         padded_tokens = (tokens + 15) // 16 * 16
         if padded_tokens > self.config.max_patches:
             raise ValueError("Token count exceeds configured kernel context")
-        logger.debug(
+        # Once per table, in training and in validation: TRACE keeps it out of
+        # the DEBUG log file, which is written through the Windows-drive mount.
+        logger.trace(
             "Next-patch tokens={} padded={} variables={} training={}",
             tokens,
             padded_tokens,

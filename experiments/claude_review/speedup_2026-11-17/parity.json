@@ -1,0 +1,11 @@
+{
+ "identical": true,
+ "updates_compared": 96,
+ "updates_clipped": 29,
+ "clip_limit_after_calibration": 0.2549309954047203,
+ "tensors_compared_per_update": 5202,
+ "parameters": 221507808,
+ "mismatches": [],
+ "peak_allocated_gib": 8.26,
+ "reserved_gib": 9.21
+}
