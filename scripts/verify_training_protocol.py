@@ -13,9 +13,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/05_model_training"))
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
-from embed import embed
+from index_patches import build_patch_index
 from train import load_config, run_context, train
 from transform import transform_next_patch, write_json
 
@@ -48,7 +48,7 @@ def main():
                 },
             )
         config["logging"]["level"] = "INFO"
-        for name in ("raw", "processed", "embedded", "training"):
+        for name in ("raw", "processed", "patch_index", "training"):
             config["paths"][name] = str(base / name)
         config["paths"]["forecasts"] = str(audit / "smoke_forecasts")
         config["paths"]["holdout_test"] = str(audit / "holdout_test")
@@ -67,8 +67,8 @@ def main():
             ).to_parquet(path / "data.parquet", index=False)
         with run_context(config, "transform"):
             transform_next_patch(config)
-        with run_context(config, "embed"):
-            embed(config)
+        with run_context(config, "index_patches"):
+            build_patch_index(config)
         with run_context(config, "train"):
             train(config)
         # Exercise the independent holdout entry point against its saved split.

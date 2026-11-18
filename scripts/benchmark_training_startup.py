@@ -15,9 +15,9 @@ from loguru import logger
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/05_model_training"))
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
-from embed import PatchEncoder
+from index_patches import PatchEncoder
 from token_inventory import prepare_token_inventory
 from training_protocol import split_datasets
 from transform import load_config, location, read_artifact, write_json
@@ -41,7 +41,7 @@ def main():
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     started = perf_counter()
-    data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
     load_seconds = perf_counter() - started
     started = perf_counter()
     groups = split_datasets(data["records"], config)

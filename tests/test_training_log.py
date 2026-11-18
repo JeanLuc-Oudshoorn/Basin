@@ -189,7 +189,7 @@ with training_run(json.loads(os.environ['BASIN_TEST_CONFIG']),'train'):
         with tempfile.TemporaryDirectory() as directory:
             config = load_config()
             config["paths"]["logs"] = directory
-            config["paths"]["embedded"] = str(Path(directory) / "missing")
+            config["paths"]["patch_index"] = str(Path(directory) / "missing")
             for entry in [train, run]:
                 with self.assertRaises(FileNotFoundError):
                     entry(config)

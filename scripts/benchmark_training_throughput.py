@@ -17,11 +17,11 @@ from loguru import logger
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/05_model_training"))
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
 from batching import make_batches
-from embed import LazyPatchRecord, PatchEncoder
 from epoch_training import accumulated_update
+from index_patches import LazyPatchRecord, PatchEncoder
 from performance import configure_cuda_memory, prepare_update
 from train import ForecastConfig, RWKVForecaster
 from training_log import emit_training_event, training_run
@@ -100,7 +100,7 @@ def run_benchmark(args, config):
             "run scripts/prepare_live_training_sample.py first"
         )
     if not sample_path.exists():
-        data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+        data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
         training, validation, _, _ = split_datasets(data["records"], config)
         rng = random.Random(config["seed"])  # nosec B311
         sample = rng.sample(training, min(512, len(training)))

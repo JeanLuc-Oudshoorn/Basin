@@ -7,8 +7,8 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
-from embed import ForecastConfig, PatchEncoder
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
+from index_patches import ForecastConfig, PatchEncoder
 
 
 def encoder(objective):

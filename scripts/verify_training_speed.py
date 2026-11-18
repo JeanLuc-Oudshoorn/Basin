@@ -9,12 +9,12 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from embed import ForecastConfig, LazyPatchRecord, PatchEncoder
 from epoch_training import fit_epochs
+from index_patches import ForecastConfig, LazyPatchRecord, PatchEncoder
 from performance import make_optimizer
 from train import RWKVForecaster
 from training_protocol import validate

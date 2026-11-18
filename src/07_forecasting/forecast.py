@@ -41,14 +41,15 @@ def forecast(config):
 
     directory = location(config, "forecasts")
     directory.mkdir(parents=True, exist_ok=True)
-    data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
     checkpoint = location(config, "training") / "model.pt"
     metadata = read_artifact(checkpoint, config)
-    if metadata["embedding_sha256"] != file_digest(
-        location(config, "embedded") / "embeddings.pt"
-    ):
+    # Models exported before the stage was renamed recorded `embedding_sha256`.
+    if metadata.get(
+        "patch_index_sha256", metadata.get("embedding_sha256")
+    ) != file_digest(location(config, "patch_index") / "patch_index.pt"):
         raise ValueError(
-            "Embedding artifact changed since training: train again before evaluation"
+            "Patch index changed since training: train again before evaluation"
         )
     with timed("load trained checkpoint", cuda=True):
         torch.set_num_threads(config["training"].get("cpu_threads", 4))
@@ -64,9 +65,7 @@ def forecast(config):
             if r["split"] == "evaluation" and r["source"] in test_sources
         ]
         if {r["source"] for r in records} != test_sources:
-            raise ValueError(
-                "Checkpoint holdout sources missing from embedding artifact"
-            )
+            raise ValueError("Checkpoint holdout sources missing from patch index")
         records, selection = sample_holdout(records, config)
         from holdout import holdout_directory
 

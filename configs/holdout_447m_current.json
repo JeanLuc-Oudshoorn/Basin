@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/01_generated",
     "processed": "data/02_processed/model",
-    "embedded": "data/03_embedded/model",
+    "patch_index": "data/03_patch_index/model",
     "training": "results/447m_model/training",
     "holdout_test": "results/447m_model/holdout_test/current_holdout",
     "forecasts": "results/model/forecasts",
@@ -206,7 +206,7 @@
       "uncertainty_samples": 0
     }
   },
-  "embedding": {
+  "patch_index": {
     "cpu_threads": 2,
     "progress_every": 1000
   }

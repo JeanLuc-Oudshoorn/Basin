@@ -78,7 +78,7 @@ def main():
             model, dict(options, training_cuda_graphs=False), ROOT
         )
         initial = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-        data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+        data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
         training, validation, test, split = split_datasets(data["records"], config)
         epoch = make_batches(
             training,

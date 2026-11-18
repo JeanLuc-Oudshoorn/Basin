@@ -195,7 +195,9 @@ def _add_record(index, record, split, patch):
     # Cached legacy features can be checked, but lazy records must not tokenize
     # an entire window merely to count its raw patches.
     if "prepared" in record and record["prepared"]["tokens"] != n_inputs:
-        raise ValueError("Patch count differs from saved features; rerun embedding")
+        raise ValueError(
+            "Patch count differs from saved features; rerun index_patches.py"
+        )
     for variable, name in enumerate(record["variable_names"]):
         for t in range(n_inputs):
             index.add(
@@ -498,7 +500,7 @@ def prepare_token_inventory(data, config, *, groups):
 
 
 def main():
-    # These local imports keep this module usable from the embedding/training APIs.
+    # These local imports keep this module usable from the patch-index/training APIs.
     import sys
 
     root = Path(__file__).resolve().parents[2]
@@ -509,12 +511,12 @@ def main():
     parser.add_argument("--config", default=str(root / "configs/config.json"))
     args = parser.parse_args()
     config = load_config(args.config)
-    data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
     if data["processed_sha256"] != file_digest(
         location(config, "processed") / "windows.pt"
     ):
         raise ValueError(
-            "Processed data changed; rerun embedding before counting tokens"
+            "Processed data changed; rerun index_patches.py before counting tokens"
         )
     write_token_inventory(data, config)
 

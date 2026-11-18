@@ -202,14 +202,18 @@ def split_datasets(records, config):
             elif source in test_sources:
                 test.append(record)
     if missing_train_sources:
-        raise ValueError("Missing training records; rerun transform and embed")
+        raise ValueError(
+            "Missing training records; rerun transform.py and index_patches.py"
+        )
     del missing_train_sources
     for name, group, expected in (
         ("validation", validation, validation_sources),
         ("test", test, test_sources),
     ):
         if {r["source"] for r in group} != expected:
-            raise ValueError(f"Missing {name} records; rerun transform and embed")
+            raise ValueError(
+                f"Missing {name} records; rerun transform.py and index_patches.py"
+            )
         if name != "training" and len(group) != len(expected):
             raise ValueError(f"Expected exactly one {name} record per dataset")
     audit = {

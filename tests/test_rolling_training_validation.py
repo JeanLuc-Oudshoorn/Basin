@@ -15,13 +15,12 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from embed import ForecastConfig, LazyPatchRecord
-from embed import embed as prepare_embeddings
 from epoch_training import fit_epochs
+from index_patches import ForecastConfig, LazyPatchRecord, build_patch_index
 from rolling_validation import (
     select_validation_origins,
     validate_origins,
@@ -55,7 +54,7 @@ class RollingTrainingValidationTests(unittest.TestCase):
             config["paths"].update(
                 raw=str(root / "raw"),
                 processed=str(root / "processed"),
-                embedded=str(root / "embedded"),
+                patch_index=str(root / "patch_index"),
             )
             for i, length in enumerate((48, 160, 192, 224)):
                 path = root / "raw" / str(i)
@@ -75,8 +74,8 @@ class RollingTrainingValidationTests(unittest.TestCase):
                     if r["split"] == "evaluation"
                 )
             )
-            prepare_embeddings(config)
-            indexed = read_artifact(root / "embedded/embeddings.pt", config)
+            build_patch_index(config)
+            indexed = read_artifact(root / "patch_index/patch_index.pt", config)
             self.assertEqual(len(indexed["records"]), len(payload["records"]))
             short_record = next(
                 r

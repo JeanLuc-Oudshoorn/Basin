@@ -15,14 +15,14 @@ from loguru import logger
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
     "06_holdout_test",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from embed import embed
 from fast_inference import configure_fast_inference
 from holdout_test import run as holdout_run
+from index_patches import build_patch_index
 from train import RWKVForecaster, train
 from transform import load_config, run_context, transform_next_patch, write_json
 
@@ -84,7 +84,7 @@ def main():
         config["paths"].update(
             raw=str(base / "raw"),
             processed=str(base / "processed"),
-            embedded=str(base / "embedded"),
+            patch_index=str(base / "patch_index"),
             training=str(base / "training"),
             holdout_test=str(output / "holdout"),
         )
@@ -104,7 +104,7 @@ def main():
             ).to_parquet(path / "data.parquet")
         with run_context(config, "four_token_policy_smoke"):
             transform_next_patch(config)
-            embed(config)
+            build_patch_index(config)
             train(config)
             history = json.loads(
                 (base / "training/validation_history.json").read_text()

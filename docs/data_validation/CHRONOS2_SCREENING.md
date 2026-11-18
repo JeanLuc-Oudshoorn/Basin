@@ -30,7 +30,7 @@ reports, hashing sources for admission, or loading a screening model. It records
 never-screened tables are both eligible. Normal transformation checks for valid
 data, input roles and sufficient sequence length still apply.
 
-You can proceed directly to transform and embedding. If you run the validation
+You can proceed directly to transform and patch indexing. If you run the validation
 script anyway, it logs the skip and exits successfully without scanning tables
 or starting WSL. It does not fabricate forecast scores or change the latest
 screening report. Existing reports are preserved.
@@ -64,7 +64,7 @@ never enter screening. Input histories must be finite and times strictly increas
 ```powershell
 uv run python src/02_data_validation/validate_generated_data.py
 uv run python src/03_transforming_input_data/transform.py
-uv run python src/04_creating_embeddings/embed.py
+uv run python src/04_patch_indexing/index_patches.py
 ```
 
 One model is loaded once, with CUDA selected automatically through the existing
@@ -90,7 +90,7 @@ missing or stale, unless `validation.auto_run=false` requires an explicit run.
 An already running Bolt process keeps its loaded configuration and model.
 Restart validation to use Chronos-2; changing the files does not switch a live
 process. Existing reports remain in their original run folders. Rerun transform
-and embed to apply the new selection before training.
+and index_patches to apply the new selection before training.
 
 ## Verification
 

@@ -221,7 +221,7 @@ def validation_windows(records, config, *, encoder=None):
         )
         record = dict(descriptor, batch=batch)
         if encoder is not None:
-            from embed import LazyPatchRecord
+            from index_patches import LazyPatchRecord
 
             yield LazyPatchRecord(record, encoder)
         else:

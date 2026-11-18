@@ -179,7 +179,7 @@ Start a fresh run with `training.resume=false` (or a new training output
 directory) when migrating from overlapping in-sample validation: those weights
 may have trained on the newly reserved validation tables. Auto-resume rejects
 the old policy. This split-only change does not require rebuilding compatible
-transform/embed artifacts. Existing saved split/results are not retroactively
+transform/index_patches artifacts. Existing saved split/results are not retroactively
 rewritten or made unbiased.
 
 In JSON, write `"resume": false` with no quotes around `false` for a fresh
@@ -193,7 +193,7 @@ CPU buckets for batched GPU execution. Tokenized contexts live only until
 their batch is consumed. No full 125,000-context embedding cache is created.
 Transformation also stores only source metadata for evaluation entries under
 this policy, rather than duplicating raw tail/context tensors for every table.
-The embedding preparation stage indexes these entries without tokenizing them.
+The patch indexing stage indexes these entries without tokenizing them.
 
 Sharded corpora use tensor-free `.record_metadata` sidecars for startup scans and
 batch planning. New transformation spills publish these automatically. Older
@@ -390,12 +390,12 @@ optimizer cursor. Always resume from `latest_checkpoint.pt`, not `model.pt`.
 
 ## Migrating from reserved-tail artifacts
 
-The default data policy changes the processed/embedding signature and gradient
+The default data policy changes the processed/patch-index signature and gradient
 labels. Recreate those two stages for the new corpus/policy:
 
 ```powershell
 uv run python .\src\03_transforming_input_data\transform.py
-uv run python .\src\04_creating_embeddings\embed.py
+uv run python .\src\04_patch_indexing\index_patches.py
 ```
 
 Start this as a new training run: old reserved-tail checkpoints cannot resume

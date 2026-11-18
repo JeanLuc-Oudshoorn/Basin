@@ -22,7 +22,7 @@ WORK = ROOT / ".cache/port_work"
 for directory in (
     "",
     "src/03_transforming_input_data",
-    "src/04_creating_embeddings",
+    "src/04_patch_indexing",
     "src/05_model_training",
     "src/06_holdout_test",
 ):

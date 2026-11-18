@@ -48,7 +48,9 @@ class HoldoutStartupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             config = load_config()
-            source = "data/01_generated/2026-11-06/table/data.parquet"
+            # Any selected date folder: the test must not depend on which ones.
+            date = config["data"]["generated_dates"][0]
+            source = f"data/01_generated/{date}/table/data.parquet"
             split = {
                 "seed": config["seed"],
                 "requested_test_tables": config["training"]["holdout_tables"],
@@ -161,7 +163,7 @@ class HoldoutStartupTests(unittest.TestCase):
             config["paths"].update(
                 training=str(base / "training"),
                 holdout_test=str(base / "output"),
-                embedded=str(base / "missing_embeddings"),
+                patch_index=str(base / "missing_patch_index"),
                 processed=str(base / "missing_windows"),
                 logs=str(base / "logs"),
             )
@@ -210,7 +212,7 @@ class HoldoutStartupTests(unittest.TestCase):
             self.assertEqual(record["targets"], ["outcome"])
             self.assertEqual(record["roles"]["past"], ["past"])
             self.assertEqual(record["source_rows"], 64)
-            self.assertFalse(Path(config["paths"]["embedded"]).exists())
+            self.assertFalse(Path(config["paths"]["patch_index"]).exists())
             self.assertFalse(Path(config["paths"]["processed"]).exists())
 
     def test_schema_requires_saved_policy_columns(self):

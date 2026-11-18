@@ -381,7 +381,7 @@ def main():
         "src/05_model_training/recurrent_kernel.cu",
         "src/05_model_training/multi_horizon.py",
         "src/05_model_training/epoch_training.py",
-        "src/04_creating_embeddings/embed.py",
+        "src/04_patch_indexing/index_patches.py",
         "src/06_holdout_test/holdout.py",
         "configs/config.json",
         "scripts/investigate_forecast_regression.py",

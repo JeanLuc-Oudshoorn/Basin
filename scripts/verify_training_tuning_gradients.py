@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
@@ -19,8 +19,8 @@ from runtime_storage import configure_runtime_storage
 
 configure_runtime_storage(ROOT)
 import torch
-from embed import LazyPatchRecord
 from epoch_training import _accumulated_gradients
+from index_patches import LazyPatchRecord
 from performance import configure_cuda_memory, make_optimizer, prepare_update
 from train import ForecastConfig, RWKVForecaster
 from transform import load_config, write_json

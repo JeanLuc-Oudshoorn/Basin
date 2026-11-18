@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/01_generated/2026-10-23",
     "processed": "data/02_processed/447m_model",
-    "embedded": "data/03_embedded/447m_model",
+    "patch_index": "data/03_patch_index/447m_model",
     "training": "results/capacity_300m_refinement/training",
     "forecasts": "results/capacity_300m_refinement/forecasts",
     "logs": "logs"

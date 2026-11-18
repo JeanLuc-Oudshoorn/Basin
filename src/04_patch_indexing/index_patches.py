@@ -1,12 +1,19 @@
-"""Stage 2: index patch inputs; create learned embeddings inside model training."""
+"""Index the patch inputs of every window; patch embeddings are learned in training."""
 
 import argparse
 import math
+import multiprocessing
 import os
+import queue
 import shutil
+import signal
 import sys
+from bisect import bisect_right
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
 from time import perf_counter
 from uuid import uuid4
 
@@ -17,7 +24,12 @@ from torch.nn import functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
-from embedding_progress import EmbeddingCheckpoint, EmbeddingProgress, embedding_options
+from patch_index_progress import (
+    PatchIndexCheckpoint,
+    PatchIndexProgress,
+    detail_line,
+    patch_index_options,
+)
 from sharded_records import ShardedRecords
 from transform import (
     file_digest,
@@ -28,7 +40,7 @@ from transform import (
     save_artifact,
     timed,
 )
-from transform_progress import atomic_json, atomic_write
+from transform_progress import atomic_json, atomic_write, digest
 
 
 @dataclass(frozen=True)
@@ -430,10 +442,12 @@ def open_patch_index(index, config):
     """Expose legacy record APIs while keeping raw tensors memory mapped."""
     path = location(config, "processed") / "windows.pt"
     if file_digest(path) != index["processed_sha256"]:
-        raise ValueError("Processed data changed: rerun embed.py to rebuild its index")
+        raise ValueError(
+            "Processed data changed: rerun index_patches.py to rebuild its index"
+        )
     processed = read_artifact(path, config)
     if len(processed["records"]) != index["record_count"]:
-        raise ValueError("Patch index window count mismatch; rerun embed.py")
+        raise ValueError("Patch index window count mismatch; rerun index_patches.py")
     settings = dict(config["model"], quantiles=tuple(config["model"]["quantiles"]))
     # Initialization is reproducible without advancing the caller's RNG stream.
     with torch.random.fork_rng(devices=[]):
@@ -500,16 +514,136 @@ def record_summary(record, settings):
     }, math.prod(shape) * 4
 
 
-def embed(config):
+def window_detail(record, settings, policy):
+    """Summarize one record, after checking that it holds what its policy needs."""
+    if "batch" not in record and policy != "sampled_training_origins":
+        raise ValueError(f"Missing raw training batch: {record['id']}")
+    return record_summary(record, settings)
+
+
+# Starting worker processes costs a few seconds; smaller jobs are inspected in place.
+WORKER_MINIMUM_SHARDS = 8
+
+_worker = {}
+
+
+def worker_count(options, records, start):
+    """Worker processes for the records from `start` on; 0 inspects them in place."""
+    if not isinstance(records, ShardedRecords) or start >= len(records):
+        return 0
+    if options["workers"] is not None:
+        return options["workers"]
+    remaining = len(records.shards) - bisect_right(records.ends, start)
+    if remaining < WORKER_MINIMUM_SHARDS:
+        return 0
+    return min(8, (os.cpu_count() or 2) // 2)
+
+
+def start_worker(processed_path, config):
+    """Pool initializer: open the shard index once and leave Ctrl+C to the parent."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING")
+    torch.set_num_threads(1)
+    settings = dict(config["model"], quantiles=tuple(config["model"]["quantiles"]))
+    _worker.update(
+        records=read_artifact(Path(processed_path), config)["records"],
+        settings=ForecastConfig(**settings),
+        policy=config["data"].get("validation_policy"),
+    )
+
+
+def summarize_shard(task):
+    """Output lines and size estimates for records [start, stop) of one shard."""
+    shard, start, stop = task
+    records = _worker["records"]
+    # The parent process checked this shard's checksum just before sending it.
+    records.verified.add(shard)
+    lines, estimates = [], []
+    for position in range(start, stop):
+        detail, estimated_bytes = window_detail(
+            records[position], _worker["settings"], _worker["policy"]
+        )
+        lines.append(detail_line(detail))
+        estimates.append(estimated_bytes)
+    records.cached = None
+    records.cached_index = None
+    return lines, estimates
+
+
+@contextmanager
+def shard_summaries(records, start, workers, processed_path, config):
+    """Iterate `summarize_shard` results for the records from `start` on, in order.
+
+    One thread checks the shards' checksums in file order, so that a hard disk
+    reads them as a single stream, and hands each verified shard to a worker
+    process, which opens it and inspects its records.
+    """
+    pending = queue.Queue(maxsize=2 * workers)
+    stop = Event()
+
+    def offer(item):
+        while not stop.is_set():
+            try:
+                return pending.put(item, timeout=0.2)
+            except queue.Full:
+                pass
+
+    def verify_ahead(pool):
+        try:
+            for shard in range(bisect_right(records.ends, start), len(records.shards)):
+                if stop.is_set():
+                    return
+                path = records.directory / records.shards[shard]["path"]
+                if digest(path) != records.shards[shard]["sha256"]:
+                    raise ValueError(f"Corrupt processed shard: {path}")
+                first = max(start, records.ends[shard - 1] if shard else 0)
+                task = shard, first, records.ends[shard]
+                offer(pool.submit(summarize_shard, task))
+            offer(None)
+        except BaseException as error:  # raised again where results are consumed
+            offer(error)
+
+    def results():
+        while True:
+            item = pending.get()
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item.result()
+
+    logger.info("Inspecting shards in {} worker processes", workers)
+    # Unlike multiprocessing.Pool, this reports a worker that died instead of
+    # waiting forever for its result.
+    pool = ProcessPoolExecutor(
+        workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=start_worker,
+        initargs=(str(processed_path), config),
+    )
+    reader = Thread(
+        target=verify_ahead, args=(pool,), daemon=True, name="shard-verifier"
+    )
+    try:
+        reader.start()
+        yield results()
+    finally:
+        stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+        reader.join()
+
+
+def build_patch_index(config):
     """Index windows in bounded batches and resume from a durable JSONL prefix."""
     import psutil
 
-    options = embedding_options(config.get("embedding", {}))
+    options = patch_index_options(config.get("patch_index", {}))
     threads = options["cpu_threads"]
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(threads)
-    directory = location(config, "embedded")
-    temporary = directory / f".embeddings_{uuid4().hex}.tmp"
+    directory = location(config, "patch_index")
+    temporary = directory / f".patch_index_{uuid4().hex}.tmp"
     started = perf_counter()
     process = psutil.Process()
     try:
@@ -527,9 +661,9 @@ def embed(config):
         if not count:
             raise ValueError("Processed artifact has no windows")
         implementation = file_digest(Path(__file__)) + file_digest(
-            Path(__file__).with_name("embedding_progress.py")
+            Path(__file__).with_name("patch_index_progress.py")
         )
-        with EmbeddingCheckpoint(
+        with PatchIndexCheckpoint(
             directory,
             processed["signature"],
             processed_sha256,
@@ -539,7 +673,7 @@ def embed(config):
         ) as checkpoint:
             checkpoint.restore()
             initial = checkpoint.position
-            progress = EmbeddingProgress(count, initial, options["progress_every"])
+            progress = PatchIndexProgress(count, initial, options["progress_every"])
             logger.info(
                 "Patch preparation: windows={} batch={} CPU threads={} RSS_GiB={:.3f}; "
                 "learned projections run only during training",
@@ -548,34 +682,48 @@ def embed(config):
                 threads,
                 process.memory_info().rss / 2**30,
             )
-            for batch_start in range(initial, count, options["batch_size_records"]):
-                batch_stop = min(count, batch_start + options["batch_size_records"])
-                for position in range(batch_start, batch_stop):
-                    record = records[position]
-                    if (
-                        "batch" not in record
-                        and config["data"].get("validation_policy")
-                        != "sampled_training_origins"
+            policy = config["data"].get("validation_policy")
+            workers = worker_count(options, records, initial)
+            if workers:
+                # Worker processes open the shards. Their results are written
+                # here in record order, with the same checkpoints as below.
+                with shard_summaries(
+                    records, initial, workers, processed_path, config
+                ) as summaries:
+                    for lines, estimates in summaries:
+                        for line, estimated_bytes in zip(lines, estimates):
+                            checkpoint.append_line(line, estimated_bytes)
+                            checkpoint.save()
+                            progress.update(checkpoint.position)
+                if checkpoint.position != count:
+                    raise RuntimeError(
+                        f"Shard inspection stopped at record {checkpoint.position}"
+                    )
+            else:
+                for batch_start in range(initial, count, options["batch_size_records"]):
+                    batch_stop = min(count, batch_start + options["batch_size_records"])
+                    for position in range(batch_start, batch_stop):
+                        record = records[position]
+                        detail, estimated_bytes = window_detail(
+                            record, encoder.config, policy
+                        )
+                        checkpoint.append(detail, estimated_bytes)
+                        checkpoint.save()
+                        progress.update(checkpoint.position)
+                        del record
+                    # Keep at most one shard mapped. Do not repeatedly deserialize
+                    # the same large shard just because a batch ends inside it.
+                    if isinstance(records, ShardedRecords) and (
+                        batch_stop == count
+                        or batch_stop >= records.ends[records.cached_index]
                     ):
-                        raise ValueError(f"Missing raw training batch: {record['id']}")
-                    detail, estimated_bytes = record_summary(record, encoder.config)
-                    checkpoint.append(detail, estimated_bytes)
-                    checkpoint.save()
-                    progress.update(checkpoint.position)
-                    del record
-                # Keep at most one shard mapped. Do not repeatedly deserialize the
-                # same large shard just because an inspection batch ends inside it.
-                if isinstance(records, ShardedRecords) and (
-                    batch_stop == count
-                    or batch_stop >= records.ends[records.cached_index]
-                ):
-                    records.cached = None
-                    records.cached_index = None
+                        records.cached = None
+                        records.cached_index = None
             checkpoint.save(force=True)
             checkpoint.status("finalizing")
             estimated_old_bytes = checkpoint.estimated_old_bytes
             logger.info(
-                "All records checkpointed. Publishing embedding index and streamed window details."
+                "All records checkpointed. Publishing patch index and streamed window details."
             )
             payload = {
                 "format": "lazy_patch_index_v1",
@@ -596,7 +744,7 @@ def embed(config):
             save_artifact(temporary, payload)
             with temporary.open("r+b") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary, directory / "embeddings.pt")
+            os.replace(temporary, directory / "patch_index.pt")
             report = {
                 "config": config,
                 "format": payload["format"],
@@ -610,7 +758,7 @@ def embed(config):
                 "cached_embedding_vectors": False,
                 "prepared_features": "computed per accessed record",
                 "avoided_float32_snapshot_bytes": estimated_old_bytes,
-                "artifact_bytes": (directory / "embeddings.pt").stat().st_size,
+                "artifact_bytes": (directory / "patch_index.pt").stat().st_size,
                 "rss_bytes_at_completion": process.memory_info().rss,
                 "available_ram_bytes": psutil.virtual_memory().available,
                 "output_disk_free_bytes": shutil.disk_usage(directory).free,
@@ -637,9 +785,9 @@ def main():
     parser.add_argument("--config", default=str(ROOT / "configs/config.json"))
     args = parser.parse_args()
     config = load_config(args.config)
-    with run_context(config, "embed"):
-        with timed("EMBED stage"):
-            embed(config)
+    with run_context(config, "index_patches"):
+        with timed("INDEX PATCHES stage"):
+            build_patch_index(config)
 
 
 if __name__ == "__main__":

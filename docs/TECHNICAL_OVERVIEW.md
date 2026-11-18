@@ -80,7 +80,7 @@ src/
   01_data_generation/
   02_data_validation/
   03_transforming_input_data/
-  04_creating_embeddings/
+  04_patch_indexing/
   05_model_training/
   06_holdout_test/
   07_forecasting/
@@ -90,9 +90,9 @@ data/
   02_processed/
     model/windows.pt              # Default model's processed windows
     447m_model/                   # Archived model's processed artifacts
-  03_embedded/
-    model/embeddings.pt            # Default model's lazy patch index
-    447m_model/                   # Archived model's embedding index
+  03_patch_index/
+    model/patch_index.pt          # Default model's lazy patch index
+    447m_model/                   # Archived model's patch index
 results/
   model/
     training/                     # model.pt, resumable timed checkpoint and metrics
@@ -580,17 +580,17 @@ date does not automatically update the pipeline's date selection.
 ```bash
 python src/02_data_validation/validate_generated_data.py
 python src/03_transforming_input_data/transform.py
-python src/04_creating_embeddings/embed.py
+python src/04_patch_indexing/index_patches.py
 ```
 
 Validation is controlled by `validation.enabled`; when false, stage 2 skips
-screening. Transformation and embedding preparation identify their input data
+screening. Transformation and patch indexing identify their input data
 and support resumable work. Successful runs update the main artifacts; old
 checkpoint directories can remain on disk. See the screening section below for
 admission rules.
 
 For a fresh training run on the new corpus, set `training.resume=false` before
-launching training. Clearing generated/processed/embedded data does not remove
+launching training. Clearing generated/processed/patch-index data does not remove
 training checkpoints or change `resume="auto"`.
 
 ### Inspection, tests and coverage review
@@ -804,20 +804,22 @@ Run the stages separately with `uv run python`:
 uv sync --extra data --extra validation
 uv run python src/02_data_validation/validate_generated_data.py
 uv run python src/03_transforming_input_data/transform.py
-uv run python src/04_creating_embeddings/embed.py
+uv run python src/04_patch_indexing/index_patches.py
 uv run python src/05_model_training/train.py
 uv run python src/06_holdout_test/holdout_test.py
 ```
 
 See the [transformation guide](transformation/README.md) for input selection,
 causal training records, evaluation policies, outputs and checkpoint recovery.
-The [embedding preparation guide](embeddings/README.md) explains bounded
-inspection batches, progress bars and resumable metadata indexing in `embed.py`.
+The [patch indexing guide](patch_index/README.md) explains what
+`index_patches.py` checks, its worker processes, progress bars and resumable
+metadata indexing.
 
 Next-patch transformation resumes automatically when the same command is rerun.
 The console shows a progress bar, completed/total tables, percentage, tables per
-second, elapsed time and ETA. It updates every 100 tables, at least every five
-seconds when a table finishes, and at completion. Source-inventory checking and
+second, elapsed time and ETA. It updates every 100 tables (less often for a corpus
+of a million tables or more), at least every five seconds when a table finishes,
+and at completion. Source-inventory checking and
 checkpoint restoration have separate bars; progress counts tables rather than rows.
 
 The checkpoint cadence is configured independently of progress logging:
@@ -846,7 +848,7 @@ uses a separate checkpoint directory. Keep source tables unchanged during a run.
 
 Transformation spills buffers after 1,000 tables or approximately 64 MiB of tensor
 data, independently of checkpoint frequency. The final `windows.pt` is a small
-shard index, published atomically without merging the corpus into RAM. Embed and
+shard index, published atomically without merging the corpus into RAM. Patch indexing and
 training read shards on demand through the artifact loader; older single-file
 artifacts remain supported. The referenced `batch_*.pt` files in the checkpoint
 directory are now the dataset itself and **must be kept** after completion.
@@ -862,6 +864,35 @@ carry-forward comparison plots. Holdout evaluation uses up to five origins per
 table, configured by `holdout.percentiles`, with table-level progress and ETA.
 Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
 slider and model toggles. Regenerate them from existing saved predictions with
+Millions of small tables on a hard disk are limited by head movement, so the
+stage avoids visiting files one at a time in name order. Source discovery lists
+each date folder once and makes one metadata lookup per table folder, in
+file-table order on Windows; a folder that holds a `data.parquet` is a table and
+is not searched further, any other folder is searched recursively. Next-patch
+transformation then reads the tables in windows, requesting the pieces of all
+files in a window in on-disk order (`source_io.py`), decodes them in worker
+processes (`table_decoder.py`) and assembles records in table order in the main
+process. None of this changes the records, shards or manifest. Four optional
+`transform` settings tune it; they are not part of the dataset signature:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `workers` | `null` | Decoding processes. `null` uses half the logical CPUs (at most 8) for 4,096 tables or more and none below; `0` decodes in the main process. |
+| `read_threads` | `8` | Threads issuing read requests within a window. |
+| `read_window_tables` | `16384` | Most tables read ahead as one window. |
+| `read_window_mb` | `512` | Most source bytes held per window; up to three windows are in memory. |
+
+Each checkpoint also logs the output written so far, the amount still expected
+and the free space on the output disk, with a warning when it will not fit.
+
+Patch indexing (`index_patches.py`, called `embed.py` until 2026-11-17) follows
+the same pattern. One thread verifies each shard's checksum in file order, so
+the disk reads the shards as one stream; worker processes open the verified
+shards and inspect their records; the main process writes the results in record
+order. The output is the same as with a single process. `patch_index.workers`
+sets the number of processes (default `null`: half the logical CPUs, at most 8,
+when eight or more shards remain; `0` inspects in the main process).
+
 `uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
 Results go to `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
@@ -877,7 +908,7 @@ resumed runs retain their recorded baseline, if available. See the
 
 ### Pre-training token inventory
 
-After embedding, inspect the amount of distinct input without starting training
+After patch indexing, inspect the amount of distinct input without starting training
 or allocating the GPU model:
 
 ```powershell
@@ -914,7 +945,7 @@ Counts use the normal trainer's actual split: full training windows on training
 tables, five-origin validation on reserved validation tables, and rolling forecasts
 on separate test tables. Held-out-table training windows are excluded. Test counts
 cover the selected holdout origins, capped contexts, and the final partial target patch,
-rather than only the final window saved by embedding. Repeated rolling context
+rather than only the final window saved by transformation. Repeated rolling context
 use is counted analytically, without running forecasts. JSON also records split
 overlaps and validation/test content not seen in training. Source-table overlap
 between splits must be zero; identical numeric content can occur in distinct tables.

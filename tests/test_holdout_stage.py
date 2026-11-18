@@ -103,7 +103,7 @@ class HoldoutStageTests(unittest.TestCase):
 
     def fixture(self):
         metadata = {
-            "embedding_sha256": "digest",
+            "patch_index_sha256": "digest",
             "dataset_split": {
                 "test_sources": ["test"],
                 "source_sha256": {"test": "digest"},

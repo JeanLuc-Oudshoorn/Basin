@@ -1,4 +1,4 @@
-"""Bounded metadata output with durable byte offsets for embedding preparation."""
+"""Bounded metadata output with durable byte offsets for patch indexing."""
 
 import hashlib
 import json
@@ -11,16 +11,18 @@ from loguru import logger
 from transform_progress import atomic_json
 
 
-def embedding_options(options):
+def patch_index_options(options):
     values = {
         "cpu_threads": options.get("cpu_threads", 2),
         "batch_size_records": options.get("batch_size_records", 1000),
         "progress_every": options.get("progress_every", 1000),
         "checkpoint_every_records": options.get("checkpoint_every_records", 100_000),
         "checkpoint_interval_seconds": options.get("checkpoint_interval_seconds"),
+        # null: choose from the number of shards; 0: inspect in this process.
+        "workers": options.get("workers"),
     }
     for name, value in values.items():
-        optional = name.startswith("checkpoint_")
+        optional = name.startswith("checkpoint_") or name == "workers"
         if value is None and optional:
             continue
         kinds = (int, float) if name == "checkpoint_interval_seconds" else (int,)
@@ -28,15 +30,22 @@ def embedding_options(options):
             isinstance(value, bool)
             or not isinstance(value, kinds)
             or not math.isfinite(value)
-            or value <= 0
+            or (value < 0 if name == "workers" else value <= 0)
         ):
             raise ValueError(
-                f"embedding.{name} must be positive" + (" or null" if optional else "")
+                f"patch_index.{name} must be "
+                + ("non-negative" if name == "workers" else "positive")
+                + (" or null" if optional else "")
             )
     return values
 
 
-class EmbeddingProgress:
+def detail_line(detail):
+    """One window's metadata as a line of the JSONL output."""
+    return (json.dumps(detail, allow_nan=False) + "\n").encode("utf-8")
+
+
+class PatchIndexProgress:
     def __init__(self, total, initial, interval):
         self.total, self.initial, self.interval = total, initial, interval
         self.started = self.last_report = perf_counter()
@@ -58,7 +67,7 @@ class EmbeddingProgress:
         filled = min(24, int(24 * fraction))
         eta = self.duration((self.total - position) / rate) if rate else "--"
         logger.info(
-            "Embed [{}{}] {}/{} records ({:.1f}%) | {:.1f} records/s | elapsed={} | ETA={}",
+            "Index [{}{}] {}/{} records ({:.1f}%) | {:.1f} records/s | elapsed={} | ETA={}",
             "#" * filled,
             "-" * (24 - filled),
             position,
@@ -76,7 +85,7 @@ class EmbeddingProgress:
         return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
 
 
-class EmbeddingCheckpoint:
+class PatchIndexCheckpoint:
     """Commit an fsynced JSONL prefix before publishing its recovery position."""
 
     def __init__(
@@ -87,7 +96,7 @@ class EmbeddingCheckpoint:
                 [signature, processed_sha256, count, implementation], sort_keys=True
             ).encode()
         ).hexdigest()
-        self.directory = directory / ".embedding_checkpoints" / identity
+        self.directory = directory / ".patch_index_checkpoints" / identity
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "progress.json"
         self.details_path = self.directory / "windows.jsonl"
@@ -124,7 +133,7 @@ class EmbeddingCheckpoint:
         except OSError as error:
             self.lock.close()
             raise RuntimeError(
-                f"Another embed run is using {self.directory.parent}"
+                f"Another index_patches run is using {self.directory.parent}"
             ) from error
         return self
 
@@ -140,13 +149,15 @@ class EmbeddingCheckpoint:
             saved = json.loads(self.path.read_text(encoding="utf-8"))
             for key in ("schema", "signature", "processed_sha256", "record_count"):
                 if saved[key] != self.state[key]:
-                    raise ValueError(f"Incompatible embed checkpoint: {self.path}")
+                    raise ValueError(
+                        f"Incompatible patch index checkpoint: {self.path}"
+                    )
             self.state = saved
         mode = "r+b" if self.details_path.exists() else "w+b"
         self.file = self.details_path.open(mode)
         if self.state["details_bytes"]:
             logger.info(
-                "Verifying saved embed metadata: {} bytes | {}",
+                "Verifying saved patch index metadata: {} bytes | {}",
                 self.state["details_bytes"],
                 self.details_path,
             )
@@ -161,27 +172,29 @@ class EmbeddingCheckpoint:
                 < chunk["completed_records"]
                 <= self.state["record_count"]
             ):
-                raise ValueError(f"Invalid embed checkpoint sequence: {self.path}")
+                raise ValueError(
+                    f"Invalid patch index checkpoint sequence: {self.path}"
+                )
             hasher = hashlib.sha256()
             remaining = chunk["stop"] - chunk["start"]
             while remaining:
                 block = self.file.read(min(1024 * 1024, remaining))
                 if not block:
                     raise ValueError(
-                        f"Truncated embed checkpoint output: {self.details_path}"
+                        f"Truncated patch index checkpoint output: {self.details_path}"
                     )
                 hasher.update(block)
                 remaining -= len(block)
                 if perf_counter() - last_report >= 5:
                     logger.info(
-                        "Checking embed checkpoint output: {}/{} bytes",
+                        "Checking patch index checkpoint output: {}/{} bytes",
                         self.file.tell(),
                         self.state["details_bytes"],
                     )
                     last_report = perf_counter()
             if hasher.hexdigest() != chunk["sha256"]:
                 raise ValueError(
-                    f"Corrupt embed checkpoint output: {self.details_path}"
+                    f"Corrupt patch index checkpoint output: {self.details_path}"
                 )
             expected = chunk["stop"]
             verified_records = chunk["completed_records"]
@@ -189,7 +202,7 @@ class EmbeddingCheckpoint:
             verified_records != self.state["completed_records"]
             or expected != self.state["details_bytes"]
         ) or not (0 <= self.state["completed_records"] <= self.state["record_count"]):
-            raise ValueError(f"Invalid embed checkpoint position: {self.path}")
+            raise ValueError(f"Invalid patch index checkpoint position: {self.path}")
         self.file.truncate(expected)
         self.file.seek(expected)
         self.position = self.state["completed_records"]
@@ -197,20 +210,22 @@ class EmbeddingCheckpoint:
         self.pending_hash = hashlib.sha256()
         self.last_save = perf_counter()
         logger.info(
-            "Embed checkpoint: {} | resuming at {}/{} records",
+            "Patch index checkpoint: {} | resuming at {}/{} records",
             self.path,
             self.position,
             self.state["record_count"],
         )
         logger.info(
-            "Embed policy: batch={} records, checkpoint_every_records={}, interval_seconds={}",
+            "Patch index policy: batch={} records, checkpoint_every_records={}, interval_seconds={}",
             self.options["batch_size_records"],
             self.options["checkpoint_every_records"],
             self.options["checkpoint_interval_seconds"],
         )
 
     def append(self, detail, estimated_bytes):
-        data = (json.dumps(detail, allow_nan=False) + "\n").encode("utf-8")
+        self.append_line(detail_line(detail), estimated_bytes)
+
+    def append_line(self, data, estimated_bytes):
         self.file.write(data)
         self.pending_hash.update(data)
         self.position += 1
@@ -248,7 +263,7 @@ class EmbeddingCheckpoint:
         self.pending_hash = hashlib.sha256()
         self.last_save = perf_counter()
         logger.info(
-            "Embed checkpoint saved: {}/{} records | {}",
+            "Patch index checkpoint saved: {}/{} records | {}",
             self.position,
             self.state["record_count"],
             self.path,

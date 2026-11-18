@@ -184,7 +184,7 @@ are also available by default. No progress watcher is required.
 
 Restart normally with `uv run python .\\src\\05_model_training\\train.py`.
 `resume="auto"` restores the existing weights, optimizer and cursor. Runtime
-execution/cadence changes do not require transform/embed to run again.
+execution/cadence changes do not require transform/index_patches to run again.
 
 ## Reproduction and raw evidence
 

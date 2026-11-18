@@ -17,7 +17,7 @@ from loguru import logger
 ROOT = Path(__file__).resolve().parents[2]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
@@ -303,7 +303,7 @@ def select_test_records(metadata, data):
         or {r["source"] for r in records} != sources
     ):
         raise ValueError(
-            "Checkpoint holdout sources missing or duplicated in embedding artifact"
+            "Checkpoint holdout sources missing or duplicated in patch index"
         )
     expected_hashes = split["source_sha256"]
     if any(r["source_sha256"] != expected_hashes[r["source"]] for r in records):
