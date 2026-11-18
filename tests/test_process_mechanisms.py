@@ -308,6 +308,29 @@ class ProcessTests(unittest.TestCase):
         )
         self.assertGreater(np.mean(np.diff(bernoulli) != 0), 0.45)
 
+    def test_markov_states_follow_the_cumulative_transition_search(self):
+        # The definition: one uniform draw per row, searched to the right in the
+        # current state's cumulative transition row. Same draws, same states.
+        rng = np.random.default_rng(11)
+        for seed in range(40):
+            count = int(rng.integers(2, 8))
+            spec = {
+                "kind": "markov",
+                "values": rng.normal(size=count).tolist(),
+                "transition": rng.dirichlet(np.full(count, 0.3), count).tolist(),
+                "initial_state": int(rng.integers(count)),
+            }
+            cumulative = np.asarray(spec["transition"]).cumsum(axis=1)
+            cumulative[:, -1] = 1.0
+            state, expected = spec["initial_state"], [spec["values"][0]] * 500
+            expected[0] = spec["values"][state]
+            draws = np.random.default_rng(seed).random(499)
+            for index, draw in enumerate(draws, 1):
+                state = int(np.searchsorted(cumulative[state], draw, side="right"))
+                expected[index] = spec["values"][state]
+            path = discrete_path(spec, np.random.default_rng(seed), 500)
+            self.assertEqual(path.tobytes(), np.asarray(expected).tobytes())
+
     def test_sampled_discrete_sources_and_hidden_causality(self):
         generator = OperationalSCMGenerator(
             "unused",

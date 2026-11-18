@@ -4,10 +4,10 @@ import sys
 from pathlib import Path
 
 # User settings (one fresh structural causal model per table).
-NUM_TABLES = 500
-SEED = 1  # Use None for a fresh random seed each execution.
+NUM_TABLES = 6_500_000
+SEED = 7  # Use None for a fresh random seed each execution.
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "01_generated"
-MIN_ROWS = 96
+MIN_ROWS = 112
 MAX_ROWS = 2056  # Inclusive.
 # Real series are usually longer than the model's context, so the model sees
 # exactly the context length. Give that length a point mass instead of leaving
@@ -33,7 +33,7 @@ LONG_LAG_PROBABILITY = (
 MAX_COVARIATE_LAG = (
     96  # Maximum delay for covariate edges, including events and switches.
 )
-INSTANTANEOUS_PROBABILITY = 0.03  # Otherwise there is at least one timestep of delay.
+INSTANTANEOUS_PROBABILITY = 0.02  # Otherwise there is at least one timestep of delay.
 COVARIATE_DELAY_SCALE = 0.75  # Exponential scale; positive lag = 1 + floor(draw).
 # Additional outcome lags in 2..7: zero/one/two with probabilities 15/75/10%.
 VARIANCE_DYNAMICS_PROBABILITY = 0.2  # Noise envelope can change even with a flat mean.
@@ -230,9 +230,10 @@ PLOT_COVARIATES = False  # False plots only the outcome.
 RENDER_WORKERS = (
     None  # Automatically use up to four plot processes; 1 renders serially.
 )
-GENERATION_WORKERS = (
-    None  # Auto: up to eight processes; 1 keeps the old serial RNG stream.
-)
+# None picks half the logical processors (at most eight): six on this machine.
+# All twelve measured 105 instead of 76 tables/s, with identical tables; use
+# None to keep the machine responsive. 1 keeps the old serial RNG stream.
+GENERATION_WORKERS = 10
 GENERATION_BATCH_SIZE = 16  # Tables per task; bounded queues avoid large memory spikes.
 PROGRESS_INTERVAL = 1.0  # Seconds between elapsed/rate/ETA console updates.
 COARSE_COPY_PROBABILITY = 0.03  # Extra thinned copy, only for originals with >512 rows.
