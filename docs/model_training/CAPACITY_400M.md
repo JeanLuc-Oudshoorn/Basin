@@ -50,7 +50,7 @@ depth-specific audit directory, preserving earlier 307M smoke reports.
 
 The existing exact-resume mechanism rejects a changed depth. Archive the
 previous default run before starting a new one, regenerate transformed data
-and the embedding index (their signatures include model configuration), then
+and the patch index (their signatures include model configuration), then
 train using the regular entrypoint. See
 [the training migration commands](SHORT_HORIZON_TRAINING.md#migration-and-preservation-of-existing-runs).
 The screening signature does not depend on depth, so a compatible four-patch

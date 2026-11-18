@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/01_generated",
     "processed": "data/02_processed/500m_model",
-    "embedded": "data/03_embedded/500m_model",
+    "patch_index": "data/03_patch_index/500m_model",
     "training": "results/500m_model/training",
     "holdout_test": "results/500m_model_rerun/holdout_test",
     "forecasts": "results/500m_model_rerun/forecasts",
@@ -235,7 +235,7 @@
     "checkpoint_every_tables": 100000,
     "checkpoint_interval_seconds": null
   },
-  "embedding": {
+  "patch_index": {
     "cpu_threads": 6,
     "batch_size_records": 10000,
     "checkpoint_every_records": 100000,

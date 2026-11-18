@@ -14,6 +14,7 @@ from loguru import logger
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/03_transforming_input_data"))
+from table_decoder import decode_table
 from transform import load_config, read_artifact, transform_next_patch
 from transform_progress import TransformCheckpoint, TransformProgress, atomic_write
 
@@ -40,7 +41,7 @@ class TransformResumeTests(unittest.TestCase):
         self.config["paths"].update(
             raw=str(self.base / "raw"),
             processed=str(self.base / "processed"),
-            embedded=str(self.base / "embedded"),
+            patch_index=str(self.base / "patch_index"),
         )
         logger.disable("transform")
         self.addCleanup(logger.enable, "transform")
@@ -67,12 +68,19 @@ class TransformResumeTests(unittest.TestCase):
                 self.config["data"]["validation_policy"] = policy
                 read_count = 0
 
-                def interrupt(path):
+                def interrupt(source):
+                    # Tables are decoded strictly in order from bytes read in bulk.
                     nonlocal read_count
                     read_count += 1
-                    if path == paths[137]:
+                    if read_count == 138:  # paths[137]
                         raise KeyboardInterrupt()
                     return self.frame
+
+                decoded = []
+
+                def recording(task, settings):
+                    decoded.append(task[0])
+                    return decode_table(task, settings)
 
                 with (
                     patch("transform.discover_source_tables", return_value=paths),
@@ -88,10 +96,11 @@ class TransformResumeTests(unittest.TestCase):
                     patch(
                         "transform.pd.read_parquet", return_value=self.frame
                     ) as reader,
+                    patch("transform.decode_table", side_effect=recording),
                 ):
                     resumed = transform_next_patch(self.config)
                 self.assertEqual(reader.call_count, 105)
-                self.assertEqual(reader.call_args_list[0].args[0], paths[100])
+                self.assertEqual(decoded, list(range(100, 205)))
                 ids = [r["id"] for r in resumed["records"]]
                 self.assertEqual(len(ids), len(set(ids)))
                 clean_config = copy.deepcopy(self.config)

@@ -72,13 +72,13 @@ Both checkpoint paths and hashes are recorded. The evaluated model's saved
 column policy is used, and any overlap between the selected split's full
 holdout and the evaluated model's recorded training sources is rejected before
 sampling. Source checksums from the split checkpoint are verified as usual.
-No old raw datasets, embedding artifacts or retraining are required. Omit
+No old raw datasets, patch-index artifacts or retraining are required. Omit
 `holdout.split_checkpoint` to retain the normal model-owned split behavior.
 
 Startup reads the checkpoint once using memory mapping, samples its saved test
 sources, and reads only the selected Parquet schemas. It uses the checkpoint's
 original target/covariate policy, independently of today's data admission filter.
-It no longer loads `embeddings.pt` or `windows.pt`, hashes the training corpus,
+It no longer loads `patch_index.pt` or `windows.pt`, hashes the training corpus,
 or materializes records for every training table. Both those upstream artifacts
 can be absent when running the holdout test. Weights are passed directly to the
 model loader without rereading the checkpoint. Startup phase durations are logged;

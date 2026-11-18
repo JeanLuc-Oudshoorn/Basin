@@ -178,6 +178,13 @@ def make_optimizer(model, training):
                 group["weight_decay"],
             )
         parameters = groups
+    extra = (
+        # The one-pass CUDA update gives the same result as the three-pass one;
+        # the option exists to compare them and as a fallback.
+        {"fused_kernel": training.get("fused_master_optimizer", True)}
+        if optimizer_class is FP32MasterAdamW
+        else {}
+    )
     return optimizer_class(
         parameters,
         lr=training["learning_rate"],
@@ -186,6 +193,7 @@ def make_optimizer(model, training):
         eps=options["eps"],
         fused=fused,
         foreach=False,
+        **extra,
     )
 
 

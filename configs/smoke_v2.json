@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/99_smoke/01_generated",
     "processed": "data/99_smoke/02_processed",
-    "embedded": "data/99_smoke/03_embedded",
+    "patch_index": "data/99_smoke/03_patch_index",
     "training": "results/smoke_v2/training",
     "holdout_test": "results/smoke_v2/holdout_test",
     "forecasts": "results/smoke_v2/forecasts",
@@ -249,7 +249,7 @@
     "checkpoint_every_tables": 100000,
     "checkpoint_interval_seconds": null
   },
-  "embedding": {
+  "patch_index": {
     "cpu_threads": 6,
     "batch_size_records": 10000,
     "checkpoint_every_records": 100000,

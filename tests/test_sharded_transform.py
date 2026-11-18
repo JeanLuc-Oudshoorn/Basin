@@ -105,12 +105,12 @@ class ShardedPipelineTests(unittest.TestCase):
         ):
             transform_next_patch(self.config)
         index = torch.load(self.base / "processed/windows.pt", weights_only=True)
-        sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
+        sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
         sys.path.insert(0, str(ROOT / "src/05_model_training"))
         from types import SimpleNamespace
 
         from batching import make_batches
-        from embed import LazyPatchRecord
+        from index_patches import LazyPatchRecord
 
         encoder = SimpleNamespace(
             config=SimpleNamespace(patch_size=16, context_length=2048)
@@ -155,7 +155,7 @@ class ShardedPipelineTests(unittest.TestCase):
             second = list(ShardedRecords(index, base))
             self.assertEqual([r["id"] for r in first], [r["id"] for r in second])
 
-    def test_table_batches_lazy_access_manifest_and_embed(self):
+    def test_table_batches_lazy_access_manifest_and_patch_index(self):
         paths = self.sources(5)
         self.config["transform"].update(batch_size_tables=2, batch_memory_limit_mb=1)
         with (
@@ -186,14 +186,14 @@ class ShardedPipelineTests(unittest.TestCase):
         self.assertEqual(len(manifest["tables"]), 5)
         self.assertEqual(manifest["excluded_tables"], [])
 
-        sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
-        from embed import embed
+        sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
+        from index_patches import build_patch_index
         from sharded_records import EncodedRecords
 
-        embed(self.config)
-        embedded = read_artifact(self.base / "embedded/embeddings.pt", self.config)
-        self.assertIsInstance(embedded["records"], EncodedRecords)
-        prepared = embedded["records"][0]["prepared"]
+        build_patch_index(self.config)
+        indexed = read_artifact(self.base / "patch_index/patch_index.pt", self.config)
+        self.assertIsInstance(indexed["records"], EncodedRecords)
+        prepared = indexed["records"][0]["prepared"]
         self.assertGreater(prepared["tokens"], 0)
 
 

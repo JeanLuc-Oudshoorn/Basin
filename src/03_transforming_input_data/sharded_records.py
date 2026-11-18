@@ -1,6 +1,10 @@
 """Read processed shards through a bounded cache; retained records hold locators."""
 
+import gzip
 import json
+import os
+import uuid
+import zlib
 from array import array
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
@@ -24,6 +28,43 @@ def write_record_metadata(directory, shard, records):
     path = Path(directory) / ".record_metadata" / f"{shard['sha256']}.json"
     atomic_json(path, {"shard_sha256": shard["sha256"], "records": metadata})
     return metadata
+
+
+def table_metadata_path(directory, shard):
+    return Path(directory) / ".table_metadata" / f"{shard['sha256']}.json.gz"
+
+
+def write_table_metadata(directory, shard, tables, excluded):
+    """Keep a shard's table entries beside it so the manifest need not load tensors.
+
+    A convenience copy: readers fall back to the shard itself when it is absent
+    or unreadable, so it is replaced atomically but not synced to disk.
+    """
+    content = json.dumps(
+        {"shard_sha256": shard["sha256"], "tables": tables, "excluded": excluded},
+        allow_nan=False,
+    ).encode("utf-8")
+    path = table_metadata_path(directory, shard)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(gzip.compress(content, compresslevel=1, mtime=0))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_table_metadata(directory, shard, shard_path):
+    """Return a shard's (tables, excluded) entries, from its copy when available."""
+    try:
+        content = table_metadata_path(directory, shard).read_bytes()
+        payload = json.loads(gzip.decompress(content))
+        if payload["shard_sha256"] == shard["sha256"]:
+            return payload["tables"], payload["excluded"]
+    except (OSError, EOFError, ValueError, KeyError, TypeError, zlib.error):
+        pass
+    batch = load_shard(shard_path)
+    return batch["tables"], batch["excluded"]
 
 
 def load_shard(path):

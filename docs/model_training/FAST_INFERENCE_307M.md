@@ -46,7 +46,7 @@ flowchart LR
 The new default artifacts live under `model` in processed,
 embedded and result directories. The former paths and settings are preserved in
 `configs/legacy_447m.json`; old weights and results are untouched. Run the transform,
-embedding preparation and training stages with the new default configuration.
+patch indexing and training stages with the new default configuration.
 The strict artifact signature includes model settings, so old preprocessing
 artifacts must not simply be renamed. New checkpoints resume automatically within
 the new training directory. The old 447M checkpoint cannot resume a 307M training run.

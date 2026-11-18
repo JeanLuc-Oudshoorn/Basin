@@ -29,7 +29,7 @@ def main():
     )
     # These do not exist: the smoke must succeed without upstream training files.
     config["paths"].update(
-        embedded=str(output / "absent_embeddings"),
+        patch_index=str(output / "absent_patch_index"),
         processed=str(output / "absent_windows"),
     )
     started = perf_counter()

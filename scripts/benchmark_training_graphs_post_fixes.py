@@ -211,7 +211,7 @@ def main():
                 ),
             )
 
-        data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+        data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
         training, validation, test, split = split_datasets(data["records"], config)
         mixed = make_batches(
             training,

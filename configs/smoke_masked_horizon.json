@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/01_generated",
     "processed": "data/02_processed",
-    "embedded": "data/03_embedded",
+    "patch_index": "data/03_patch_index",
     "training": "results/pipeline/training",
     "forecasts": "results/pipeline/forecasts",
     "logs": "logs"

@@ -14,14 +14,14 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
 from batching import make_batches
 from checkpoints import checkpoint_identity
-from embed import ForecastConfig, LazyPatchRecord
 from epoch_training import accumulated_update
+from index_patches import ForecastConfig, LazyPatchRecord
 from inference import forecast_contexts
 from performance import prepare_update, prepared_updates
 from train import RWKVForecaster

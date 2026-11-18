@@ -12,14 +12,14 @@ from loguru import logger
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
     "06_holdout_test",
     "07_forecasting",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from embed import LazyPatchRecord, PatchEncoder
 from holdout import evaluate_holdout
+from index_patches import LazyPatchRecord, PatchEncoder
 from inference import forecast_contexts
 from performance import configure_cuda_memory
 from train import RWKVForecaster

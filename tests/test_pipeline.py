@@ -11,8 +11,8 @@ import pandas as pd
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
-from embed import ForecastConfig, PatchEncoder, embed
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
+from index_patches import ForecastConfig, PatchEncoder, build_patch_index
 from transform import load_config, read_artifact, signature, transform
 
 
@@ -35,7 +35,7 @@ class PipelineTests(unittest.TestCase):
             base = Path(temporary)
             config = load_config("configs/smoke_masked_horizon.json")
             config["paths"].update(
-                {k: str(base / k) for k in ("raw", "processed", "embedded")}
+                {k: str(base / k) for k in ("raw", "processed", "patch_index")}
             )
             config["data"].update(
                 context_length=17,
@@ -90,8 +90,8 @@ class PipelineTests(unittest.TestCase):
                     .reset_index(drop=True),
                 )
             self.assertFalse(list((base / "processed").glob("*.csv")))
-            embed(config)
-            saved = read_artifact(base / "embedded/embeddings.pt", config)
+            build_patch_index(config)
+            saved = read_artifact(base / "patch_index/patch_index.pt", config)
             encoder = PatchEncoder(
                 ForecastConfig(
                     **dict(
@@ -115,7 +115,7 @@ class PipelineTests(unittest.TestCase):
             changed["model"]["patch_size"] = 8
             self.assertNotEqual(signature(config), signature(changed))
             with self.assertRaisesRegex(ValueError, "Stale artifact"):
-                read_artifact(base / "embedded/embeddings.pt", changed)
+                read_artifact(base / "patch_index/patch_index.pt", changed)
             explicit_lag = copy.deepcopy(config)
             explicit_lag["data"]["past_covariates"] = ["outcome_lag_1"]
             with self.assertRaisesRegex(ValueError, "excluded lag columns"):

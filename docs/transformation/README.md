@@ -1,7 +1,7 @@
 # Transformation: from generated tables to training records
 
 The transformation stage converts generated time-series tables into the tensors
-and source metadata used by the embedding and training stages. It determines
+and source metadata used by the patch indexing and training stages. It determines
 which variables the model sees, how a series becomes next-patch training
 examples, and which observations each example contains.
 
@@ -18,7 +18,7 @@ Generated data.parquet tables
     -> optional admission screening
     -> transform.py: select columns, check data, construct training records
     -> windows.pt index + tensor shards on disk
-    -> embed.py: prepare the patch index
+    -> index_patches.py: check every window and prepare the patch index
     -> train.py: prepare patch features, learn embeddings and train the model
 ```
 
@@ -30,7 +30,7 @@ stale or mismatched artifacts.
 
 Transformation does not fit the forecasting model or learn embeddings.
 Normalization, missing-value masks and learned patch projections are prepared
-later as records are used. The offline embed phase builds an index rather than
+later as records are used. The patch indexing stage builds an index rather than
 saving embedding vectors for the entire corpus.
 
 ## Running the stage
@@ -44,7 +44,7 @@ uv run python src/03_transforming_input_data/transform.py --config configs/confi
 After successful completion, continue with:
 
 ```powershell
-uv run python src/04_creating_embeddings/embed.py --config configs/config.json
+uv run python src/04_patch_indexing/index_patches.py --config configs/config.json
 uv run python src/05_model_training/train.py --config configs/config.json
 ```
 
@@ -59,6 +59,8 @@ directly in the local Python environment.
 `paths.raw` identifies the generated-data root. `data.generated_dates` selects
 date folders beneath it; the script recursively finds `data.parquet` files in
 those folders. If the date setting is absent, it scans the configured raw root.
+A folder that holds a `data.parquet` is a table and is not searched further, so
+discovery needs one metadata lookup per table folder instead of listing each one.
 Generation plots and SCM specifications are not training inputs.
 
 When `validation.enabled=false`, all discovered candidates proceed to structural
@@ -146,10 +148,11 @@ Paths below are relative to `paths.processed`, currently
 
 | Output | Purpose |
 | --- | --- |
-| `windows.pt` | Small index of tensor shards, their checksums/counts and the configuration signature. Consumed through `read_artifact()` by embed and training. |
+| `windows.pt` | Small index of tensor shards, their checksums/counts and the configuration signature. Consumed through `read_artifact()` by patch indexing and training. |
 | `manifest.json` | Human-readable table metadata, selection audit, exclusions and training-transition counts. Interpret boundaries using each table's `validation_policy` and `training_stop`. |
 | `validation_selection.json` | Admission-screening decisions, or an explicit record that screening was disabled. |
 | `.transform_checkpoints/<identity>/` | Dataset shard files (`batch_*.pt`) and the recovery index `progress.json`. Referenced shards remain essential after completion. |
+| `.table_metadata/<shard sha256>.json.gz` | Compressed copy of each shard's table entries, used to write `manifest.json` without loading tensor shards. Not read by patch indexing or training; safe to delete once the run has completed. |
 | `table_*.parquet` | Optional selected-column exports when `data.export_processed_tables=true`; currently disabled. |
 
 Each invocation also creates a run folder under `paths.logs`, containing the
@@ -158,7 +161,8 @@ configuration, event log, source-code provenance and run status.
 ## Progress and automatic resume
 
 Progress bars show completed/total **tables**, percentage, tables per second,
-elapsed time and ETA. They update every 100 tables, after five seconds when a
+elapsed time and ETA. They update every 100 tables (less often for a million
+tables or more), after five seconds when a
 table finishes, and at completion. Inventory checking, checkpoint restoration
 and transformation have separate bars. Five million rows do not necessarily
 mean five million progress units: a table can contain many rows.
@@ -204,15 +208,15 @@ a run. Changing only the checkpoint intervals preserves compatibility.
 
 The sharded implementation has a new checkpoint identity. Earlier in-progress
 checkpoints from the single-file implementation are not migrated automatically;
-completed single-file artifacts remain readable by embed and training.
+completed single-file artifacts remain readable by patch indexing and training.
 
 Each checkpoint commits references to the new shards. The final `windows.pt`
 index is atomically published after all tables are checkpointed, and the table
 manifest is streamed to JSON. Finalization never merges the tensor corpus into
 RAM. If it is interrupted, restarting can retry it without transforming saved
-tables again. Wait for the successful completion message before starting embed.
+tables again. Wait for the successful completion message before starting `index_patches.py`.
 
-Embed and training use `read_artifact()` to access the index. Records retain
+Patch indexing and training use `read_artifact()` to access the index. Records retain
 lightweight references to their batches; a bounded cache opens one shard at a
 time using memory mapping. Older single-file `windows.pt` artifacts remain
 readable. Directly calling `torch.load()` on a new index returns its metadata,
@@ -225,6 +229,14 @@ reads, tensor construction, hashing and writes. Many small source files,
 especially access through WSL to a Windows drive, can make filesystem overhead
 significant. A progress bar at 100% for transformation can be followed by a
 separate final-output write.
+
+To keep a hard disk streaming rather than seeking, source files are read a
+window at a time in on-disk order and decoded in worker processes; records are
+still assembled strictly in table order, so the output is unchanged. The
+optional `transform` settings `workers`, `read_threads`, `read_window_tables`
+and `read_window_mb` are described in the
+[technical overview](../TECHNICAL_OVERVIEW.md). Each checkpoint logs the output
+written so far, the amount still expected and the free space on the output disk.
 
 The shard files are the processed dataset itself, so there is no second full
 tensor copy for the final output. **Do not delete a shard directory referenced by

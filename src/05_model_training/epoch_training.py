@@ -16,6 +16,7 @@ from checkpoints import (
     rng_state,
     save_checkpoint,
 )
+from gradient_clipping import measure_gradients, scale_gradients
 from learning_rate import make_scheduler, scheduler_snapshot
 from loguru import logger
 from performance import (
@@ -92,12 +93,24 @@ def training_options(training):
         or diagnostic <= 0
     ):
         raise ValueError("training.diagnostic_seconds must be positive and finite")
-    for key, default in (("microbatch_size", 4), ("microbatch_token_limit", 1536)):
+    for key, default in (
+        ("microbatch_size", 4),
+        ("microbatch_token_limit", 1536),
+        ("log_every_tables", None),
+    ):
         value = training.get(key, default)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value < 1
         ):
             raise ValueError(f"training.{key} must be a positive integer or null")
+    from checkpoint_upload import upload_options
+
+    upload_options(training)
+    cache = training.get("validation_cache", False)
+    if not isinstance(cache, bool) and not (isinstance(cache, str) and cache.strip()):
+        raise ValueError(
+            "training.validation_cache must be true, false or a folder path"
+        )
     limit = training.get("cuda_memory_limit_gib", 11.0)
     if limit is not None and (
         isinstance(limit, bool)
@@ -140,6 +153,8 @@ def training_options(training):
         "storage_locality",
         "prefetch",
         "fused_optimizer",
+        "fused_master_optimizer",
+        "background_checkpoints",
         "compile_variate",
         "compile_variate_inference",
         "validate_before_training",
@@ -421,7 +436,9 @@ def _accumulated_gradients(
         with torch.profiler.record_function("training.backward"):
             (output.loss * fraction).backward()
         shapes.append(list(x.shape))
-        logger.debug(
+        # Per pass and per update: TRACE keeps these out of the DEBUG log file.
+        # The shapes and losses of every update are in the training history.
+        logger.trace(
             "Accumulation microbatch {}/{} embedding_shape[B,V,T,D]={} max_real_patches={} kernel_patches={} observed_labels={}",
             microstep,
             len(prepared_batches),
@@ -438,18 +455,36 @@ def _accumulated_gradients(
         else torch.zeros((), device=device)
     )
     with torch.profiler.record_function("training.clip_and_metrics"):
-        norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), gradient_clip, error_if_nonfinite=False, foreach=True
+        # Walking the module tree costs about a millisecond; the set of
+        # parameters does not change during training.
+        parameters = getattr(model, "_clip_parameters", None)
+        if parameters is None:
+            parameters = model._clip_parameters = list(model.parameters())
+        norm, coefficient, gradient_groups = measure_gradients(
+            parameters, gradient_clip
         )
         # One synchronization, after all backwards. Reject before optimizer.step.
         metrics = (
-            torch.stack([weighted_loss, norm.float(), embedding_norm, *losses])
+            torch.stack(
+                [
+                    weighted_loss,
+                    norm.float().to(device),
+                    embedding_norm,
+                    coefficient.float().to(device),
+                    *losses,
+                ]
+            )
             .cpu()
             .tolist()
         )
+        clip_coefficient = metrics.pop(3)
         if not all(math.isfinite(value) for value in metrics):
             raise FloatingPointError("Nonfinite training loss or gradient norm")
-    logger.debug("Accumulation microbatch losses={}", metrics[3:])
+        if clip_coefficient != 1.0:
+            # Only now is there anything to scale: multiplying by exactly one,
+            # as clip_grad_norm_ does on every other update, changes no value.
+            scale_gradients(gradient_groups, coefficient)
+    logger.trace("Accumulation microbatch losses={}", metrics[3:])
     return {
         "loss": metrics[0],
         "target_points": total_points,

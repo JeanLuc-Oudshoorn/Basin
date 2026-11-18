@@ -15,14 +15,14 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
     "06_holdout_test",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from embed import LazyPatchRecord
 from epoch_training import accumulated_update
 from horizon_policy import horizon_probabilities, sampled_horizon
+from index_patches import LazyPatchRecord
 from inference import forecast_contexts
 from multi_horizon import (
     weighted_forecast_loss,

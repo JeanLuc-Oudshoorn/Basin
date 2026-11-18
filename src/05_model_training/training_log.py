@@ -10,6 +10,7 @@ import math
 import os
 import platform
 import sys
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -115,6 +116,8 @@ class TrainingLog:
             with self.path.open("x", encoding="utf-8"):
                 pass
         self.stream = self.path.open("a", encoding="utf-8", buffering=1)
+        # The checkpoint writer thread reports to the same journal.
+        self.lock = threading.Lock()
         self.started = perf_counter() - max(0, time() - self.started_unix)
         self.step = 0
         self.best_step = None
@@ -145,6 +148,10 @@ class TrainingLog:
         )
 
     def emit(self, event, **data):
+        with self.lock:
+            self._emit(event, **data)
+
+    def _emit(self, event, **data):
         if "global_step" in data:
             self.step = data["global_step"]
         validation = data.get("validation_loss")

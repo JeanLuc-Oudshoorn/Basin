@@ -4,8 +4,10 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import sys
 import uuid
+from array import array
 from pathlib import Path
 from time import perf_counter
 
@@ -38,24 +40,34 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def examine(paths, root):
+    """Yield (key relative to root, size, modification time) for each path."""
+    for path in paths:
+        stat = path.stat()
+        yield path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns
+
+
 class TransformProgress:
     """A bar in both terminals and captured WSL logs; no extra dependency."""
 
     def __init__(self, label, total, initial=0):
         self.label, self.total, self.initial = label, total, initial
+        # Every 100 tables up to a million; coarser beyond, so that a corpus of
+        # millions reports about every five seconds instead of flooding the log.
+        self.step = max(100, 10 ** (len(str(total)) - 4))
         self.started = self.last_report = perf_counter()
         self.last_completed = initial
         self.update(initial, force=True)
 
     def update(self, completed, *, force=False):
-        now = perf_counter()
         if not (
             force
             or completed == self.total
-            or completed // 100 > self.last_completed // 100
-            or now - self.last_report >= 5
+            or completed // self.step > self.last_completed // self.step
+            or perf_counter() - self.last_report >= 5
         ):
             return
+        now = perf_counter()
         elapsed = now - self.started
         rate = (completed - self.initial) / elapsed if elapsed > 0 else 0
         eta = (self.total - completed) / rate if rate > 0 else None
@@ -108,10 +120,16 @@ class TransformCheckpoint:
             json.dumps([signature, implementation, str(root.resolve())]).encode()
         )
         inventory = TransformProgress("Checking source inventory", self.total)
-        for index, path in enumerate(paths, 1):
-            stat = path.stat()
-            key = path.relative_to(root).as_posix()
-            identity.update(json.dumps([key, stat.st_size, stat.st_mtime_ns]).encode())
+        # A filesystem scan has already asked the disk about every file; only
+        # sources that arrive as plain paths are examined here.
+        recorded = getattr(paths, "inventory", None)
+        entries = recorded(root) if recorded else None
+        if entries is None:
+            entries = examine(paths, root)
+        self.source_bytes = array("q")
+        for index, (key, size, modified) in enumerate(entries, 1):
+            identity.update(json.dumps([key, size, modified]).encode())
+            self.source_bytes.append(size)
             inventory.update(index)
         self.directory = (
             Path(directory) / ".transform_checkpoints" / identity.hexdigest()
@@ -268,6 +286,7 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
         self.records, self.tables, self.excluded = [], [], []
         self.buffer_bytes = 0
         self.shards = []
+        self.written_bytes = 0
         self.last_spill = 0
         self.counts_total = dict(
             record_count=0, table_count=0, excluded_count=0, training_transitions=0
@@ -290,6 +309,12 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
                 bar.update(index)
             self.state = state
         self.shards = list(self.state["shards"])
+        self.written_bytes = sum(
+            path.stat().st_size
+            for shard in self.shards
+            for path in self.shard_files(shard)
+            if path.exists()
+        )
         committed = {shard["name"] for shard in self.shards}
         # Only uncommitted files in this run's locked directory are disposable.
         for path in self.directory.glob("batch_*.pt"):
@@ -345,12 +370,40 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
             "sha256": digest(path),
             "record_count": len(self.records),
         }
-        from sharded_records import write_record_metadata
+        from sharded_records import write_record_metadata, write_table_metadata
 
         write_record_metadata(self.directory.parent.parent, shard, self.records)
+        write_table_metadata(
+            self.directory.parent.parent, shard, self.tables, self.excluded
+        )
         self.shards.append(shard)
+        self.written_bytes += sum(p.stat().st_size for p in self.shard_files(shard))
         self.records, self.tables, self.excluded = [], [], []
         self.buffer_bytes = 0
+
+    def shard_files(self, shard):
+        """The tensor file of a shard and its tensor-free record metadata."""
+        metadata = self.directory.parent.parent / ".record_metadata"
+        return self.directory / shard["name"], metadata / f"{shard['sha256']}.json"
+
+    def report_space(self, completed):
+        """Say early if the remaining tables will not fit on the output disk."""
+        if not completed:
+            return
+        gib = 2**30
+        remaining = self.written_bytes / completed * (self.total - completed)
+        free = shutil.disk_usage(self.directory).free
+        logger.log(
+            "WARNING" if remaining > free else "INFO",
+            "Output so far {:.1f} GiB; about {:.1f} GiB more expected for the "
+            "remaining tables; {:.1f} GiB free on the output disk{}",
+            self.written_bytes / gib,
+            remaining / gib,
+            free / gib,
+            ": NOT ENOUGH SPACE at this rate; free some up (the run can resume)"
+            if remaining > free
+            else "",
+        )
 
     def save_progress(self, completed, *, force=False):
         if completed - self.last_spill >= self.batch_tables:
@@ -387,6 +440,7 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
             len(self.shards),
             self.path,
         )
+        self.report_space(completed)
 
     def artifact_index(self):
         directory = self.directory.parent.parent
@@ -408,7 +462,7 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
 
     def write_manifest(self, stream, summary, screening_excluded):
         """Stream table metadata instead of constructing a corpus-sized JSON string."""
-        from sharded_records import load_shard
+        from sharded_records import read_table_metadata
 
         def write(value):
             stream.write(value.encode("utf-8"))
@@ -422,10 +476,11 @@ class ShardedTransformCheckpoint(TransformCheckpoint):
                     write(("" if first else ",") + json.dumps(item, allow_nan=False))
                     first = False
             for shard in self.state["shards"]:
-                batch = load_shard(self.directory / shard["name"])
-                for item in batch["tables" if key == "tables" else "excluded"]:
+                entries = read_table_metadata(
+                    self.directory.parent.parent, shard, self.directory / shard["name"]
+                )
+                for item in entries[0 if key == "tables" else 1]:
                     write(("" if first else ",") + json.dumps(item, allow_nan=False))
                     first = False
-                del batch
             write("]")
         write("}\n")

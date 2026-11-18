@@ -10,21 +10,21 @@ from unittest.mock import patch
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
-import embed as embedding_stage
-from embed import ForecastConfig, PatchEncoder
+sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
+import index_patches
+from index_patches import ForecastConfig, PatchEncoder
 from transform import file_digest, load_config, read_artifact, signature
 
 
-class LazyEmbeddingTests(unittest.TestCase):
+class LazyPatchIndexTests(unittest.TestCase):
     def fixture(self, base, count=2):
         config = copy.deepcopy(load_config("configs/legacy_500m.json"))
         config["paths"].update(
-            processed=str(base / "processed"), embedded=str(base / "embedded")
+            processed=str(base / "processed"), patch_index=str(base / "patch_index")
         )
         config["model"].update(width=128, layers=2, context_length=64, max_patches=16)
         config["data"]["context_length"] = 64
-        config["embedding"] = {"cpu_threads": 1, "progress_every": 1000}
+        config["patch_index"] = {"cpu_threads": 1, "progress_every": 1000}
         target = torch.arange(64, dtype=torch.float32)[None, None]
         records = [
             {
@@ -53,25 +53,25 @@ class LazyEmbeddingTests(unittest.TestCase):
                 "encode_tokens",
                 side_effect=AssertionError("Offline projection is forbidden"),
             ):
-                embedding_stage.embed(config)
-                first_size = (base / "embedded/embeddings.pt").stat().st_size
+                index_patches.build_patch_index(config)
+                first_size = (base / "patch_index/patch_index.pt").stat().st_size
                 self.fixture(base, count=1000)
-                embedding_stage.embed(config)
-            path = base / "embedded/embeddings.pt"
+                index_patches.build_patch_index(config)
+            path = base / "patch_index/patch_index.pt"
             self.assertLess(abs(path.stat().st_size - first_size), 1024)
             raw = torch.load(path, weights_only=True)
             self.assertNotIn("records", raw)
             self.assertEqual(raw["record_count"], 1000)
             self.assertEqual(
-                len((base / "embedded/windows.jsonl").read_text().splitlines()), 1000
+                len((base / "patch_index/windows.jsonl").read_text().splitlines()), 1000
             )
 
     def test_lazy_features_are_not_cached_and_allow_training_gradients(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             config = self.fixture(base)
-            embedding_stage.embed(config)
-            artifact = read_artifact(base / "embedded/embeddings.pt", config)
+            index_patches.build_patch_index(config)
+            artifact = read_artifact(base / "patch_index/patch_index.pt", config)
             record = artifact["records"][0]
             prepared = record["prepared"]
             self.assertNotIn("prepared", record.keys())
@@ -96,17 +96,17 @@ class LazyEmbeddingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             config = self.fixture(base)
-            embedding_stage.embed(config)
+            index_patches.build_patch_index(config)
             self.fixture(base, count=3)
             with self.assertRaisesRegex(ValueError, "Processed data changed"):
-                read_artifact(base / "embedded/embeddings.pt", config)
+                read_artifact(base / "patch_index/patch_index.pt", config)
 
     def test_failed_save_preserves_previous_index_and_restores_threads(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             config = self.fixture(base)
-            embedding_stage.embed(config)
-            path = base / "embedded/embeddings.pt"
+            index_patches.build_patch_index(config)
+            path = base / "patch_index/patch_index.pt"
             previous = file_digest(path)
             previous_threads = torch.get_num_threads()
 
@@ -114,11 +114,11 @@ class LazyEmbeddingTests(unittest.TestCase):
                 path.write_bytes(b"interrupted write")
                 raise OSError("synthetic disk failure")
 
-            with patch.object(embedding_stage, "save_artifact", side_effect=fail):
+            with patch.object(index_patches, "save_artifact", side_effect=fail):
                 with self.assertRaisesRegex(OSError, "synthetic disk failure"):
-                    embedding_stage.embed(config)
+                    index_patches.build_patch_index(config)
             self.assertEqual(file_digest(path), previous)
-            self.assertFalse(list((base / "embedded").glob("*.tmp")))
+            self.assertFalse(list((base / "patch_index").glob("*.tmp")))
             self.assertEqual(torch.get_num_threads(), previous_threads)
 
 

@@ -15,7 +15,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for directory in (
     "src/08_model_export",
-    "src/04_creating_embeddings",
+    "src/04_patch_indexing",
     "src/03_transforming_input_data",
 ):
     sys.path.insert(0, str(ROOT / directory))
@@ -63,7 +63,7 @@ def series(batch, variables, length, seed):
 
 class ModelExportTests(unittest.TestCase):
     def test_tokenizer_matches_training_encoder(self):
-        from embed import ForecastConfig, PatchEncoder
+        from index_patches import ForecastConfig, PatchEncoder
 
         encoder = PatchEncoder(
             ForecastConfig(

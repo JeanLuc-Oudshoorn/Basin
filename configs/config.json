@@ -3,7 +3,7 @@
   "paths": {
     "raw": "data/01_generated",
     "processed": "data/02_processed/model",
-    "embedded": "data/03_embedded/model",
+    "patch_index": "data/03_patch_index/model",
     "training": "results/model/training",
     "holdout_test": "results/model/holdout_test",
     "forecasts": "results/model/forecasts",
@@ -16,8 +16,8 @@
   "data": {
     "validation_policy": "sampled_training_origins",
     "generated_dates": [
-      "2026-11-06",
-      "2026-11-07"
+      "2026-11-15",
+      "2026-11-16"
     ],
     "context_length": 2048,
     "horizon": 112,
@@ -127,6 +127,16 @@
     "storage_locality": true,
     "prefetch": true,
     "checkpoint_token_threshold": 3072,
+    "fused_master_optimizer": true,
+    "log_every_tables": 1000,
+    "validation_cache": "~/.cache/basin/validation_panels",
+    "background_checkpoints": true,
+    "checkpoint_upload": {
+      "container": "checkpoints",
+      "prefix": null,
+      "block_mib": 16,
+      "concurrency": 4
+    },
     "early_stopping": {
       "patience_checks": 12,
       "min_delta": 0.0,
@@ -250,7 +260,7 @@
     "checkpoint_every_tables": 100000,
     "checkpoint_interval_seconds": null
   },
-  "embedding": {
+  "patch_index": {
     "cpu_threads": 6,
     "batch_size_records": 10000,
     "checkpoint_every_records": 100000,

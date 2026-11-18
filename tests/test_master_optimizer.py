@@ -12,7 +12,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in (
     "03_transforming_input_data",
-    "04_creating_embeddings",
+    "04_patch_indexing",
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
@@ -291,6 +291,197 @@ class MasterOptimizerTests(unittest.TestCase):
                     saved["schedule_plan"],
                     base / "best.pt",
                 )
+
+
+def bits(tensor):
+    """Raw bit pattern, so that -0.0 / 0.0 and the last bit both count."""
+    return (
+        tensor.detach()
+        .contiguous()
+        .view(torch.int16 if tensor.dtype == torch.bfloat16 else torch.int32)
+    )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "the one-pass kernel needs CUDA")
+class OnePassKernelTests(unittest.TestCase):
+    """The CUDA kernel must reproduce the three-pass update bit for bit."""
+
+    SHAPES = (
+        (),
+        (1,),
+        (3,),
+        (7,),
+        (64,),
+        (513,),
+        (96, 96),
+        (65536,),
+        (65537,),
+        (300, 1000),
+        (4, 5, 6),
+        (2**18 + 3,),
+        (768, 768),
+        (5,),
+    )
+
+    def build(self, *, fused_kernel, seed=11):
+        generator = torch.Generator().manual_seed(seed)
+        parameters = []
+        for index, shape in enumerate(self.SHAPES):
+            dtype = torch.float32 if index % 5 == 4 else torch.bfloat16
+            value = torch.randn(shape, generator=generator) * 10 ** (index % 4 - 2)
+            parameters.append(torch.nn.Parameter(value.to("cuda", dtype)))
+        groups = [
+            {"params": parameters[0::3], "lr": 1e-4, "weight_decay": 0.01},
+            {"params": parameters[1::3], "lr": 1e-4, "weight_decay": 0.0},
+            {"params": parameters[2::3], "lr": 2e-4, "weight_decay": 0.0},
+        ]
+        optimizer = FP32MasterAdamW(
+            groups,
+            lr=1e-4,
+            weight_decay=0.01,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            fused=True,
+            foreach=False,
+            fused_kernel=fused_kernel,
+            gradient_bucket_bytes=2**20,
+        )
+        return parameters, optimizer
+
+    def assert_identical(self, kernel, reference, step):
+        for index, (left, right) in enumerate(
+            zip(kernel.model_parameters, reference.model_parameters)
+        ):
+            self.assertTrue(
+                torch.equal(bits(left), bits(right)), f"weight {index} step {step}"
+            )
+        for index, (left, right) in enumerate(
+            zip(kernel.master_parameters, reference.master_parameters)
+        ):
+            self.assertTrue(
+                torch.equal(bits(left), bits(right)), f"master {index} step {step}"
+            )
+            self.assertIsNone(left.grad)
+            self.assertEqual(left in kernel.state, right in reference.state)
+            if left in kernel.state:
+                self.assertEqual(set(kernel.state[left]), set(reference.state[right]))
+                for key in ("step", "exp_avg", "exp_avg_sq"):
+                    actual, expected = (
+                        kernel.state[left][key],
+                        reference.state[right][key],
+                    )
+                    self.assertEqual(actual.dtype, expected.dtype)
+                    self.assertEqual(actual.device, expected.device)
+                    self.assertTrue(
+                        torch.equal(bits(actual), bits(expected)),
+                        f"{key} {index} step {step}",
+                    )
+
+    def gradients(self, parameters, others, step, generator):
+        for index, (parameter, other) in enumerate(zip(parameters, others)):
+            if index == 1 or (index + step) % 5 == 0 or (index == 6 and step < 7):
+                parameter.grad = other.grad = None  # never, sometimes, late
+                continue
+            scale = 10 ** float(torch.empty(()).uniform_(-6, 1, generator=generator))
+            gradient = (torch.randn(parameter.shape, generator=generator) * scale).to(
+                parameter.device, parameter.dtype
+            )
+            if step % 9 == 4:
+                gradient = torch.zeros_like(gradient)
+            parameter.grad, other.grad = gradient, gradient.clone()
+            if parameter.dim() == 2 and step % 2:
+                # PyTorch's fused AdamW rejects a transposed gradient; the
+                # kernel reads the same values in the weight's own order.
+                parameter.grad = gradient.t().contiguous().t()
+                self.assertFalse(parameter.grad.is_contiguous())
+
+    def test_kernel_matches_three_pass_update_bit_for_bit(self):
+        parameters, kernel = self.build(fused_kernel=True)
+        others, reference = self.build(fused_kernel=False)
+        self.assertIsNotNone(kernel._kernel)
+        self.assertIsNone(reference._kernel)
+        generator = torch.Generator().manual_seed(3)
+        for step in range(60):
+            self.gradients(parameters, others, step, generator)
+            for optimizer in (kernel, reference):
+                for group, base in zip(optimizer.param_groups, (1e-4, 1e-4, 2e-4)):
+                    # A warm-up followed by a decay, as the scheduler sets it.
+                    group["lr"] = base * min(1.0, (step + 1) / 10) * 0.99**step
+            versions = [p._version for p in parameters]
+            kernel.step()
+            reference.step()
+            self.assert_identical(kernel, reference, step)
+            for parameter, version in zip(parameters, versions):
+                self.assertEqual(
+                    parameter._version > version, parameter.grad is not None
+                )
+        never = next(
+            master
+            for master, weight in zip(kernel.master_parameters, kernel.model_parameters)
+            if weight is parameters[1]
+        )
+        self.assertNotIn(never, kernel.state)
+
+    def test_checkpoints_move_between_the_kernel_and_the_three_pass_update(self):
+        generator = torch.Generator().manual_seed(5)
+        parameters, kernel = self.build(fused_kernel=True)
+        others, reference = self.build(fused_kernel=False)
+        for step in range(12):
+            self.gradients(parameters, others, step, generator)
+            kernel.step()
+            reference.step()
+        # Each continues from the other's saved state.
+        saved_kernel = copy.deepcopy(kernel.state_dict())
+        saved_reference = copy.deepcopy(reference.state_dict())
+        resumed_parameters, resumed_kernel = self.build(fused_kernel=True, seed=99)
+        resumed_others, resumed_reference = self.build(fused_kernel=False, seed=99)
+        resumed_kernel.load_state_dict(saved_reference)
+        resumed_reference.load_state_dict(saved_kernel)
+        self.assert_identical(resumed_kernel, reference, "restore")
+        self.assert_identical(kernel, resumed_reference, "restore")
+        for step in range(12, 30):
+            self.gradients(parameters, others, step, generator)
+            for parameter, other, original in zip(
+                resumed_parameters, resumed_others, parameters
+            ):
+                gradient = original.grad
+                parameter.grad = None if gradient is None else gradient.clone()
+                other.grad = None if gradient is None else gradient.contiguous().clone()
+            for optimizer in (kernel, reference, resumed_kernel, resumed_reference):
+                optimizer.step()
+            self.assert_identical(kernel, reference, step)
+            self.assert_identical(resumed_kernel, reference, step)
+            self.assert_identical(kernel, resumed_reference, step)
+
+    def test_kernel_rejects_mismatched_tensors(self):
+        parameters, kernel = self.build(fused_kernel=True)
+        for parameter in parameters:
+            parameter.grad = torch.zeros_like(parameter)
+        kernel.step()
+        master = kernel.master_parameters[0]
+        state = kernel.state[master]
+        arguments = dict(
+            masters=[master],
+            gradients=[torch.zeros(3, device="cuda", dtype=torch.bfloat16)],
+            exp_avgs=[state["exp_avg"]],
+            exp_avg_sqs=[state["exp_avg_sq"]],
+            state_steps=[state["step"]],
+            weights=[kernel.model_parameters[0]],
+            lr=1e-4,
+            beta1=0.9,
+            beta2=0.999,
+            weight_decay=0.0,
+            eps=1e-8,
+        )
+        before = bits(master).clone()
+        with self.assertRaisesRegex(RuntimeError, "gradient does not match"):
+            kernel._kernel.step(**arguments)
+        arguments["gradients"] = [torch.zeros_like(master)]  # float32, not bfloat16
+        with self.assertRaisesRegex(RuntimeError, "gradient does not match"):
+            kernel._kernel.step(**arguments)
+        arguments["gradients"] = [None]
+        self.assertEqual(kernel._kernel.step(**arguments), 0)
+        self.assertTrue(torch.equal(bits(master), before))
 
 
 if __name__ == "__main__":

@@ -165,11 +165,11 @@ def run(config):
     t = config["training"]
     directory = location(config, "training")
     directory.mkdir(parents=True, exist_ok=True)
-    data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
     if data["processed_sha256"] != file_digest(
         location(config, "processed") / "windows.pt"
     ):
-        raise ValueError("Processed data changed; recreate embeddings")
+        raise ValueError("Processed data changed; rerun index_patches.py")
     model = RWKVForecaster.load(ROOT / t["initial_checkpoint"]).train()
     if (
         signature(config)
@@ -335,8 +335,8 @@ def run(config):
             "state_dict": model.state_dict(),
             "pipeline_config": config,
             "lr_scheduler": scheduler_snapshot(scheduler, schedule_plan),
-            "embedding_sha256": file_digest(
-                location(config, "embedded") / "embeddings.pt"
+            "patch_index_sha256": file_digest(
+                location(config, "patch_index") / "patch_index.pt"
             ),
         },
     )

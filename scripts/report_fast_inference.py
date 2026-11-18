@@ -146,9 +146,9 @@ See `verification.json` for the final targeted checks, including GPU availabilit
   4 GiB and compilation at one worker, writes results after each completed case,
   and saves detailed run logs under `logs`.
 
-To train the new architecture, run `transform.py`, `embed.py`, then `train.py`
+To train the new architecture, run `transform.py`, `index_patches.py`, then `train.py`
 with the default config. Strict artifact signatures require rebuilding the new
-processed/embedding index. Existing 447M weights cannot be resumed into 17 layers.
+processed data and patch index. Existing 447M weights cannot be resumed into 17 layers.
 After training, normal holdout and forecasting stages use the new model and graph
 settings. Horizons above 256 continue in blocks, with a final-window context cap.
 """

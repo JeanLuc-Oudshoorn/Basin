@@ -1,0 +1,121 @@
+[
+  {
+    "shape": "8x1x16",
+    "tokens": 128,
+    "passes": 1,
+    "end_to_end_ms": 88.99,
+    "peak_allocated_gib": 4.2,
+    "reserved_gib": 4.52,
+    "phases_ms": {
+      "forward": 28.52,
+      "backward": 38.43,
+      "clip_and_metrics": 15.21,
+      "optimizer": 11.59,
+      "weight_average": 1.32
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x1x64",
+    "tokens": 512,
+    "passes": 1,
+    "end_to_end_ms": 90.86,
+    "peak_allocated_gib": 4.51,
+    "reserved_gib": 5.02,
+    "phases_ms": {
+      "forward": 28.88,
+      "backward": 39.23,
+      "clip_and_metrics": 15.27,
+      "optimizer": 11.6,
+      "weight_average": 1.32
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x1x128",
+    "tokens": 1024,
+    "passes": 1,
+    "end_to_end_ms": 88.11,
+    "peak_allocated_gib": 5.4,
+    "reserved_gib": 5.48,
+    "phases_ms": {
+      "forward": 29.13,
+      "backward": 41.58,
+      "clip_and_metrics": 15.54,
+      "optimizer": 11.62,
+      "weight_average": 1.33
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x3x64",
+    "tokens": 1536,
+    "passes": 1,
+    "end_to_end_ms": 100.1,
+    "peak_allocated_gib": 6.23,
+    "reserved_gib": 6.85,
+    "phases_ms": {
+      "forward": 36.15,
+      "backward": 43.81,
+      "clip_and_metrics": 15.89,
+      "optimizer": 12.39,
+      "weight_average": 1.31
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x3x128",
+    "tokens": 3072,
+    "passes": 1,
+    "end_to_end_ms": 142.55,
+    "peak_allocated_gib": 8.65,
+    "reserved_gib": 9.43,
+    "phases_ms": {
+      "forward": 36.85,
+      "backward": 77.91,
+      "clip_and_metrics": 15.7,
+      "optimizer": 12.42,
+      "weight_average": 1.34
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x4x128",
+    "tokens": 4096,
+    "passes": 2,
+    "end_to_end_ms": 225.46,
+    "peak_allocated_gib": 8.63,
+    "reserved_gib": 9.38,
+    "phases_ms": {
+      "forward": 66.86,
+      "backward": 124.88,
+      "clip_and_metrics": 15.93,
+      "optimizer": 12.39,
+      "weight_average": 1.33
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  },
+  {
+    "shape": "8x8x128",
+    "tokens": 8192,
+    "passes": 3,
+    "end_to_end_ms": 339.45,
+    "peak_allocated_gib": 9.15,
+    "reserved_gib": 9.66,
+    "phases_ms": {
+      "forward": 104.52,
+      "backward": 216.52,
+      "clip_and_metrics": 16.07,
+      "optimizer": 12.38,
+      "weight_average": 1.35
+    },
+    "label": "one_pass_optimizer",
+    "repeat": 0
+  }
+]

@@ -1,0 +1,27 @@
+[
+  {
+    "shape": "8x5x128",
+    "tokens": 5120,
+    "passes": 1,
+    "error": "out of memory under the configured allocator limit",
+    "label": "pass_limit_6144",
+    "repeat": 0
+  },
+  {
+    "shape": "8x6x128",
+    "tokens": 6144,
+    "passes": 1,
+    "end_to_end_ms": 262.7,
+    "peak_allocated_gib": 9.34,
+    "reserved_gib": 10.14,
+    "phases_ms": {
+      "forward": 75.57,
+      "backward": 178.61,
+      "clip_and_metrics": 2.98,
+      "optimizer": 11.09,
+      "weight_average": 1.29
+    },
+    "label": "pass_limit_6144",
+    "repeat": 0
+  }
+]

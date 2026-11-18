@@ -123,6 +123,48 @@ Existing epoch-zero baseline validation remains configurable through
 `validate_before_training`. Its RNG effects are isolated, as are all scheduled
 checks. Set it false for a quicker diagnostic start.
 
+### Background checkpoint writes, cloud copy and summarised logging (2026-11-17)
+
+Measurements and tests: [training speed, 2026-11-17](TRAINING_SPEED_2026-11-17.md).
+
+| Setting (`training.*`) | Default in code | `configs/config.json` | Effect |
+| --- | --- | --- | --- |
+| `background_checkpoints` | `true` | `true` | The state is copied to host memory (about 2 s for the 221.5M model) and written by a background thread while training continues. "Atomically save" in the steps above then means "copy the state, start writing"; the file replaces the previous checkpoint only when complete. A run that fails or is interrupted still finishes the write in flight. If host memory is short, the write blocks as before. |
+| `checkpoint_upload` | off | `{"container": "checkpoints"}` | While a checkpoint is written, the same bytes are uploaded to Azure Blob Storage as `<paths.training>/latest_checkpoint.pt`. The local file stays the one training resumes from. See below. |
+| `validation_cache` | `false` | `"~/.cache/basin/validation_panels"` | The fixed validation panel is saved in `validation_panel.bin` during the first check; later checks read it instead of hashing, opening and slicing every source table again. Same windows, same scores. `true` keeps it in the training folder; a path keeps it elsewhere (one subfolder per training folder). WSL's own disk is read 20 times faster than its mount of the Windows drive. |
+| `log_every_tables` | `null` (every update) | `1000` | One journal record and one console block per that many tables, plus one before every checkpoint and validation. Sums cover every update. Per-update `window_ids`/`sources` are not written in this mode; `loss_history.json` and the checkpoint still hold the last 1,000 updates. Use `null` for per-update diagnostics (`scripts/diagnose_epoch_throughput.py`). |
+| `fused_master_optimizer` | `true` | `true` | One-pass CUDA kernel for the FP32-master AdamW update; bit-identical to the three-pass update, which remains the fallback. |
+
+Cloud copy. Credentials come from `AZURE_ENDPOINT` and `AZURE_STORAGE_KEY`, read
+from the environment or from `.env` in the project root (git-ignored). The WSL
+environment needs `azure-storage-blob` (`scripts/setup_rwkv7.sh` installs it).
+
+- Before training starts, a small blob is written, read back and deleted. Wrong
+  credentials, a missing container or no network stop the run there.
+- The first checkpoint of every run is written, uploaded and verified before
+  training continues; a failure stops the run with the local checkpoint intact.
+- Later upload failures are logged as errors (`checkpoint_upload_failed` in the
+  journal) and do not stop training; the next checkpoint is uploaded again.
+- Every block carries an MD5 that the service checks, the blob replaces the
+  previous one only when all blocks have arrived, and the stored size and
+  whole-file MD5 are compared with the local file afterwards.
+- The upload never reads the file back from disk, and it cannot hold the local
+  write up for long: a network that stalls for two minutes ends the upload, not
+  the write.
+- An upload still running when the next checkpoint is due is abandoned; the
+  previous cloud copy stays in place.
+- A run that is killed leaves the last complete local checkpoint and the last
+  complete cloud copy in place, plus an unfinished `.latest_checkpoint.pt.*.tmp`
+  file that the next start removes.
+
+```bash
+python src/05_model_training/checkpoint_upload.py check       # credentials and container
+python src/05_model_training/checkpoint_upload.py list        # blobs, sizes, step metadata
+python src/05_model_training/checkpoint_upload.py download --to results/model/training/latest_checkpoint.pt
+```
+
+`download` verifies the SHA-256 recorded at upload before replacing the target.
+
 ## Data and fixed validation panel
 
 Transformation now uses each training table through its final observation as
@@ -179,7 +221,7 @@ Start a fresh run with `training.resume=false` (or a new training output
 directory) when migrating from overlapping in-sample validation: those weights
 may have trained on the newly reserved validation tables. Auto-resume rejects
 the old policy. This split-only change does not require rebuilding compatible
-transform/embed artifacts. Existing saved split/results are not retroactively
+transform/index_patches artifacts. Existing saved split/results are not retroactively
 rewritten or made unbiased.
 
 In JSON, write `"resume": false` with no quotes around `false` for a fresh
@@ -193,7 +235,7 @@ CPU buckets for batched GPU execution. Tokenized contexts live only until
 their batch is consumed. No full 125,000-context embedding cache is created.
 Transformation also stores only source metadata for evaluation entries under
 this policy, rather than duplicating raw tail/context tensors for every table.
-The embedding preparation stage indexes these entries without tokenizing them.
+The patch indexing stage indexes these entries without tokenizing them.
 
 Sharded corpora use tensor-free `.record_metadata` sidecars for startup scans and
 batch planning. New transformation spills publish these automatically. Older
@@ -390,12 +432,12 @@ optimizer cursor. Always resume from `latest_checkpoint.pt`, not `model.pt`.
 
 ## Migrating from reserved-tail artifacts
 
-The default data policy changes the processed/embedding signature and gradient
+The default data policy changes the processed/patch-index signature and gradient
 labels. Recreate those two stages for the new corpus/policy:
 
 ```powershell
 uv run python .\src\03_transforming_input_data\transform.py
-uv run python .\src\04_creating_embeddings\embed.py
+uv run python .\src\04_patch_indexing\index_patches.py
 ```
 
 Start this as a new training run: old reserved-tail checkpoints cannot resume

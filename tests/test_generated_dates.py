@@ -1,4 +1,4 @@
-"""Date cohorts flow through validation, processing, embedding and training guards."""
+"""Date cohorts flow through validation, processing, patch indexing and training guards."""
 
 import copy
 import json
@@ -15,11 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 for folder in [
     "src/02_data_validation",
     "src/03_transforming_input_data",
-    "src/04_creating_embeddings",
+    "src/04_patch_indexing",
     "src/05_model_training",
 ]:
     sys.path.insert(0, str(ROOT / folder))
-from embed import embed
+from index_patches import build_patch_index
 from prophet_validator import ProphetValidator
 from train import train
 from transform import (
@@ -217,7 +217,7 @@ class GeneratedDateTests(unittest.TestCase):
         config["validation"]["engine"] = (
             "prophet"  # Exercise legacy reports explicitly.
         )
-        for key in ["raw", "processed", "embedded", "logs"]:
+        for key in ["raw", "processed", "patch_index", "logs"]:
             config["paths"][key] = str(base / key)
         config["data"].update(
             generated_dates=["2026-10-25", "2026-10-23"],
@@ -265,7 +265,7 @@ class GeneratedDateTests(unittest.TestCase):
             self.assertEqual(summary["rejected"], 1)
             self.assertEqual(summary["effective_workers"], 2)
 
-    def test_two_dates_reach_embeddings_and_stale_selection_cannot_train(self):
+    def test_two_dates_reach_the_patch_index_and_stale_selection_cannot_train(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.fixture(directory)
 
@@ -300,9 +300,9 @@ class GeneratedDateTests(unittest.TestCase):
                 {Path(r["source"]).parents[1].name for r in transformed["records"]},
                 {"2026-10-23", "2026-10-25"},
             )
-            embed(config)
+            build_patch_index(config)
             artifact = read_artifact(
-                Path(config["paths"]["embedded"]) / "embeddings.pt", config
+                Path(config["paths"]["patch_index"]) / "patch_index.pt", config
             )
             training = [r for r in artifact["records"] if r["split"] == "train"]
             self.assertEqual(len(training), 2)

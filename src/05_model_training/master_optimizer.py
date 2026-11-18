@@ -1,13 +1,64 @@
-"""FP32 AdamW updates with low-precision model parameters for computation."""
+"""FP32 AdamW updates with low-precision model parameters for computation.
+
+Two execution paths give the same weights, moments and step counts bit for bit:
+
+* the one-pass CUDA kernel (`master_adamw_kernel.cu`), used on CUDA when it can
+  be built, and
+* the portable three-pass path: cast gradients to float32 in bounded buckets,
+  run PyTorch's AdamW on the masters, copy the masters back.
+"""
+
+import sys
+from functools import lru_cache
+from pathlib import Path
 
 import torch
 from loguru import logger
+
+KERNEL_WEIGHT_TYPES = (torch.bfloat16, torch.float32)
+
+
+@lru_cache(maxsize=1)
+def load_fused_kernel():
+    """Build on first use, then load, the one-pass CUDA update."""
+    from torch.utils.cpp_extension import load
+
+    try:
+        from rwkv7_cuda_paths import configure_cuda_home
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from rwkv7_cuda_paths import configure_cuda_home
+
+    configure_cuda_home()
+    load(
+        name="basin_master_adamw_v1",
+        sources=[
+            str(Path(__file__).with_name("master_adamw_kernel" + suffix))
+            for suffix in (".cpp", ".cu")
+        ],
+        # No fast-math: the kernel must round exactly as PyTorch's AdamW does.
+        # The project's toolkit pairs a newer nvcc with the CUDA 13.0 runtime
+        # headers PyTorch was built against; PyTorch's CUDA headers pull in
+        # CCCL, which refuses that pairing unless told otherwise. The parity
+        # tests in tests/test_master_optimizer.py check the resulting kernel.
+        extra_cuda_cflags=["-O3", "-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"],
+        is_python_module=False,
+        verbose=False,
+    )
+    return torch.ops.basin_master_adamw_v1
 
 
 class FP32MasterAdamW(torch.optim.AdamW):
     """Accumulate sub-BF16 updates in FP32, including across checkpoint resume."""
 
-    def __init__(self, parameters, *, gradient_bucket_bytes=64 * 2**20, **kwargs):
+    def __init__(
+        self,
+        parameters,
+        *,
+        gradient_bucket_bytes=64 * 2**20,
+        fused_kernel=True,
+        **kwargs,
+    ):
         if (
             isinstance(gradient_bucket_bytes, bool)
             or not isinstance(gradient_bucket_bytes, int)
@@ -38,10 +89,36 @@ class FP32MasterAdamW(torch.optim.AdamW):
                 for p in self.model_parameters
             ]
         super().__init__(masters, **kwargs)
-        logger.info(
-            "FP32 optimizer gradient staging budget={:.1f} MiB; masters and moments remain FP32",
-            gradient_bucket_bytes / 2**20,
-        )
+        self._kernel = None
+        self._plan = None  # per group: handles to tensor lists held by the kernel
+        self._waiting = []  # model parameters that have not had a gradient yet
+        if (
+            fused_kernel
+            and self.model_parameters
+            and all(
+                p.is_cuda and p.dtype in KERNEL_WEIGHT_TYPES
+                for p in self.model_parameters
+            )
+        ):
+            try:
+                self._kernel = load_fused_kernel()
+            except Exception as error:  # a missing compiler must not stop training
+                logger.warning(
+                    "One-pass FP32-master AdamW kernel unavailable ({}: {}); using "
+                    "the slower three-pass update. Results are identical.",
+                    type(error).__name__,
+                    str(error).splitlines()[0] if str(error) else "",
+                )
+        if self._kernel is not None:
+            logger.info(
+                "FP32 optimizer update: one-pass CUDA kernel, no gradient staging; "
+                "masters and moments remain FP32"
+            )
+        else:
+            logger.info(
+                "FP32 optimizer gradient staging budget={:.1f} MiB; masters and moments remain FP32",
+                gradient_bucket_bytes / 2**20,
+            )
 
     @property
     def master_parameters(self):
@@ -63,6 +140,9 @@ class FP32MasterAdamW(torch.optim.AdamW):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+        if self._kernel is not None and self._kernel_applies():
+            self._kernel_step()
+            return loss
         bucket, size = [], 0
         for master, parameter in zip(self.master_parameters, self.model_parameters):
             if parameter.grad is None:
@@ -76,6 +156,96 @@ class FP32MasterAdamW(torch.optim.AdamW):
         if bucket:
             self._step_bucket(bucket)
         return loss
+
+    def _kernel_applies(self):
+        # The kernel implements plain AdamW with PyTorch's fused state layout.
+        return all(
+            group.get("fused")
+            and not group.get("amsgrad")
+            and not group.get("maximize")
+            and not group.get("capturable")
+            and not group.get("differentiable")
+            and not isinstance(group["lr"], torch.Tensor)
+            for group in self.param_groups
+        )
+
+    def _release_plan(self):
+        plan, self._plan = self._plan, None
+        for _, handles in plan or ():
+            for handle in handles:
+                self._kernel.release_plan(handle)
+
+    def __del__(self):
+        try:
+            self._release_plan()
+        except Exception:  # nosec B110 - interpreter shutdown; nothing to recover
+            pass
+
+    def _kernel_plan(self):
+        """Register tensor lists per group and weight dtype with the kernel.
+
+        The lists are handed over once and reused: passing thousands of
+        tensors on every update costs milliseconds. As in torch.optim.AdamW,
+        a parameter gets moments and a step counter at its first gradient.
+        Until then it is left out and checked each step.
+        """
+        self._release_plan()
+        plan, waiting, index = [], [], 0
+        for group in self.param_groups:
+            parts = {}
+            for master in group["params"]:
+                weight = self.model_parameters[index]
+                index += 1
+                state = self.state.get(master)
+                if not state:
+                    if weight.grad is None:
+                        waiting.append(weight)
+                        continue
+                    state = self.state[master]
+                    state["step"] = torch.zeros(
+                        (), dtype=torch.float32, device=master.device
+                    )
+                    for key in ("exp_avg", "exp_avg_sq"):
+                        state[key] = torch.zeros_like(
+                            master, memory_format=torch.preserve_format
+                        )
+                part = parts.setdefault(weight.dtype, ([], [], [], [], []))
+                for values, value in zip(
+                    part,
+                    (
+                        master,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        state["step"],
+                        weight,
+                    ),
+                ):
+                    values.append(value)
+            plan.append(
+                (
+                    group,
+                    [self._kernel.create_plan(*part) for part in parts.values()],
+                )
+            )
+        self._plan, self._waiting = plan, waiting
+        return plan
+
+    def _kernel_step(self):
+        plan = self._plan
+        if plan is None or any(w.grad is not None for w in self._waiting):
+            plan = self._kernel_plan()
+        for group, handles in plan:
+            beta1, beta2 = group["betas"]
+            for handle in handles:
+                # The kernel reads each weight's current gradient itself.
+                self._kernel.run_plan(
+                    handle,
+                    group["lr"],
+                    beta1,
+                    beta2,
+                    group["weight_decay"],
+                    group["eps"],
+                )
 
     def _step_bucket(self, bucket):
         # AdamW updates each parameter independently. Only this bucket has
@@ -111,6 +281,8 @@ class FP32MasterAdamW(torch.optim.AdamW):
         # AdamW loads moments onto the FP32 master parameters, promoting legacy
         # BF16 moments without throwing away steps, momentum or scheduler state.
         super().load_state_dict(state_dict)
+        if self._kernel is not None:
+            self._release_plan()  # the loaded moments are new tensors
         with torch.no_grad():
             for index, (master, parameter) in enumerate(
                 zip(masters, self.model_parameters)

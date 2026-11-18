@@ -3,10 +3,14 @@
 import argparse
 import hashlib
 import json
+import multiprocessing
 import os
+import queue
 import re
 import sys
 import uuid
+from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -17,6 +21,8 @@ import numpy as np
 import pandas as pd
 import torch
 from loguru import logger
+from source_io import list_directory, read_files, visit
+from table_decoder import column_roles, decode_in_worker, decode_table, start_worker
 from torch.utils.serialization import config as serialization_config
 from transform_progress import (
     ShardedTransformCheckpoint,
@@ -25,6 +31,8 @@ from transform_progress import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+TABLE_FILE = "data.parquet"
+PROBE_BLOCK = 65536  # neighbouring folders examined together during discovery
 
 
 def load_config(path=None):
@@ -32,6 +40,24 @@ def load_config(path=None):
     if not path.is_absolute():
         path = ROOT / path
     config = json.loads(path.read_text(encoding="utf-8"))
+    renamed = [
+        f"{old} is now {new}"
+        for old, new, used in (
+            (
+                "paths.embedded",
+                "paths.patch_index",
+                "embedded" in config.get("paths", {}),
+            ),
+            ("embedding", "patch_index", "embedding" in config),
+        )
+        if used
+    ]
+    if renamed:
+        # Otherwise the old settings would be ignored without a word.
+        raise ValueError(
+            f"{path} names settings from before embed.py became index_patches.py: "
+            + "; ".join(renamed)
+        )
     generated_dates(config)
     d = config["data"]
     for key in (
@@ -116,7 +142,7 @@ def discover_source_tables(config, *, manifest=None):
     keys = payload.get("paths")
     if not isinstance(keys, list) or not keys:
         raise ValueError("Source file index must contain a nonempty list of paths")
-    paths, seen = [], set()
+    selected, seen = [], set()
     for key in keys:
         if not isinstance(key, str) or "\\" in key or ":" in key:
             raise ValueError("Source index paths must be portable relative paths")
@@ -137,13 +163,13 @@ def discover_source_tables(config, *, manifest=None):
         seen.add(canonical)
         # Deliberately avoid resolve/is_file here: each would incur remote metadata
         # requests on /mnt/e. The validator opens and hashes files as it uses them.
-        paths.append(root.joinpath(*relative.parts))
+        selected.append(canonical)
     logger.info(
         "Loaded {} source tables from file index in {:.2f}s",
-        len(paths),
+        len(selected),
         perf_counter() - started,
     )
-    return paths
+    return SourceTables(root, selected)
 
 
 def write_source_manifest(config):
@@ -156,18 +182,74 @@ def write_source_manifest(config):
         + uuid.uuid4().hex
         + ".json"
     )
-    root = location(config, "raw")
     write_json(
         path,
         {
             "schema": 1,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_selection": source_selection(config),
-            "paths": [p.relative_to(root).as_posix() for p in paths],
+            "paths": paths.keys,
         },
     )
     logger.info("Prepared native source file index: {} tables, {}", len(paths), path)
     return path
+
+
+class SourceTables(Sequence):
+    """Sorted source tables, stored as keys relative to the raw-data root.
+
+    Indexing yields the same `Path` objects a list of paths would, but builds
+    them on access: millions of live `Path` objects need many gigabytes. A
+    filesystem scan also keeps what it learned about each file, so later steps
+    need not ask the disk again. `sizes` and `modified` are what `os.stat`
+    reported; `records` orders the tables by their place in the volume's file
+    table (see `source_io`). Each is None when unknown.
+    """
+
+    def __init__(self, root, keys, sizes=None, modified=None, records=None):
+        self.root, self.keys = Path(root), keys
+        self.sizes, self.modified, self.records = sizes, modified, records
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            known = (self.sizes, self.modified, self.records)
+            return SourceTables(
+                self.root,
+                self.keys[index],
+                *(None if values is None else values[index] for values in known),
+            )
+        return self.root / self.keys[index]
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Sequence)
+            and len(self) == len(other)
+            and all(mine == theirs for mine, theirs in zip(self, other))
+        )
+
+    def files(self, start, stop):
+        """Path strings for tables [start, stop), without building Path objects."""
+        prefix = str(self.root) + os.sep
+        return [prefix + key.replace("/", os.sep) for key in self.keys[start:stop]]
+
+    def inventory(self, root):
+        """(key, size, modification time) of every table if the scan recorded them."""
+        if self.sizes is None or Path(root) != self.root:
+            return None
+
+        def entries(step=65536):
+            for start in range(0, len(self.keys), step):
+                block = slice(start, start + step)
+                yield from zip(
+                    self.keys[block],
+                    self.sizes[block].tolist(),
+                    self.modified[block].tolist(),
+                )
+
+        return entries()
 
 
 def _scan_source_tables(config):
@@ -176,23 +258,24 @@ def _scan_source_tables(config):
     if not root.is_dir():
         raise FileNotFoundError(f"Generated-data root not found: {root}")
     dates = generated_dates(config)
-    directories = [root / day for day in dates] if dates is not None else [root]
-    paths = []
-    for directory in directories:
+    keys, sizes, modified, records = [], [], [], []
+    for day in dates if dates is not None else [None]:
+        directory = root / day if day else root
         if not directory.is_dir():
             raise FileNotFoundError(
                 f"Selected generated date folder not found: {directory}"
             )
         started = perf_counter()
-        tables = []
+        progress = {"listed": 0, "found": 0}
         stop = Event()
 
         def report_progress():
             while not stop.wait(5):
                 logger.info(
-                    "Discovering source tables: {} | found {} | elapsed {:.1f}s",
+                    "Discovering source tables: {} | listed {} | found {} | elapsed {:.1f}s",
                     directory,
-                    len(tables),
+                    progress["listed"],
+                    progress["found"],
                     perf_counter() - started,
                 )
 
@@ -200,19 +283,138 @@ def _scan_source_tables(config):
         heartbeat = Thread(target=report_progress, daemon=True)
         heartbeat.start()
         try:
-            tables.extend(directory.rglob("data.parquet"))
-            tables.sort()
+            tables = _find_tables(root, f"{day}/" if day else "", progress)
         finally:
             stop.set()
             heartbeat.join()
-        if not tables:
+        if not tables[0]:
             raise ValueError(f"No data.parquet tables in selected folder: {directory}")
-        logger.info("Selected generated folder={} tables={}", directory, len(tables))
-        paths.extend(tables)
+        logger.info(
+            "Selected generated folder={} tables={} ({:.1f}s)",
+            directory,
+            len(tables[0]),
+            perf_counter() - started,
+        )
+        keys.extend(tables[0])
+        sizes.append(tables[1])
+        modified.append(tables[2])
+        records.append(tables[3])
     logger.info(
-        "Source selection={} total_tables={}", source_selection(config), len(paths)
+        "Source selection={} total_tables={}", source_selection(config), len(keys)
     )
-    return paths
+    return SourceTables(
+        root,
+        keys,
+        np.concatenate(sizes),
+        np.concatenate(modified),
+        None if any(r is None for r in records) else np.concatenate(records),
+    )
+
+
+def _find_tables(root, prefix, progress, threads=8):
+    """Locate every data.parquet below root/prefix; keys are relative to root.
+
+    A folder that holds a data.parquet is a table and is not searched further;
+    any other folder is searched recursively. Telling them apart takes one
+    metadata lookup per folder rather than listing each one, made in file-table
+    order where the platform reports it. What the lookup returns (size and
+    modification time) is kept, so the checkpoint need not ask again.
+    """
+    base = str(root)
+    keys, sizes, modified, records = [], [], [], []
+    ordered = True
+    pending = [prefix]
+    while pending:
+        prefix = pending.pop()
+        folder = base + os.sep + prefix.replace("/", os.sep) if prefix else base
+        names, places = [], []
+        try:
+            for name, is_directory, record in list_directory(folder):
+                progress["listed"] += 1
+                if _is_table(name) or is_directory:
+                    names.append(name)
+                    places.append(record)
+        except OSError:
+            continue  # unreadable folders are skipped, as pathlib's rglob does
+        if not names:
+            continue
+        ordered = ordered and places[0] is not None
+        places = np.array(places if ordered else [0] * len(names), dtype=np.int64)
+        order = range(len(names))
+        if ordered:
+            # File-table order within blocks of neighbouring names: the sweep
+            # through the file table stays sequential, while only a small part
+            # of this folder's own index (huge for millions of tables) has to
+            # stay in memory at any time.
+            order = np.concatenate(
+                [
+                    start
+                    + np.argsort(places[start : start + PROBE_BLOCK], kind="stable")
+                    for start in range(0, len(names), PROBE_BLOCK)
+                ]
+            ).tolist()
+        found_size = np.full(len(names), -1, dtype=np.int64)
+        found_modified = np.zeros(len(names), dtype=np.int64)
+
+        def probe(index):
+            name = names[index]
+            target = name if _is_table(name) else name + os.sep + TABLE_FILE
+            try:
+                status = os.stat(folder + os.sep + target)
+            except OSError:
+                return
+            found_size[index] = status.st_size
+            found_modified[index] = status.st_mtime_ns
+            progress["found"] += 1
+
+        visit(probe, order, threads)
+        for name, size in zip(names, found_size.tolist()):
+            if _is_table(name):
+                if size >= 0:
+                    keys.append(prefix + name)
+            elif size >= 0:
+                keys.append(f"{prefix}{name}/{TABLE_FILE}")
+            else:
+                pending.append(f"{prefix}{name}/")
+        found = found_size >= 0
+        sizes.append(found_size[found])
+        modified.append(found_modified[found])
+        records.append(places[found])
+    sizes, modified, records = (
+        np.concatenate(values) if values else np.zeros(0, dtype=np.int64)
+        for values in (sizes, modified, records)
+    )
+    order = _path_order(keys)
+    if order is not None:
+        keys = [keys[index] for index in order]
+        sizes, modified, records = sizes[order], modified[order], records[order]
+    return keys, sizes, modified, records if ordered else None
+
+
+def _is_table(name):
+    """Whether a directory entry is a table; pathlib ignores case on Windows."""
+    return (name.lower() if os.name == "nt" else name) == TABLE_FILE
+
+
+def _path_order(keys):
+    """Positions that sort relative keys exactly as pathlib orders the paths.
+
+    Paths compare part by part, ignoring case on Windows. Joining the parts
+    with a character that sorts below every other makes plain string comparison
+    agree with that. Returns None when the keys are already in order, which a
+    directory listing usually is.
+    """
+    fold = str.lower if os.name == "nt" else str
+    previous = ""
+    for key in keys:
+        rank = fold(key).replace("/", "\0")
+        if rank < previous:
+            break
+        previous = rank
+    else:
+        return None
+    ranks = [fold(key).replace("/", "\0") for key in keys]
+    return sorted(range(len(keys)), key=ranks.__getitem__)
 
 
 def signature(config):
@@ -258,7 +460,7 @@ def setup_logging(config, stage):
         ROOT / "rwkv7_backend.py",
         *ROOT.glob("src/02_data_validation/*.py"),
         *ROOT.glob("src/03_transforming_input_data/*.py"),
-        *ROOT.glob("src/04_creating_embeddings/*.py"),
+        *ROOT.glob("src/04_patch_indexing/*.py"),
         *ROOT.glob("src/05_model_training/*.py"),
         *ROOT.glob("src/06_holdout_test/*.py"),
         *ROOT.glob("src/07_forecasting/*.py"),
@@ -404,8 +606,8 @@ def read_artifact(path, config):
 
         return {**artifact, "records": ShardedRecords(artifact, path.parent)}
     if artifact.get("format") == "lazy_patch_index_v1":
-        sys.path.insert(0, str(ROOT / "src/04_creating_embeddings"))
-        from embed import open_patch_index
+        sys.path.insert(0, str(ROOT / "src/04_patch_indexing"))
+        from index_patches import open_patch_index
 
         return open_patch_index(artifact, config)
     return artifact
@@ -989,6 +1191,159 @@ def transform(config):
     return payload
 
 
+def array_window(targets, past, *, cutoff, context_length, horizon):
+    """`frame_window` for a table already converted to float32 arrays."""
+    if (
+        context_length < 1
+        or horizon < 1
+        or cutoff < context_length
+        or cutoff + horizon > len(targets)
+    ):
+        raise ValueError("Window lies outside table")
+
+    def tensor(values, start, stop):
+        return torch.as_tensor(values[start:stop].T.copy(), device="cpu").unsqueeze(0)
+
+    batch = {
+        "context": tensor(targets, cutoff - context_length, cutoff),
+        "horizon": horizon,
+        "future_target": tensor(targets, cutoff, cutoff + horizon),
+    }
+    if past is not None:
+        batch["past_covariates"] = tensor(past, cutoff - context_length, cutoff)
+    return batch
+
+
+# Starting worker processes costs a few seconds; smaller jobs decode in place.
+WORKER_MINIMUM_TABLES = 4096
+
+
+def throughput_options(config):
+    """Settings that change how fast tables are read and decoded, never the result."""
+    options = config.get("transform", {})
+    values = {
+        "workers": options.get("workers"),
+        "read_threads": options.get("read_threads", 8),
+        "read_window_tables": options.get("read_window_tables", 16384),
+        "read_window_mb": options.get("read_window_mb", 512),
+    }
+    for name, value in values.items():
+        optional = name == "workers"
+        if not (optional and value is None) and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < (0 if optional else 1)
+        ):
+            raise ValueError(
+                f"transform.{name} must be "
+                + (
+                    "null or a non-negative integer"
+                    if optional
+                    else "a positive integer"
+                )
+            )
+    return values
+
+
+def source_windows(sizes, start, stop, max_tables, max_bytes):
+    """Split tables [start, stop) into consecutive ranges bounded in count and bytes."""
+    first, total = start, 0
+    for index in range(start, stop):
+        if index > first and (
+            index - first >= max_tables or total + sizes[index] > max_bytes
+        ):
+            yield first, index
+            first, total = index, 0
+        total += sizes[index]
+    if first < stop:
+        yield first, stop
+
+
+@contextmanager
+def decoded_tables(paths, start, sizes, settings, options):
+    """Iterate `decode_table` results for tables [start, len(paths)), in order.
+
+    One thread reads the next window of source files in on-disk order while the
+    previous window is decoded, in worker processes when the job is large
+    enough to repay starting them. Reading ahead only changes when the work is
+    done: the caller still receives every table strictly in order.
+    """
+    workers = options["workers"]
+    if workers is None:
+        large = len(paths) - start >= WORKER_MINIMUM_TABLES
+        workers = min(8, (os.cpu_count() or 2) // 2) if large else 0
+    windows = queue.Queue(maxsize=1)
+    stop = Event()
+
+    def offer(item):
+        while not stop.is_set():
+            try:
+                return windows.put(item, timeout=0.2)
+            except queue.Full:
+                pass
+
+    def read_ahead():
+        try:
+            ranges = source_windows(
+                sizes,
+                start,
+                len(paths),
+                options["read_window_tables"],
+                options["read_window_mb"] * 1024 * 1024,
+            )
+            for first, last in ranges:
+                if stop.is_set():
+                    return
+                order = None
+                if isinstance(paths, SourceTables):
+                    files = paths.files(first, last)
+                    if paths.records is not None:
+                        order = paths.records[first:last].tolist()
+                else:
+                    files = [str(path) for path in paths[first:last]]
+                offer((first, read_files(files, options["read_threads"], order)))
+            offer(None)
+        except BaseException as error:  # raised again where the tables are consumed
+            offer(error)
+
+    def results(pool):
+        while True:
+            window = windows.get()
+            if window is None:
+                return
+            if isinstance(window, BaseException):
+                raise window
+            first, contents = window
+            tasks = zip(range(first, first + len(contents)), contents)
+            if pool is None:
+                for task in tasks:
+                    yield decode_table(task, settings)
+            else:
+                yield from pool.map(decode_in_worker, tasks, chunksize=32)
+
+    reader = Thread(target=read_ahead, daemon=True, name="source-reader")
+    pool = None
+    try:
+        if workers:
+            logger.info("Decoding tables in {} worker processes", workers)
+            # Unlike multiprocessing.Pool, this reports a worker that died
+            # instead of waiting forever for its result.
+            pool = ProcessPoolExecutor(
+                workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=start_worker,
+                initargs=(settings,),
+            )
+        reader.start()
+        yield results(pool)
+    finally:
+        stop.set()
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+        if reader.is_alive():
+            reader.join()
+
+
 def transform_next_patch(config):
     """Build causal transitions using full tables or the legacy reserved-tail policy."""
     d, p = config["data"], config["model"]["patch_size"]
@@ -1009,16 +1364,22 @@ def transform_next_patch(config):
         raise ValueError(
             "Next-patch objective currently uses observed, time-aligned covariates only"
         )
+    throughput_options(config)  # reject a bad setting before the long source scan
     paths = discover_source_tables(config)
     paths, selection = validated_sources(config, paths)
     if d["max_tables"] is not None:
         paths = paths[: d["max_tables"]]
     if not paths:
         raise ValueError("No source tables")
-    implementation = (
-        file_digest(Path(__file__))
-        + file_digest(Path(__file__).with_name("transform_progress.py"))
-        + file_digest(Path(__file__).with_name("sharded_records.py"))
+    implementation = "".join(
+        file_digest(Path(__file__).with_name(name))
+        for name in (
+            "transform.py",
+            "transform_progress.py",
+            "sharded_records.py",
+            "table_decoder.py",
+            "source_io.py",
+        )
     )
     with ShardedTransformCheckpoint(
         location(config, "processed"),
@@ -1045,14 +1406,27 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
         checkpoint.save_progress(completed)
         progress.update(completed)
 
-    for index in range(initial, len(paths)):
-        path = paths[index]
-        with timed(
-            f"load/split full series {index + 1}/{len(paths)} {path}", level="DEBUG"
-        ):
-            frame = pd.read_parquet(path)
-            minimum = max(48, 2 * p if full_training else (validation_patches + 2) * p)
-            if len(frame) < minimum:
+    raw = location(config, "raw")
+    minimum = max(48, 2 * p if full_training else (validation_patches + 2) * p)
+    export_directory = None
+    if d["export_processed_tables"]:
+        export_directory = location(config, "processed")
+        export_directory.mkdir(parents=True, exist_ok=True)
+    settings = {
+        "data": d,
+        "minimum_rows": minimum,
+        "export_directory": export_directory and str(export_directory),
+    }
+    with decoded_tables(
+        paths, initial, checkpoint.source_bytes, settings, throughput_options(config)
+    ) as tables:
+        for index in range(initial, len(paths)):
+            table = next(tables, None)
+            if table is None:
+                raise RuntimeError(f"Source reading stopped before table {index}")
+            path = paths[index]
+            rows, problem = table["rows"], table.get("problem")
+            if problem == "short":
                 reason = (
                     f"need at least {minimum} timesteps for causal full-table training"
                     if full_training
@@ -1060,42 +1434,24 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
                 )
                 checkpoint.append_excluded({"source": str(path), "reason": reason})
                 logger.warning(
-                    "Skipping short table {} rows={}: {}", path, len(frame), reason
+                    "Skipping short table {} rows={}: {}", path, rows, reason
                 )
                 report_progress(index + 1)
                 continue
-            time = frame[d["time_column"]]
-            if (
-                time.isna().any()
-                or not time.is_monotonic_increasing
-                or time.duplicated().any()
-            ):
+            if problem == "time":
                 raise ValueError(f"Invalid time ordering: {path}")
-            excluded = [
-                c
-                for c in frame
-                if any(
-                    re.search(pattern, c) for pattern in d["excluded_column_patterns"]
-                )
-            ]
-            past = d["past_covariates"]
-            if past == "auto":
-                past = [
-                    c
-                    for c in frame
-                    if c not in d["targets"] + [d["time_column"]] + excluded
-                ]
-            columns = d["targets"] + list(past)
-            if set(columns) & set(excluded):
+            if problem == "roles":
                 raise ValueError("Explicit roles contain excluded lag columns")
-            if np.isinf(frame[columns].to_numpy(dtype=np.float32)).any():
+            if problem == "infinity":
                 raise ValueError(f"Infinity in {path}")
+            excluded, past, columns = column_roles(table["names"], d)
+            targets, covariates = table["targets"], table.get("past")
             evaluation_horizon = (
-                min(d["horizon"], len(frame) - 2 * p) if full_training else d["horizon"]
+                min(d["horizon"], rows - 2 * p) if full_training else d["horizon"]
             )
-            cutoff = len(frame) - evaluation_horizon
-            training_stop = len(frame) if full_training else cutoff
-            left_pad = (-len(frame)) % p
+            cutoff = rows - evaluation_horizon
+            training_stop = rows if full_training else cutoff
+            left_pad = (-rows) % p
             train_tokens = (training_stop + left_pad) // p
             source = (
                 path.relative_to(ROOT).as_posix()
@@ -1106,9 +1462,9 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
                 "table_index": index,
                 "screening_smoke_test_only": selection.get("smoke_test_only", False),
                 "source": source,
-                "source_key": path.relative_to(location(config, "raw")).as_posix(),
-                "source_sha256": file_digest(path),
-                "source_rows": len(frame),
+                "source_key": path.relative_to(raw).as_posix(),
+                "source_sha256": table["sha256"],
+                "source_rows": rows,
                 "evaluation_cutoff": cutoff,
                 "validation_policy": policy,
                 "training_stop": training_stop,
@@ -1122,13 +1478,13 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
             logger.debug(
                 "Table={} rows={} variables={} train_transitions={} training_stop={} policy={} evaluation_preview=[{}, {}) excluded={}",
                 index,
-                len(frame),
+                rows,
                 len(columns),
                 train_tokens - 1,
                 training_stop,
                 policy,
                 cutoff,
-                len(frame),
+                rows,
                 excluded,
             )
             # A chunk has at most C input points plus one target patch. Adjacent chunks
@@ -1137,20 +1493,12 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
                 start = max(0, token_start * p - left_pad)
                 stop = min(training_stop, (token_start + max_tokens + 1) * p - left_pad)
                 batch = {
-                    "context": torch.tensor(
-                        frame[d["targets"]]
-                        .iloc[start:stop]
-                        .to_numpy(dtype=np.float32)
-                        .T.copy()
-                    )[None],
+                    "context": torch.tensor(targets[start:stop].T.copy())[None],
                     "horizon": p,
                 }
                 if past:
                     batch["past_covariates"] = torch.tensor(
-                        frame[list(past)]
-                        .iloc[start:stop]
-                        .to_numpy(dtype=np.float32)
-                        .T.copy()
+                        covariates[start:stop].T.copy()
                     )[None]
                 record = {
                     **metadata,
@@ -1168,28 +1516,23 @@ def _transform_next_patch_tables(config, paths, selection, checkpoint):
                 "split": "evaluation",
                 "cutoff": cutoff,
                 "context_rows": [max(0, cutoff - d["context_length"]), cutoff],
-                "label_rows": [cutoff, len(frame)],
+                "label_rows": [cutoff, rows],
             }
             if not full_training:
-                evaluation_record["batch"] = frame_window(
-                    frame,
+                if len(set(columns)) != len(columns):
+                    raise ValueError(
+                        "Column roles must be disjoint and targets nonempty"
+                    )
+                evaluation_record["batch"] = array_window(
+                    targets,
+                    covariates,
                     cutoff=cutoff,
                     context_length=min(cutoff, d["context_length"]),
                     horizon=evaluation_horizon,
-                    targets=d["targets"],
-                    past_covariates=past,
                 )
             checkpoint.append_record(evaluation_record)
             checkpoint.append_table(metadata)
-            if d["export_processed_tables"]:
-                directory = location(config, "processed")
-                directory.mkdir(parents=True, exist_ok=True)
-                frame[[d["time_column"]] + columns].to_parquet(
-                    directory / f"table_{index:03d}.parquet",
-                    index=False,
-                    compression="zstd",
-                )
-        report_progress(index + 1)
+            report_progress(index + 1)
     checkpoint.save_progress(len(paths), force=True)
     if not checkpoint.state["table_count"]:
         raise ValueError(

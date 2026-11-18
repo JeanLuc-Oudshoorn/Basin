@@ -63,7 +63,7 @@ The default execution now uses length buckets, fused AdamW, bounded CPU prefetch
 selective activation checkpointing and validation batches of 16. Gradient
 accumulation remains configurable (default 1 with batch size 8). Detailed DEBUG
 logs still go to disk; the console shows INFO progress. These execution settings
-do not require regenerating processed data or the embedding index.
+do not require regenerating processed data or the patch index.
 See the [training throughput audit](../audits/2026-10-28/training_speed/REPORT.md)
 for the measured speedup, memory limits, configuration and reproduction commands.
 Compiled cross-variable attention is enabled by default, including when
@@ -79,8 +79,8 @@ for experiments, numerical checks, memory use and restart verification.
 See the [epoch training audit](../audits/2026-10-27/epoch_training/REPORT.md)
 for configuration, accumulation weighting, learning-rate scheduling and tests.
 
-`embed.py` now prepares a lightweight patch index instead of caching random
-embedding vectors for the whole corpus. Raw tensors are memory mapped; features
+`index_patches.py` (formerly `embed.py`) prepares a lightweight patch index
+instead of caching random embedding vectors for the whole corpus. Raw tensors are memory mapped; features
 are constructed per accessed window. The learned patch projection runs inside
 the model and is optimized jointly during training. See the
 [embedding memory investigation](../audits/2026-10-27/embedding_memory/REPORT.md)
@@ -119,7 +119,7 @@ remain unchanged.
 See the [default training and holdout audit](../audits/2026-10-25/default_holdout/REPORT.md)
 for rounding, isolation, rolling origins, parameter dimensions, untied projections,
 logs, test artifacts, and the full-size GPU smoke test. Changing the model settings
-requires rerunning transform and embed before training. Default outputs now use
+requires rerunning transform and index_patches before training. Default outputs now use
 the `model` folders; the archived 447M model uses `447m_model`. The checkpoint and
 architecture report record the actual model size.
 
@@ -146,7 +146,7 @@ repository root, including when launched from PyCharm.
 | Stage | Script | Output |
 |---|---|---|
 | Transform | `src/03_transforming_input_data/transform.py` | `data/02_processed/windows.pt`, manifest and per-window Parquet tables |
-| Embed | `src/04_creating_embeddings/embed.py` | `data/03_embedded/embeddings.pt` and manifest |
+| Index patches | `src/04_patch_indexing/index_patches.py` | `data/03_patch_index/patch_index.pt` and manifest |
 | Train | `src/05_model_training/train.py` | `results/pipeline/training/model.pt`, loss CSV/JSON |
 | Forecast | `src/07_forecasting/forecast.py` | `results/pipeline/forecasts/`: comparison PNGs, forecast CSVs, metrics JSON |
 
@@ -158,7 +158,7 @@ a `basin` Python package.
 ```powershell
 uv sync --extra data
 uv run python src/03_transforming_input_data/transform.py --config configs/smoke_masked_horizon.json
-uv run python src/04_creating_embeddings/embed.py --config configs/smoke_masked_horizon.json
+uv run python src/04_patch_indexing/index_patches.py --config configs/smoke_masked_horizon.json
 uv run python src/05_model_training/train.py --config configs/smoke_masked_horizon.json
 uv run python src/07_forecasting/forecast.py --config configs/smoke_masked_horizon.json
 ```
@@ -170,7 +170,7 @@ logging and plot settings.
 
 Torch, Loguru, pandas, PyArrow, matplotlib and statsmodels are normal dependencies
 in `pyproject.toml` and `uv.lock`. Windows uses official CPU Torch wheels for
-preprocessing/embedding inspection; Linux uses CUDA 13.0 wheels, following
+preprocessing/patch-index inspection; Linux uses CUDA 13.0 wheels, following
 [uv's platform-specific index configuration](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
 The existing fused RWKV extensions require Linux/CUDA. On Windows the training/forecasting
@@ -202,7 +202,7 @@ ends before that evaluation cutoff. This is temporal holdout smoke evaluation,
 not cross-dataset zero-shot benchmarking. The per-window Parquet tables include history and
 labels for inspection; tensor dictionaries distinguish them explicitly.
 
-Embed normalizes from context-only mean/std, patches values, masks and relative
+The patch encoder normalizes from context-only mean/std, patches values, masks and relative
 time, then adds target/past/known-future role embeddings. The saved artifact has:
 
 - `encoder_state`: initial projection and role weights;
@@ -237,7 +237,7 @@ Inspect complete saved tensors with:
 ```python
 import torch
 
-artifact = torch.load("data/03_embedded/embeddings.pt", weights_only=True)
+artifact = torch.load("data/03_patch_index/patch_index.pt", weights_only=True)
 print(artifact["records"][0]["prepared"]["features"])
 print(artifact["records"][0]["initial_embeddings"])
 ```

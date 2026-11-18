@@ -40,6 +40,8 @@ explicit = true
 data = ["numpy", "scipy", "pandas", "matplotlib", "pyarrow", "networkx"]
 validation = ["prophet>=1.1.5,<2", "numpy", "pandas", "pyarrow"]
 benchmarks = ["timestral"]
+# Optional copy of training checkpoints in Azure Blob Storage (training.checkpoint_upload).
+cloud = ["azure-storage-blob>=12.19,<13"]
 
 [tool.ruff]
 target-version = "py312"
@@ -51,7 +53,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 # These entry points support direct execution by setting sys.path before imports.
 "tests/*.py" = ["E402"]
-"src/04_creating_embeddings/embed.py" = ["E402"]
+"src/04_patch_indexing/index_patches.py" = ["E402"]
 "src/05_model_training/train.py" = ["E402"]
 "src/05_model_training/capacity_test.py" = ["E402"]
 "src/06_holdout_test/holdout_test.py" = ["E402"]

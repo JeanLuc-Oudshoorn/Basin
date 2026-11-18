@@ -23,11 +23,11 @@ from torch.utils.checkpoint import checkpoint
 for directory in (
     ROOT,
     ROOT / "src/03_transforming_input_data",
-    ROOT / "src/04_creating_embeddings",
+    ROOT / "src/04_patch_indexing",
 ):
     sys.path.insert(0, str(directory))
-from embed import ForecastConfig, PatchEncoder, ResidualProjection
 from epoch_training import fit_epochs, training_options
+from index_patches import ForecastConfig, PatchEncoder, ResidualProjection
 from performance import configure_cuda_memory, make_optimizer
 from token_inventory import (
     prepare_token_inventory,
@@ -681,7 +681,7 @@ def train(config):
     training_options(config["training"])
     configure_cuda_memory(config["training"])
     torch.set_num_threads(config["training"].get("cpu_threads", 4))
-    data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+    data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
     # Detect an incompatible completed run before replacing its split, inventory
     # or architecture reports. The changed validation tail requires fresh data.
     from checkpoints import resume_path
@@ -698,7 +698,7 @@ def train(config):
                 f"Saved layers={identity.get('model', {}).get('layers', 'unknown')}; "
                 f"requested layers={config['model']['layers']}. "
                 "The prepared artifacts already match the current configuration; "
-                "do not rerun transform.py or embed.py for this error. "
+                "do not rerun transform.py or index_patches.py for this error. "
                 "Archive the existing model results directory, then run train.py again "
                 "to initialize fresh weights. Auto-resume cannot use this incompatible checkpoint."
             )
@@ -710,7 +710,7 @@ def train(config):
             raise ValueError(
                 "Saved checkpoint predates dataset-disjoint validation. Its weights may already "
                 "have trained on the validation tables. Set training.resume=false to start fresh "
-                "or choose a new training output directory; transform/embed do not need rerunning "
+                "or choose a new training output directory; transform/index_patches do not need rerunning "
                 "for this split change."
             )
         del metadata
@@ -720,7 +720,7 @@ def train(config):
         "processed_sha256"
     ] != file_digest(location(config, "processed") / "windows.pt"):
         raise ValueError(
-            "Processed data changed: rerun embedding stage before training"
+            "Processed data changed: rerun index_patches.py before training"
         )
     records, validation_records, test_records, dataset_split = split_datasets(
         data["records"], config
@@ -764,7 +764,7 @@ def train(config):
         split_path=str(location(config, "training") / "dataset_split.json"),
     )
     if not records:
-        raise ValueError("Embedding artifact contains no training windows")
+        raise ValueError("Patch index contains no training windows")
     torch.manual_seed(config["seed"])
     torch.set_num_threads(config["training"].get("cpu_threads", 4))
     settings = ForecastConfig(
@@ -892,8 +892,8 @@ def train(config):
             "dataset_split": dataset_split,
             "lr_scheduler": scheduler_state,
             "training_summary": training_summary,
-            "embedding_sha256": file_digest(
-                location(config, "embedded") / "embeddings.pt"
+            "patch_index_sha256": file_digest(
+                location(config, "patch_index") / "patch_index.pt"
             ),
         },
     )

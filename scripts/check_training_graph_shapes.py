@@ -124,7 +124,7 @@ def main():
             group.append(dict(split="train", prepared=prepared))
         groups.append(group)
     if args.real_data:
-        data = read_artifact(location(config, "embedded") / "embeddings.pt", config)
+        data = read_artifact(location(config, "patch_index") / "patch_index.pt", config)
         training, validation, holdout, split = split_datasets(data["records"], config)
         groups = make_batches(
             training,

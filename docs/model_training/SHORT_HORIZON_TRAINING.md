@@ -156,12 +156,12 @@ archive location (the following destination must not already exist):
 ```powershell
 Move-Item -LiteralPath .\results\model -Destination .\results\model_archive_before_395m
 uv run python .\src\03_transforming_input_data\transform.py
-uv run python .\src\04_creating_embeddings\embed.py
+uv run python .\src\04_patch_indexing\index_patches.py
 uv run python .\src\05_model_training\train.py
 ```
 
 Transformation automatically refreshes stale screening when configured to do
-so. Old processed and embedding artifacts have incompatible signatures and
+so. Old processed and patch-index artifacts have incompatible signatures and
 must be regenerated. The new run uses the standard `results/model/training`
 directory and ordinary epoch checkpoints. No special patch-training folder
 or alternate training entrypoint is introduced. The archived 447M weights and

@@ -84,7 +84,7 @@ project cache on first use.
 ```powershell
 uv run python src/02_data_validation/validate_generated_data.py
 uv run python src/03_transforming_input_data/transform.py
-uv run python src/04_creating_embeddings/embed.py
+uv run python src/04_patch_indexing/index_patches.py
 ```
 
 On Windows, the validation and transformation entry points discover source files
@@ -125,8 +125,8 @@ policy invalidates prior decisions. `settings.json` preserves the full config;
 Per-table progress is durable in CSV; INFO reports every 100 tables and at
 completion with elapsed time and ETA. Detailed records are DEBUG in run logs.
 
-Changing the filter affects newly transformed/embedded data; it does not modify
-an existing model. Rerun transform and embed before training on the new cohort.
+Changing the filter affects newly transformed/indexed data; it does not modify
+an existing model. Rerun transform and index_patches before training on the new cohort.
 Existing models remain testable using their own saved split and schema policy,
 even though their old screening signature differs from the current config.
 The complete verification trail is in the

@@ -429,7 +429,7 @@ def main():
     training_and_forecast()
     sources = [
         "configs/config.json",
-        "src/04_creating_embeddings/embed.py",
+        "src/04_patch_indexing/index_patches.py",
         "src/05_model_training/train.py",
         "src/05_model_training/training_protocol.py",
         "scripts/render_architecture_diagrams.py",
