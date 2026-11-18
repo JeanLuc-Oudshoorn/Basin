@@ -57,7 +57,21 @@ archived 500M model). The
 [November 8 throughput benchmark](time_benchmark/TRAINING_THROUGHPUT_2026-11-08.md)
 measured approximately 8% higher throughput on recorded training batches and
 verified all 48 length/covariate-count buckets without OOM retries. Default logs
-show epoch progress/ETA, memory and preparation/model-update timings.
+show epoch progress/ETA, memory and preparation/model-update timings, once per
+1,000 tables (`training.log_every_tables`).
+
+Since 2026-11-17 the FP32-master AdamW update runs as one CUDA kernel and
+gradient clipping skips work that changes nothing. Both give the same weights
+bit for bit. On the corpus's own mix of batch shapes an update takes 109.9 ms
+instead of 143.7 ms (72.8 instead of 55.7 tables per second) with unchanged peak
+VRAM. Checkpoints are written by a background thread while training continues,
+and `training.checkpoint_upload` copies each one to an Azure Blob Storage
+container while it is written; one checkpoint is kept in each place and replaced
+only by a complete new one. The fixed validation panel is saved after the first
+check (`training.validation_cache`), so later checks no longer open 25,000
+source tables. See the [training speed report](model_training/TRAINING_SPEED_2026-11-17.md)
+for measurements, tests and what was tried and rejected.
+
 Bounded training CUDA replay remains optional, but is
 disabled by default after capture-inclusive mixed-data tests. See the
 [training schedule benchmark](time_benchmark/training_graph_schedule/REPORT.md)
@@ -117,7 +131,7 @@ forecasting stage writes to `results/model/forecasts`; when it delegates to the
 holdout evaluator, it uses the holdout directory. Paths remain configurable.
 
 The folder rename preserves existing binary data and checkpoint contents. It does
-not convert the archived 447M weights into the default 395M architecture. The
+not convert archived weights into the current default architecture. The
 [path migration audit](audits/2026-10-31/model_folder_names/REPORT.md) records
 the directory changes and text-reference updates.
 
@@ -239,6 +253,18 @@ The repository can remain in this Windows checkout. For faster source imports,
 clone it into WSL's Linux filesystem and run the same scripts there. The venv
 and extension cache already live on the Linux filesystem.
 
+WSL reads a Windows drive through a mount (`/mnt/e`) that is slow for large
+files Windows no longer holds in its cache: 5 MiB/s was measured on 2026-11-17,
+against 106 MiB/s for the same drive read natively and 110 MiB/s for WSL's own
+disk. Writes are not affected in the same way (59 MiB/s). Resuming from a
+4.5 GB checkpoint under `results/` therefore takes about 14 minutes, and the
+saved validation panel is kept on WSL's disk (`~/.cache/basin/validation_panels`).
+
+The setup script also installs `azure-storage-blob` (optional dependency group
+`cloud`) for checkpoint copies. Their credentials, `AZURE_ENDPOINT` and
+`AZURE_STORAGE_KEY`, are read from the environment or from a git-ignored `.env`
+file in the repository root.
+
 ## Convert public MATLAB datasets
 
 Place `.mat` files in `data/public/`, install the data dependencies, then run
@@ -281,17 +307,21 @@ reusable generator class's defaults; the runner is the source of truth.
 
 | Setting | Current value | Meaning |
 |---|---|---|
-| `NUM_TABLES` | `1000` | Number of original SCMs; optional copies are extra |
-| `SEED` | `1` | Reproducible sampling; `None` requests fresh randomness |
-| `MIN_ROWS`, `MAX_ROWS` | `96`, `2056` | Recorded length range for original tables |
+| `NUM_TABLES` | `6_500_000` | Number of original SCMs; optional copies are extra |
+| `SEED` | `7` | Reproducible sampling; `None` requests fresh randomness |
+| `MIN_ROWS`, `MAX_ROWS` | `112`, `2056` | Recorded length range for original tables |
 | `FULL_LENGTH_PROBABILITY` | `0.5` | Point mass at the maximum length |
 | `PREHISTORY_PROBABILITY` | `0.5` | Among full-length tables, simulate earlier history and retain the tail |
 | `MAX_PREHISTORY_ROWS` | `2048` | Maximum extra history, in addition to burn-in |
 | `MIN_COVARIATES`, `MAX_COVARIATES` | `3`, `6` | Sampled source-node count before extra plant/sensor channels |
 | `VISIBLE_COVARIATE_LAMBDA` | `1.3` | Poisson count of visible SCM covariates, capped at those available |
 | `BURN_IN` | `128` | Warm-up steps excluded from the recorded table |
-| `SAVE_SCM`, `SAVE_PLOT`, `SAVE_DAG` | `True` | Save replay specification and both plot types |
-| `PLOT_COVARIATES` | `True` | Include recorded covariates in the series plot |
+| `SAVE_SCM`, `SAVE_PLOT`, `SAVE_DAG` | `False` | Replay specification and both plot types; off for bulk production |
+| `PLOT_COVARIATES` | `False` | Include recorded covariates in the series plot |
+| `GENERATION_WORKERS` | `10` | Worker processes; see "Parallel generation and progress" |
+
+These are the settings of the latest bulk run. For a small sample to inspect, lower
+`NUM_TABLES` and turn the three `SAVE_` settings on.
 
 ### Files, dates and repeated runs
 
@@ -342,7 +372,7 @@ negative delays and invalid parent references are rejected.
 - **Other historical outcome effects:** `LONG_LAG_PROBABILITY=0.035` adds an
   unstructured lag when capacity permits. Residual history supplements selected
   outcome lags with `RESIDUAL_HISTORY_PROBABILITY=0.05`.
-- **Covariate delays:** `INSTANTANEOUS_PROBABILITY=0.03`; otherwise a positive
+- **Covariate delays:** `INSTANTANEOUS_PROBABILITY=0.02`; otherwise a positive
   delay is drawn from a discretized exponential, with additional transport-delay
   cases. `MAX_COVARIATE_LAG=96` caps the delay.
 - **Visibility:** a Poisson draw with lambda 1.3 chooses the number of visible
@@ -530,10 +560,25 @@ the source model and source-clock lags.
 
 ### Parallel generation and progress
 
-`GENERATION_WORKERS=None` automatically selects up to eight worker processes,
-based on CPU count. Each worker samples, simulates and writes complete tables.
-Use a positive integer to set the worker count explicitly. The console shows
+`GENERATION_WORKERS=None` automatically selects half the logical processors, at
+most eight. Each worker samples, simulates and writes complete tables. Use a
+positive integer to set the worker count explicitly; the runner sets 10 of the
+12 logical processors of the 6-core generation machine. The console shows
 completed originals, throughput, elapsed time, ETA and additional copy counts.
+
+Measured on 2026-11-15 (Ryzen 5 7600X3D, 3,000 tables, production settings, no
+plots): 76 tables/s with six workers and 105 tables/s with twelve. The tables
+are byte-identical for any worker count.
+
+Simulation is a per-row Python loop. Each node's constants and each edge's
+operator are therefore bound once per table rather than looked up on every row
+(`compile_instruction` and `run_steps` in `effect_mechanisms.py`,
+`_bind_effect` in `scm_generator.py`), short parent sums skip the NumPy array,
+and Markov inputs search plain lists. None of this may change a value:
+`tests/test_effect_mechanisms.py` and `tests/test_process_mechanisms.py` compare
+the bound path with the reference path bit for bit, and after any such change
+`benchmark_generation_exact.py` should be rerun against a copy of the previous
+generator.
 
 `GENERATION_BATCH_SIZE=16` batches work while keeping queues bounded.
 `PROGRESS_INTERVAL=1.0` controls console update frequency. In sequential
@@ -790,6 +835,7 @@ initialization. These sequence kernels do not expose streaming recurrent state.
 The vendored RWKV source retains its upstream Apache-2.0
 [license](../third_party/rwkv-lm/LICENSE). See
 [provenance](RWKV-7_setup/RWKV7_PROVENANCE.md) for the upstream revision and local patches.
+
 # Trainable patch-based forecaster
 
 The RWKV-7 pipeline lives in the numbered `src/` stage folders and uses
@@ -826,13 +872,15 @@ The checkpoint cadence is configured independently of progress logging:
 
 ```json
 "transform": {
-  "batch_size_tables": 1000,
-  "batch_memory_limit_mb": 64,
+  "batch_size_tables": 100000,
+  "batch_memory_limit_mb": 512,
   "checkpoint_every_tables": 100000,
   "checkpoint_interval_seconds": null
 }
 ```
 
+These are the values in `configs/config.json`. Without the first two settings,
+buffers are spilled after 1,000 tables or 64 MiB.
 By default, completed tables are checkpointed every 100,000 tables and after the
 final table, with no time trigger. Set either option to `null` to disable that
 trigger, or set a positive table count/time in seconds. When both are enabled,
@@ -846,8 +894,9 @@ sizes and modification times and verifies saved shards without loading their ten
 Changing the source inventory, data/model configuration or transform implementation
 uses a separate checkpoint directory. Keep source tables unchanged during a run.
 
-Transformation spills buffers after 1,000 tables or approximately 64 MiB of tensor
-data, independently of checkpoint frequency. The final `windows.pt` is a small
+Transformation spills buffers after `batch_size_tables` tables or approximately
+`batch_memory_limit_mb` of tensor data, whichever comes first, independently of
+checkpoint frequency. The final `windows.pt` is a small
 shard index, published atomically without merging the corpus into RAM. Patch indexing and
 training read shards on demand through the artifact loader; older single-file
 artifacts remain supported. The referenced `batch_*.pt` files in the checkpoint
@@ -856,14 +905,6 @@ The largest source table is still read in full, and source/record metadata still
 uses memory. This resume mechanism covers next-patch transformation;
 optional Chronos/Prophet screening remains a separate upstream phase.
 
-Training ends after saving the model; holdout testing is a separate stage.
-General forecasting lives under `src/07_forecasting/forecast.py`. GPU stages
-launched on Windows automatically use the configured WSL CUDA environment.
-The outputs include logs, training loss, forecast RMSE and Prophet/last-observation
-carry-forward comparison plots. Holdout evaluation uses up to five origins per
-table, configured by `holdout.percentiles`, with table-level progress and ETA.
-Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
-slider and model toggles. Regenerate them from existing saved predictions with
 Millions of small tables on a hard disk are limited by head movement, so the
 stage avoids visiting files one at a time in name order. Source discovery lists
 each date folder once and makes one metadata lookup per table folder, in
@@ -893,6 +934,14 @@ order. The output is the same as with a single process. `patch_index.workers`
 sets the number of processes (default `null`: half the logical CPUs, at most 8,
 when eight or more shards remain; `0` inspects in the main process).
 
+Training ends after saving the model; holdout testing is a separate stage.
+General forecasting lives under `src/07_forecasting/forecast.py`. GPU stages
+launched on Windows automatically use the configured WSL CUDA environment.
+The outputs include logs, training loss, forecast RMSE and Prophet/last-observation
+carry-forward comparison plots. Holdout evaluation uses up to five origins per
+table, configured by `holdout.percentiles`, with table-level progress and ETA.
+Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
+slider and model toggles. Regenerate them from existing saved predictions with
 `uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
 Results go to `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
@@ -900,8 +949,9 @@ exported `paths.training/model.pt` and its saved test split.
 Choose comparison models with `holdout.benchmark_models` (default
 `["prophet", "naive", "chronos"]`; optional `"timestral"`) and evaluate a
 reproducible portion of the test tables with `holdout.sample_percent` (default
-100, e.g. 1 for a quick 1% run). The percentage applies to the admitted saved
-holdout split. See the [foundation benchmark audit](audits/2026-10-29/foundation_benchmarks/REPORT.md).
+100, e.g. 1 for a quick 1% run). `configs/config.json` currently compares with
+`["naive", "chronos", "timestral"]` on 15% of the test tables. The percentage
+applies to the admitted saved holdout split. See the [foundation benchmark audit](audits/2026-10-29/foundation_benchmarks/REPORT.md).
 Fresh training now records full epoch-zero validation before the first update;
 resumed runs retain their recorded baseline, if available. See the
 [sampled evaluation and inference audit](audits/2026-10-29/sampled_evaluation/REPORT.md).
@@ -963,9 +1013,10 @@ Exact uniqueness does not establish statistical independence or sufficient data:
 near-identical or noisy patches can all have different contents. The report
 provides descriptive ratios without imposing a sufficiency threshold.
 
-The default configuration now runs a 394.9M-parameter causal next-patch model
-with 16-point patches, width 1,024, and a 2,048-point history cap. See the earlier
+Earlier defaults were a 394.9M-parameter causal next-patch model with 16-point
+patches, width 1,024 and a 2,048-point history cap, and before it the
 [301.8M-parameter, 100-table experiment and baseline comparison](audits/2026-10-24/next_patch_300m/REPORT.md).
+The current default is the 221.5M hybrid described at the top of this document.
 
 The earlier admission policy used pre-test multivariate Prophet MAE
 compared with last-observation MAE. The earlier strict univariate-or-multivariate
@@ -975,22 +1026,32 @@ policy is documented in the historical
 Every regular and capacity training run automatically writes a timestamped JSONL
 journal under `logs/`, with configuration, metrics, memory and completion/failure
 events. See the [JSONL format and verification audit](audits/2026-10-25/training_jsonl/REPORT.md).
+With `training.log_every_tables=1000` (the value in `configs/config.json`) the
+journal holds one `metrics` record per 1,000 tables, summed over the updates in
+between, plus one before every checkpoint and validation; `null` restores one
+record per update with the ids of its tables.
 
 Training now bounds GPU execution separately from the optimizer batch. Defaults
 in `configs/config.json` retain `batch_size=8` and
 `gradient_accumulation_steps=1`, but split each update into physical microbatches
-of at most eight tables (`microbatch_size=8`) and 1,536 padded variable-patches
-(`microbatch_token_limit=1536`). For example, eight tables with eight variables
-and 128 patches each run as eight single-table forward/backward passes, followed
-by one optimizer update. Losses are weighted by observed target points. Physical
+of at most eight tables (`microbatch_size=8`) and 3,072 padded variable-patches
+(`microbatch_token_limit=3072`; the code default is 1,536). For example, eight
+tables with eight variables and 128 patches each (8,192 variable-patches) run as
+three forward/backward passes of three, three and two tables, followed by one
+optimizer update. Losses are weighted by observed target points. Physical
 microbatching preserves context, padding, validation coverage and the chosen
-batch schedule.
+batch schedule. Running batches of 3,072 to 4,096 variable-patches in one pass
+was measured on 2026-11-17 and was 2.7% slower on the real mix of shapes.
 
-`cuda_memory_limit_gib=8.0` caps PyTorch's CUDA allocator, including its cache,
-at the smaller of 8 GiB and 80% of device capacity. CUDA libraries and desktop
-applications use additional memory outside this budget. A shape that cannot fit
-raises an allocation error rather than letting PyTorch's reservation grow without
-bound. Each execution limit accepts `null` to disable that limit; a token budget
+`cuda_memory_limit_gib=11.0` caps PyTorch's CUDA allocator, including its cache,
+at the smallest of 11 GiB, device capacity minus `cuda_memory_headroom_gib=0.5`,
+and the memory free at start minus that headroom (10.26 GiB on the 12 GB
+RTX 5070 with a desktop running). CUDA libraries and desktop applications use
+additional memory outside this budget. A shape that cannot fit raises an
+allocation error rather than letting PyTorch's reservation grow into shared GPU
+memory; with `auto_microbatch=true` the update is then repeated with smaller
+passes and the smaller size is remembered for that shape.
+Each execution limit accepts `null` to disable that limit; a token budget
 always permits at least one table and does not truncate its sequence. These
 settings apply when the next training worker starts. See the
 [VRAM investigation and benchmarks](audits/2026-10-28/vram_budget/REPORT.md).
@@ -1011,8 +1072,8 @@ a shape before capturing it; accumulation microbatches count only once per
 update. `training_graph_max_tokens=32` limits capture to short contexts (up to
 512 input observations at patch size 16). Existing cached profiles replay
 immediately; other shapes use compiled execution. Set the limit to `null` to
-experiment with all lengths. The two-profile/1.5 GiB graph cache and 8 GiB CUDA
-allocator limits still apply. See the
+experiment with all lengths. The two-profile/1.5 GiB graph cache and the CUDA
+allocator limit still apply. See the
 [capture-inclusive schedule benchmark](time_benchmark/training_graph_schedule/REPORT.md)
 for total-update timings, correctness checks and limits of the measurement.
 
