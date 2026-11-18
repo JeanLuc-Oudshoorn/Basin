@@ -66,21 +66,23 @@ try:
     from .effect_mechanisms import (
         STATIC_OPERATORS,
         TEMPORAL_OPERATORS,
-        apply_node_link,
-        clip_scalar,
+        bind_node_link,
         combine_parents,
-        evaluate_extra,
+        compile_program,
+        compile_steps,
         prepare_parent_combination,
+        run_steps,
     )
 except ImportError:
     from effect_mechanisms import (
         STATIC_OPERATORS,
         TEMPORAL_OPERATORS,
-        apply_node_link,
-        clip_scalar,
+        bind_node_link,
         combine_parents,
-        evaluate_extra,
+        compile_program,
+        compile_steps,
         prepare_parent_combination,
+        run_steps,
     )
 
 try:
@@ -119,11 +121,6 @@ except ImportError:
         sample_plant,
         simulate_plant,
     )
-
-
-# Membership is checked for every expression instruction, on every timestep.
-# Materialize this once instead of concatenating/scanning tuples in that loop.
-_EXTRA_OPERATORS = frozenset(STATIC_OPERATORS + TEMPORAL_OPERATORS)
 
 
 def _render_plot_job(generator, model, frame, directory):
@@ -1144,67 +1141,15 @@ class OperationalSCMGenerator:
 
     @staticmethod
     def _evaluate(program, value, state=None):
-        # One state dictionary per edge, with an independent slot per instruction.
+        # One state dictionary per edge: it keeps the program bound to its
+        # parameters, with independent memory per temporal instruction.
         # Omitting state evaluates a fresh one-step response for inspection.
-        state = {} if state is None else state
-        values = [value]
-        for index, instruction in enumerate(program):
-            a, b = values[instruction["a"]], values[instruction["b"]]
-            z = instruction["gain"] * a + instruction["offset"]
-            op, limit = instruction["op"], instruction["limit"]
-            if op == "affine":
-                result = z
-            elif op == "sine":
-                result = np.sin(z)
-            elif op == "cosine":
-                result = np.cos(z)
-            elif op in ("damped_sine", "damped_cosine"):
-                # For nonnegative input this is exp(-decay*z)*sin/cos(w*z+phase).
-                # abs(z) extends it to signed covariates without exponential
-                # blow-up. Time-domain ringing is modeled separately below.
-                angle = instruction["frequency"] * z + instruction["phase"]
-                wave = np.sin(angle) if op == "damped_sine" else np.cos(angle)
-                result = np.exp(-instruction["decay"] * abs(z)) * wave
-            elif op == "tangent":
-                cap = instruction["angle_limit"]
-                result = np.tan(cap * np.tanh(z / cap))
-            elif op == "sigmoid":
-                result = np.tanh(z / 2)  # 2*sigmoid(z)-1, without exponential overflow.
-            elif op == "exponential":
-                result = np.expm1(limit * np.tanh(z / limit)) / limit
-            elif op == "power":
-                result = np.sign(z) * abs(z) ** instruction["power"]
-            elif op == "inverse_square":
-                # Exactly 1/z² outside a sampled near-zero floor, followed by
-                # the same soft actuator saturation as the other operators.
-                # The instruction's gain/offset shift and scale the singularity.
-                result = (1 / max(abs(z), instruction["floor"])) ** 2
-            elif op == "log":
-                result = np.sign(z) * np.log1p(abs(z))
-            elif op == "relu":
-                result = max(0, z)
-            elif op == "mlp":
-                result = np.dot(
-                    instruction["v"],
-                    np.tanh(np.asarray(instruction["w"]) * z + instruction["bias"]),
-                )
-            elif op == "add":
-                result = z + b
-            elif op == "multiply":
-                result = z * b
-            elif op == "gate":
-                result = z * (1 + np.tanh(b)) / 2
-            elif op in _EXTRA_OPERATORS:
-                instruction_state = state.get(index)
-                if instruction_state is None:
-                    instruction_state = state[index] = {}
-                result = evaluate_extra(op, z, b, instruction, instruction_state)
-            else:
-                raise ValueError(f"Unknown operator: {op}")
-            # Soft saturation models finite capacity and controls nonlinear
-            # feedback. Accumulated trend/walk states are NOT clipped this way.
-            values.append(float(limit * np.tanh(result / limit)))
-        return values[-1]
+        run = None if state is None else state.get("run")
+        if run is None:
+            run = compile_program(program)
+            if state is not None:
+                state["run"] = run
+        return run(value)
 
     def _edge(self, parent, lag=0, input_domain=None):
         return {
@@ -1580,6 +1525,31 @@ class OperationalSCMGenerator:
         return edge["weight"] * (
             cls._evaluate(edge["program"], value, state) + edge["output_offset"]
         )
+
+    @staticmethod
+    def _bind_effect(edge):
+        """effect(value) of one edge in one simulation, with its own memory.
+
+        Same arithmetic as `_effect`; the saved parameters are read once
+        instead of on every row.
+        """
+        input_offset, input_scale = edge["input_offset"], edge["input_scale"]
+        weight, output_offset = edge["weight"], edge["output_offset"]
+        steps = compile_steps(edge["program"])
+        if len(steps) == 1 and steps[0][1:] == (0, 0):
+            step = steps[0][0]  # Most edges: one instruction on the edge input.
+
+            def effect(value):
+                value = (value - input_offset) / input_scale
+                return weight * (step(value, value) + output_offset)
+
+            return effect
+        run = run_steps(steps)
+
+        def effect(value):
+            return weight * (run((value - input_offset) / input_scale) + output_offset)
+
+        return effect
 
     def _dynamics(self, event_name):
         r = self.rng
@@ -2719,9 +2689,6 @@ class OperationalSCMGenerator:
         length = rows + warmup
         names = [n["name"] for n in model["nodes"]] + ["outcome"]
         specs = model["nodes"] + [model["outcome"]]
-        edge_states = {
-            name: [{} for _ in spec["edges"]] for name, spec in zip(names, specs)
-        }
         # Precompute innovations once. Visibility never affects random draws.
         history = {name: np.zeros(length) for name in names}
         residuals = {name: np.zeros(length) for name in names}
@@ -2735,19 +2702,19 @@ class OperationalSCMGenerator:
         edge_inputs, parent_maps = {}, {}
         for name, spec in active_nodes:
             sources = []
-            for index, edge in enumerate(spec["edges"]):
+            for edge in spec["edges"]:
                 parent, lag = edge["parent"], edge["lag"]
                 if parent.startswith("outcome_lag_"):
                     lag += int(parent.rsplit("_", 1)[1])
                     parent = "outcome"
-                sources.append((edge, history[parent], lag, edge_states[name][index]))
+                sources.append((self._bind_effect(edge), history[parent], lag))
             edge_inputs[name] = sources
             parent_maps[name] = prepare_parent_combination(
                 spec.get("parent_combination"), len(sources)
             )
         residual_ar = list(zip(model["outcome"]["ar_weights"], lags))
         outcome_ar = list(zip(model["outcome"].get("outcome_ar_weights", []), lags))
-        randoms, states, season_values, white_errors = {}, {}, {}, {}
+        randoms, season_values, white_errors = {}, {}, {}
         noise_scales, noise_means = {}, {}
         time = np.arange(-warmup, rows)
         for name, spec in zip(names, specs):
@@ -2780,7 +2747,6 @@ class OperationalSCMGenerator:
                     r.normal(size=length),
                     r.normal(size=length),
                 )
-                states[name] = [0.0, spec["slope"], 0.0]  # level, slope, decaying shock
                 if model["version"] == 3:
                     season_values[name] = self._seasonal(spec["seasons"], time)
                     white_errors[name] = r.normal(
@@ -2849,85 +2815,107 @@ class OperationalSCMGenerator:
             else None
         )
 
-        def past(name, index):
-            return history[name][index] if index >= 0 else 0.0
-
-        # Bind each node's buffers once, rather than repeatedly resolving names
-        # in a dozen dictionaries per row. Buffers and dynamic state remain
-        # private to this simulation; the saved SCM is never changed.
-        runtime_nodes = [
-            (
-                name,
-                spec,
-                randoms[name],
-                states[name],
-                residuals[name],
-                history[name],
-                season_values.get(name),
-                white_errors.get(name),
-                noise_scales.get(name),
-                noise_means.get(name),
-                edge_inputs[name],
-                parent_maps[name],
-                ringing_values.get(name),
-                envelopes.get(name),
-            )
-            for name, spec in active_nodes
-        ]
         version = model["version"]
-        effect = self._effect
-        quantize = self._quantize
-        for i in range(length):
-            t = i - warmup
-            for (
-                name,
-                spec,
-                draws,
-                node_state,
-                node_residuals,
-                node_history,
-                node_seasons,
-                node_white,
-                node_noise_scale,
-                noise_mean,
-                inputs,
-                parent_map,
-                node_ringing,
-                envelope,
-            ) in runtime_nodes:
+
+        def node_step(name, spec):
+            """Per-row update of one node, with buffers and constants bound once.
+
+            Resolving them here, rather than in a dozen dictionaries per row,
+            changes no arithmetic or its order. Buffers and dynamic state
+            remain private to this simulation; the saved SCM is never changed.
+            """
+            is_outcome = name == "outcome"
+            noise, walk, slope_walk = randoms[name]
+            level, slope, shock = 0.0, spec["slope"], 0.0  # shock decays
+            node_residuals, node_history = residuals[name], history[name]
+            node_seasons, node_white = season_values.get(name), white_errors.get(name)
+            node_noise_scale = noise_scales.get(name)
+            noise_mean = noise_means.get(name)
+            inputs, parent_map = edge_inputs[name], parent_maps[name]
+            node_ringing, envelope = ringing_values.get(name), envelopes.get(name)
+            event_source = (
+                history[spec["event_parent"]] if spec["event_parent"] else None
+            )
+            event_lag = spec.get("event_lag", 0)
+            event_mode, event_slope = spec.get("event_mode"), spec.get("event_slope")
+            slope_walk_scale, walk_scale = spec["slope_walk"], spec["walk_scale"]
+            level_jump = spec["level_jump"]
+            limited = "level_limit" in spec
+            level_high = spec["level_limit"] if limited else None
+            level_low = -level_high if limited else None
+            shock_decay, shock_size = spec["shock_decay"], spec["shock_size"]
+            has_combination = "parent_combination" in spec
+            combination = spec.get("parent_combination")
+            interaction = None if has_combination else spec["interaction"]
+            link = spec.get("node_link")
+            link_active = link is not None and link["mode"] != "identity"
+            node_link = bind_node_link(link)
+            persistence = spec.get("persistence")
+            has_gain = "forcing_gain" in spec
+            forcing_gain = spec.get("forcing_gain")
+            innovation_gain = spec.get("innovation_gain")
+            heteroskedasticity, intercept = (
+                spec["heteroskedasticity"],
+                spec["intercept"],
+            )
+            quantization_step = spec["quantization_step"]
+            quantization_offset = spec.get("quantization_offset")
+            operation = spec.get("operation")
+            if operation:
+                operation_source = history[operation["parent"]]
+                operation_lag = operation.get("lag", 0)
+            angle = spec.get("domain") == "angle"
+            sensor = spec.get("sensor")
+            measured = is_outcome and measured_outcome is not None
+            if version == 3:
+                # Plain floats are the same IEEE doubles as the array elements;
+                # sums and products of them skip NumPy's scalar dispatch. The
+                # seasonal term stays a NumPy scalar, so `value` below does too.
+                noise, walk, slope_walk = (
+                    noise.tolist(),
+                    walk.tolist(),
+                    slope_walk.tolist(),
+                )
+                node_white = node_white.tolist()
+                if node_noise_scale is not None:
+                    node_noise_scale = node_noise_scale.tolist()
+            previous = 0.0
+
+            def step(i):
+                nonlocal level, slope, shock, previous
+                nonlocal recovery, ramp, previous_on, surge
                 reading = None
-                noise, walk, slope_walk = draws
                 event = (
-                    past(spec["event_parent"], i - spec.get("event_lag", 0))
-                    if spec["event_parent"]
+                    (event_source[i - event_lag] if i >= event_lag else 0.0)
+                    if event_source is not None
                     else 0
                 )
-                level, slope, shock = node_state
-                slope += spec["slope_walk"] * slope_walk[i]
+                slope += slope_walk_scale * slope_walk[i]
                 if event:
-                    mode = spec["event_mode"]
                     slope = (
                         -slope
-                        if mode == "reverse"
+                        if event_mode == "reverse"
                         else (
-                            spec["event_slope"]
-                            if mode == "reset"
-                            else slope + spec["event_slope"]
+                            event_slope
+                            if event_mode == "reset"
+                            else slope + event_slope
                         )
                     )
-                level += (
-                    slope + spec["walk_scale"] * walk[i] + event * spec["level_jump"]
-                )
-                if "level_limit" in spec:
+                level += slope + walk_scale * walk[i] + event * level_jump
+                if limited:
                     level = float(
-                        clip_scalar(level, -spec["level_limit"], spec["level_limit"])
+                        level_low
+                        if level < level_low
+                        else level_high
+                        if level > level_high
+                        else level
                     )
-                shock = spec["shock_decay"] * shock + event * spec["shock_size"]
-                node_state[:] = level, slope, shock
-                seasonal = (
-                    node_seasons[i]
-                    if version == 3
-                    else sum(
+                shock = shock_decay * shock + event * shock_size
+                if version == 3:
+                    seasonal = node_seasons[i]
+                else:
+                    t = i - warmup
+                    seasonal = sum(
                         s["amplitude"]
                         * (
                             1
@@ -2937,35 +2925,37 @@ class OperationalSCMGenerator:
                         * np.sin(2 * np.pi * t / s["period"] + s["phase"])
                         for s in spec["seasons"]
                     )
-                )
-                effects = []
-                for edge, source, lag, state in inputs:
-                    value = source[i - lag] if i >= lag else 0.0
-                    effects.append(effect(edge, value, state))
-                forcing = (
-                    combine_parents(effects, spec["parent_combination"], parent_map)
-                    if "parent_combination" in spec
-                    else sum(effects)
-                )
-                if "parent_combination" not in spec and spec["interaction"]:
-                    forcing += (
-                        spec["interaction"] * np.tanh(effects[0]) * np.tanh(effects[1])
+                effects = [
+                    effect(source[i - lag] if i >= lag else 0.0)
+                    for effect, source, lag in inputs
+                ]
+                if has_combination:
+                    forcing = combine_parents(effects, combination, parent_map)
+                else:
+                    forcing = sum(effects)
+                    if interaction:
+                        forcing += (
+                            interaction * np.tanh(effects[0]) * np.tanh(effects[1])
+                        )
+                if link_active:
+                    forcing = node_link(forcing)
+                if is_outcome:
+                    # Lists, not a manual loop: sum() keeps its own arithmetic.
+                    ar = sum(
+                        [
+                            w * node_residuals[i - lag]
+                            for w, lag in residual_ar
+                            if i >= lag
+                        ]
                     )
-                link = spec.get("node_link")
-                if link is not None and link["mode"] != "identity":
-                    forcing = apply_node_link(forcing, link)
-                previous = node_residuals[i - 1] if i else 0.0
-                ar = (
-                    sum(
-                        w * node_residuals[i - lag]
-                        for w, lag in residual_ar
-                        if i >= lag
+                    ar += sum(
+                        [
+                            w * (node_history[i - lag] if i >= lag else 0.0)
+                            for w, lag in outcome_ar
+                        ]
                     )
-                    if name == "outcome"
-                    else spec["persistence"] * previous
-                )
-                if name == "outcome":
-                    ar += sum(w * past("outcome", i - lag) for w, lag in outcome_ar)
+                else:
+                    ar = persistence * previous
                 innovation = noise[i]
                 if node_noise_scale is not None:
                     # Scale deviations, not the distribution's location. Thus
@@ -2973,34 +2963,46 @@ class OperationalSCMGenerator:
                     innovation = (
                         noise_mean + (innovation - noise_mean) * node_noise_scale[i]
                     )
-                if "forcing_gain" in spec:
-                    forcing *= spec["forcing_gain"]
-                    innovation *= spec["innovation_gain"]
+                if has_gain:
+                    forcing *= forcing_gain
+                    innovation *= innovation_gain
+                # `previous` is this node's residual one row earlier. A zero
+                # coefficient multiplies the innovation by exactly one, unless
+                # that residual is NaN (the only value unequal to itself).
                 residual = (
                     ar
                     + forcing
-                    + innovation
-                    * (1 + spec["heteroskedasticity"] * abs(np.tanh(previous)))
+                    + (
+                        innovation * (1 + heteroskedasticity * abs(np.tanh(previous)))
+                        if heteroskedasticity or previous != previous
+                        else innovation
+                    )
                 )
                 if version == 3:
                     residual += node_white[i] * (
                         node_noise_scale[i] if node_noise_scale is not None else 1
                     )
-                node_residuals[i] = residual
-                value = spec["intercept"] + level + shock + seasonal + residual
+                previous = residual
+                if is_outcome:
+                    node_residuals[i] = residual  # Only its lags are read back.
+                value = intercept + level + shock + seasonal + residual
                 if node_ringing is not None:
                     value += node_ringing[i]
-                if name == "outcome":
+                if is_outcome:
                     value += trend_values[i]
                     if wander_values is not None:
                         value += wander_values[i]
-                if spec["quantization_step"]:
-                    value = quantize(
-                        value, spec["quantization_step"], spec["quantization_offset"]
+                if quantization_step:
+                    # rint is what np.round does for zero decimals.
+                    value = quantization_offset + quantization_step * np.rint(
+                        (value - quantization_offset) / quantization_step
                     )
-                operation = spec.get("operation")
                 if operation:
-                    on = bool(past(operation["parent"], i - operation.get("lag", 0)))
+                    on = bool(
+                        operation_source[i - operation_lag]
+                        if i >= operation_lag
+                        else 0.0
+                    )
                     if operation["mode"] == "episode":
                         activity = envelope[i]
                         # Preserve visible active-process variation even if a
@@ -3056,10 +3058,9 @@ class OperationalSCMGenerator:
                         ramp += operation["ramp_rate"] * (1 if on else -1)
                         value += ramp
                     previous_on = on
-                if spec.get("domain") == "angle":
+                if angle:
                     value = float(np.arctan2(np.sin(value), np.cos(value)))
-                sensor = spec.get("sensor")
-                if name == "outcome" and measured_outcome is not None:
+                if measured:
                     reading = (
                         spec["baseline"] + spec["scale"] * value
                         if reading is None
@@ -3072,6 +3073,14 @@ class OperationalSCMGenerator:
                 elif sensor:
                     value = sensor_reading(value, sensor)
                 node_history[i] = value
+
+            return step
+
+        # Nodes share the restart/ramp state above, as they always have.
+        steps = [node_step(name, spec) for name, spec in active_nodes]
+        for i in range(length):
+            for step in steps:
+                step(i)
         outcome = model["outcome"]
         physical = (
             measured_outcome

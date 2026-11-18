@@ -398,6 +398,69 @@ class EffectTests(unittest.TestCase):
                     )
                 )
 
+    def test_bound_edges_reproduce_the_inspection_path_exactly(self):
+        # The simulator binds an edge's parameters once; `_effect` with a state
+        # dictionary is the documented reference. Same bits, separate memory.
+        rng = np.random.default_rng(3)
+        values = rng.normal(size=120) * 10.0 ** rng.integers(-3, 3, size=120)
+        for op in OperationalSCMGenerator.OPERATORS:
+            generator = self.generator_for(op)
+            with self.subTest(op=op):
+                edge = generator._edge("covariate_1")
+                bound, again, state = (
+                    generator._bind_effect(edge),
+                    generator._bind_effect(edge),
+                    {},
+                )
+                for value in values:
+                    expected = float(generator._effect(edge, value, state)).hex()
+                    self.assertEqual(float(bound(value)).hex(), expected)
+                self.assertEqual(
+                    float(again(values[0])).hex(),
+                    float(generator._effect(edge, values[0], {})).hex(),
+                )
+        composite = OperationalSCMGenerator(
+            "unused", seed=5, composite_effect_probability=1
+        )
+        for _ in range(20):
+            edge = composite._edge("covariate_1")
+            bound, state = composite._bind_effect(edge), {}
+            for value in values:
+                self.assertEqual(
+                    float(bound(value)).hex(),
+                    float(composite._effect(edge, value, state)).hex(),
+                )
+
+    def test_parent_sums_are_exactly_numpy_sums(self):
+        # Short sums skip the array; the result may not differ by one bit, also
+        # for signed zeros and for the longer sums NumPy adds pairwise.
+        rng = np.random.default_rng(4)
+        spec = {"version": 2, "mode": "sum"}
+        for count in range(12):
+            cases = [[-0.0] * count] + [
+                (rng.normal(size=count) * 10.0 ** rng.integers(-9, 9, count)).tolist()
+                for _ in range(200)
+            ]
+            for effects in cases:
+                self.assertEqual(
+                    combine_parents(effects, spec).hex(),
+                    float(np.asarray(effects, dtype=float).sum()).hex(),
+                )
+        generator = self.joint_generator("max")
+        for count in (2, 5, 9):
+            spec = generator._sample_parent_combination(count)
+            unused = sorted(set(range(count)) - set(spec["indices"]))
+            for _ in range(50):
+                effects = (
+                    rng.normal(size=count) * 10.0 ** rng.integers(-6, 4)
+                ).tolist()
+                kept = np.asarray(effects)[unused].sum()
+                joint = max(effects[index] for index in spec["indices"])
+                self.assertEqual(
+                    combine_parents(effects, spec).hex(),
+                    float(kept + spec["strength"] * joint).hex(),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

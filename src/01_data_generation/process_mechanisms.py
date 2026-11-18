@@ -1,5 +1,7 @@
 """Causal process envelopes and exogenous discrete operating states."""
 
+from bisect import bisect_right
+
 import numpy as np
 
 DISCRETE_KINDS = ("bernoulli", "markov")
@@ -132,9 +134,11 @@ def discrete_path(spec, rng, length):
     result = np.empty(length)
     if length:
         result[0] = values[state]
-    for index, draw in enumerate(uniforms, 1):
-        state = int(np.searchsorted(cumulative[state], draw, side="right"))
-        result[index] = values[state]
+    # Same search as np.searchsorted(row, draw, side="right"), on plain floats.
+    rows, levels = cumulative.tolist(), values.tolist()
+    for index, draw in enumerate(uniforms.tolist(), 1):
+        state = bisect_right(rows[state], draw)
+        result[index] = levels[state]
     return result
 
 
