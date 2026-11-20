@@ -1,0 +1,3 @@
+[submodule "benchmarks/fakebench-ts"]
+	path = benchmarks/fakebench-ts
+	url = https://github.com/JeanLuc-Oudshoorn/FakeBench-TS.git
