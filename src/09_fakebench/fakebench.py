@@ -36,7 +36,6 @@ for folder in (
 import fakebench_ts
 from fakebench_ts import cli as fakebench_cli
 from fakebench_ts import models as fakebench_models
-from fakebench_ts.dataset import matches_reference
 from fast_inference import configure_fast_inference
 from holdout_test import holdout_checkpoint
 from inference import forecast_contexts
@@ -46,7 +45,8 @@ from transform import load_config, run_context, timed, write_json
 from variate_attention import configure_variate_execution
 
 MODELS = ("basin", "chronos2", "timestral")
-DATA = ROOT / "data" / "fakebench" / "fakebench_v1.parquet"
+# The dataset published in the FakeBench-TS repository.
+DATA = PACKAGE.parent / "data" / "fakebench_v1.parquet"
 COMPLETED = "results.json"  # written by scoring, so it marks a finished run
 
 
@@ -159,16 +159,6 @@ def earlier_forecasts(config, name, dataset, wanted):
 def run(config, args):
     torch.set_num_threads(config["training"].get("cpu_threads", 4))
     configure_cuda_memory(config["training"])
-    current = fakebench_ts.SPECS["v1"].to_dict()
-    if not DATA.is_file() or fakebench_ts.load_dataset(DATA).spec != current:
-        # Also when the benchmark's definition changed since the file was made.
-        dataset = fakebench_ts.generate_dataset()
-        fakebench_ts.save_dataset(dataset, DATA)
-        if matches_reference(dataset) is False:
-            logger.warning(
-                "This NumPy version draws different series than the FakeBench-TS "
-                "v1 reference; scores are not comparable with published ones"
-            )
     dataset = fakebench_ts.load_dataset(DATA)
     wanted = min(args.limit or len(dataset), len(dataset))
     # Basin first: its checkpoint names the run folder.

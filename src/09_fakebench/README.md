@@ -26,8 +26,8 @@ memory.
   inference set-up. Its point forecast is the median.
 - **Chronos-2 and Timestral** use the model IDs, pinned revisions, device and
   cache folder under `holdout` in the configuration.
-- The data is generated once to `data/fakebench/fakebench_v1.parquet`, and
-  again if the benchmark's definition has changed since.
+- The series come from the dataset published in the submodule,
+  `benchmarks/fakebench-ts/data/fakebench_v1.parquet`.
 
 ## Where the results are
 
