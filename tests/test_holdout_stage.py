@@ -239,6 +239,62 @@ class HoldoutStageTests(unittest.TestCase):
             self.assertEqual(provenance["checkpoint_sha256"], "old_hash")
             self.assertEqual(provenance["split_checkpoint_sha256"], "new_hash")
 
+    def test_split_of_another_run_is_checked_against_that_runs_configuration(self):
+        # An annealing experiment's model, tested on the main run's holdout.
+        split, _ = self.fixture()
+        archived = {
+            "dataset_split": {"train_sources": ["annealing_train"]},
+            "training_summary": {"best_epoch": 1},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            config["paths"].update(
+                training=str(base / "training"),
+                holdout_test=str(base / "holdout"),
+                logs=str(base / "logs"),
+            )
+            main = copy.deepcopy(config)
+            main["seed"] = config["seed"] + 1
+            (base / "main.json").write_text(json.dumps(main), encoding="utf-8")
+            config["holdout"]["split_checkpoint"] = str(base / "main.pt")
+            config["holdout"]["split_config"] = str(base / "main.json")
+            checkpoint = base / "training/model.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+            model = Mock()
+            model.eval.return_value = model
+            import holdout_test
+
+            seen = []
+            real = holdout_test.load_holdout_metadata
+
+            def load(path, used):
+                seen.append((Path(path).name, used["seed"]))
+                return real(path, used)
+
+            with (
+                patch("holdout_test.torch.load", side_effect=[archived, split]),
+                patch("holdout_test.load_holdout_metadata", side_effect=load),
+                patch("holdout_test.populate_test_schema"),
+                patch("holdout_test.artifact_digest", return_value="hash"),
+                patch("holdout_test.RWKVForecaster.load", return_value=model),
+                patch("holdout_test.configure_cuda_memory"),
+                patch("holdout_test.configure_variate_execution"),
+                patch("holdout_test.configure_fast_inference"),
+                patch(
+                    "holdout_test.evaluate_holdout",
+                    return_value={"table_count": 1, "pooled": {}},
+                ) as evaluate,
+            ):
+                run(config)
+            self.assertEqual(
+                seen, [("model.pt", config["seed"]), ("main.pt", config["seed"] + 1)]
+            )
+            self.assertEqual(evaluate.call_args.args[1][0]["source"], "test")
+            # Results go to the folder of the configuration that was run.
+            self.assertEqual(len(list((base / "holdout").rglob("model_used.json"))), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
