@@ -34,6 +34,7 @@ for folder in (
 ):
     sys.path.insert(0, str(folder))
 import fakebench_ts
+from checkpoint_upload import read_environment_file
 from fakebench_ts import cli as fakebench_cli
 from fakebench_ts import models as fakebench_models
 from fast_inference import configure_fast_inference
@@ -44,7 +45,7 @@ from train import RWKVForecaster, launch_wsl
 from transform import load_config, run_context, timed, write_json
 from variate_attention import configure_variate_execution
 
-MODELS = ("basin", "chronos2", "timestral")
+MODELS = ("basin", "chronos2", "timestral", "timeh2o", "timesfm")
 # The dataset published in the FakeBench-TS repository.
 DATA = PACKAGE.parent / "data" / "fakebench_v1.parquet"
 COMPLETED = "results.json"  # written by scoring, so it marks a finished run
@@ -107,6 +108,8 @@ def build(name, config):
     }
     if name == "basin":
         return basin(config)
+    # A Hugging Face token for gated weights may be kept in .env (HF_TOKEN).
+    read_environment_file(ROOT / ".env")
     if name == "chronos2":
         return fakebench_models.chronos2(**settings.get("chronos", {}), **shared)
     if name == "timestral":
@@ -115,6 +118,10 @@ def build(name, config):
             max_context=config["model"]["context_length"],
             **shared,
         )
+    if name == "timeh2o":
+        return fakebench_models.timeh2o(**settings.get("timeh2o", {}), **shared)
+    if name == "timesfm":
+        return fakebench_models.timesfm(**settings.get("timesfm", {}), **shared)
     return fakebench_models.load_factory(name)()
 
 

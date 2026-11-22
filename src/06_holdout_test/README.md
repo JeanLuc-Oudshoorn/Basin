@@ -119,7 +119,8 @@ for boundary handling, per-horizon metrics and interpretation. This replaces
 the previous sampled-horizon protocol. Legacy `horizon_probabilities` and
 `horizon_seed` settings are ignored by evaluation.
 `holdout.benchmark_models` selects comparisons (RWKV is always included):
-`["prophet", "naive", "chronos"]` by default; add `"timestral"` to include it.
+`["prophet", "naive", "chronos"]` by default; add `"timestral"`, `"timeh2o"` or
+`"timesfm"` to include them.
 `holdout.sample_percent` defaults to 100; set it to e.g. 1 for a seeded 1% sample
 of the saved holdout tables. `sample_selection.json` records the selected sources.
 All models use those same sources, origins and historical context.
@@ -197,7 +198,7 @@ target fits needed for the request. Downloads, model loading, parquet reads,
 shared dataframe/tensor payload construction, scoring, plotting and file writes
 are excluded. Model loading is reported separately. These are the existing
 model configurations: RWKV emits its configured quantiles, Chronos requests a
-median and Timestral returns its default forecast distribution. Parameter count,
+median and Timestral and TimeH2O return their default forecast distribution. Parameter count,
 parameter dtype and device are reported rather than assuming equal model sizes
 or precision. No architecture or model precision was changed for this benchmark.
 
@@ -262,6 +263,27 @@ uv sync --inexact --extra validation --extra benchmarks
 ```
 
 Both weights are downloaded anonymously into `.cache/huggingface` on first use.
+
+TimeH2O-v1 (`"timeh2o"`, 108.8M parameters, `h2ofm` package in the same
+`benchmarks` extra) is different in three ways:
+
+- Its weights are gated and under H2O's non-commercial model licence. Accept
+  the conditions once on <https://huggingface.co/h2oai/timeh2o-v1>, then put a
+  Hugging Face access token in the project's `.env` file as `HF_TOKEN=...` (or
+  set `HF_TOKEN`, or run `hf auth login`, where the stage runs).
+- This checkpoint does not use past covariates, so it forecasts from the
+  historical targets alone, each target on its own. The other models also
+  receive the past covariates.
+- It runs with the package defaults, which average the forecasts of up to four
+  patch sizes (one pass each), so its latency covers those passes.
+
+TimesFM 3.0 (`"timesfm"`, 330.7M parameters, `timesfm` package in the
+`benchmarks` extra) downloads anonymously; its weights are under Google's
+non-commercial licence. It receives the targets of a table together and the
+past covariates, like Chronos-2 and Timestral. Its forecast is averaged with
+that of the mirrored series (two series per pass, the setting its authors
+benchmark with), and is not clamped at zero.
+
 Chronos is a regular project dependency. Model IDs, pinned revisions and runtime
 parameter counts are recorded in the metrics report. See the
 [foundation benchmark audit](../../docs/audits/2026-10-29/foundation_benchmarks/REPORT.md).

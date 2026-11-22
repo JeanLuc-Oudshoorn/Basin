@@ -6,6 +6,7 @@ from time import perf_counter
 
 import numpy as np
 import torch
+from checkpoint_upload import read_environment_file
 from loguru import logger
 from transform import ROOT
 
@@ -20,22 +21,32 @@ MODEL_DEFAULTS = {
         "model_id": "mistralai/Timestral-209M",
         "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365",
     },
+    "timeh2o": {
+        "model_id": "h2oai/timeh2o-v1",
+        "revision": "1310be782553943a4c520d2810a98ce8f56b2709",
+        # Rows (targets) the model runs at once; changes memory, not forecasts.
+        "batch_size": 32,
+    },
+    "timesfm": {
+        "model_id": "google/timesfm-3.0-pytorch",
+        "revision": "43046b85ec22d584a13f8098c2ed39c889e129c2",
+        "batch_size": 32,
+    },
 }
+INSTALL = "uv sync --inexact --extra benchmarks --extra validation"
+BENCHMARK_MODELS = ("prophet", "naive", *MODEL_DEFAULTS)
 
 
 def benchmark_names(config):
     names = config.get("holdout", {}).get("benchmark_models", DEFAULT_MODELS)
     if (
         not isinstance(names, list)
-        or any(
-            not isinstance(n, str)
-            or n not in {"prophet", "naive", "chronos", "timestral"}
-            for n in names
-        )
+        or any(not isinstance(n, str) or n not in BENCHMARK_MODELS for n in names)
         or len(set(names)) != len(names)
     ):
         raise ValueError(
-            "holdout.benchmark_models must be a unique list of prophet, naive, chronos, timestral; RWKV is always included"
+            "holdout.benchmark_models must be a unique list of "
+            f"{', '.join(BENCHMARK_MODELS)}; RWKV is always included"
         )
     return list(names)
 
@@ -131,6 +142,8 @@ class FoundationBenchmarks:
         device = settings.get(
             "foundation_device", "cuda" if torch.cuda.is_available() else "cpu"
         )
+        # A Hugging Face token for gated weights may be kept in .env (HF_TOKEN).
+        read_environment_file(ROOT / ".env")
         for name in self.names:
             if name not in MODEL_DEFAULTS:
                 self.metadata[name] = {
@@ -172,13 +185,38 @@ class FoundationBenchmarks:
                     cache_dir=str(cache),
                     token=False,
                 )
+            elif name == "timeh2o":
+                try:
+                    from h2ofm import TimeH2O
+                except ImportError as error:
+                    raise ImportError(f"TimeH2O requires: {INSTALL}") from error
+                # The weights are gated: this needs a Hugging Face token
+                # (HF_TOKEN or `hf auth login`) that has accepted the licence.
+                model = TimeH2O.from_pretrained(
+                    options["model_id"],
+                    revision=options["revision"],
+                    device=device,
+                    cache_dir=str(cache),
+                    batch_size=options["batch_size"],
+                )
+            elif name == "timesfm":
+                try:
+                    from timesfm3 import TimesFM3Forecaster
+                except ImportError as error:
+                    raise ImportError(f"TimesFM requires: {INSTALL}") from error
+                model = TimesFM3Forecaster.from_pretrained(
+                    options["model_id"],
+                    device=device,
+                    revision=options["revision"],
+                    cache_dir=str(cache),
+                    token=False,
+                    per_core_batch_size=options["batch_size"],
+                )
             else:
                 try:
                     from timestral import TimestralForecaster
                 except ImportError as error:
-                    raise ImportError(
-                        "Timestral requires: uv sync --inexact --extra benchmarks --extra validation"
-                    ) from error
+                    raise ImportError(f"Timestral requires: {INSTALL}") from error
                 model = TimestralForecaster.from_pretrained(
                     options["model_id"],
                     revision=options["revision"],
@@ -188,18 +226,31 @@ class FoundationBenchmarks:
                     token=False,
                 )
             self.models[name] = model
-            parameters = sum(p.numel() for p in model.model.parameters())
+            gated = name == "timeh2o"
+            # h2ofm has no public handle on the network.
+            network = model._pipeline.model if gated else model.model
+            parameters = sum(p.numel() for p in network.parameters())
             self.metadata[name] = {
                 "model_id": options["model_id"],
                 "revision": options["revision"],
                 "parameters": parameters,
-                "dtype": str(next(model.model.parameters()).dtype),
-                "device": str(next(model.model.parameters()).device),
+                "dtype": str(next(network.parameters()).dtype),
+                "device": str(next(network.parameters()).device),
                 "point_forecast": "median",
-                "inputs": "historical targets and time-matched past covariates",
-                "authentication": "anonymous token=False",
+                "inputs": "historical targets only, each target on its own; "
+                "this checkpoint does not use past covariates"
+                if gated
+                else "historical targets and time-matched past covariates",
+                "authentication": "Hugging Face login (gated model)"
+                if gated
+                else "anonymous token=False",
                 "load_seconds": perf_counter() - started,
             }
+            if name == "timesfm":
+                self.metadata[name]["settings"] = (
+                    "averaged with the forecast of the mirrored series; "
+                    "forecasts not clamped at zero"
+                )
             logger.info("Loaded benchmark {} parameters={:,}", name, parameters)
 
     @torch.inference_mode()
@@ -226,6 +277,30 @@ class FoundationBenchmarks:
                     context_length=self.context_limit,
                     cross_learning=False,
                 )
+            elif name == "timeh2o":
+                points = [
+                    forecast.point
+                    for forecast in model.forecast_many(
+                        [c["context"][0] for c in contexts],
+                        horizon,
+                        context_length=min(
+                            self.context_limit, model.config.context_length
+                        ),
+                    )
+                ]
+            elif name == "timesfm":
+                limit = self.context_limit
+                points = [
+                    model.predict(
+                        c["context"][0, :, -limit:].numpy(),
+                        horizon,
+                        past_only_covariates=None
+                        if c.get("past_covariates") is None
+                        else c["past_covariates"][0, :, -limit:].numpy(),
+                        use_symmetric_averaging=True,
+                    ).forecast
+                    for c in contexts
+                ]
             else:
                 points = [
                     model.forecast(

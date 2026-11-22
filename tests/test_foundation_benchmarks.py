@@ -25,6 +25,8 @@ class FoundationBenchmarkTests(unittest.TestCase):
         # Test the fallback default, independent of the user's active model list.
         config["holdout"].pop("benchmark_models", None)
         self.assertEqual(benchmark_names(config), ["prophet", "naive", "chronos"])
+        config["holdout"]["benchmark_models"] = ["timestral", "timeh2o"]
+        self.assertEqual(benchmark_names(config), ["timestral", "timeh2o"])
         for value in (["rwkv"], ["chronos", "chronos"], "chronos", [1]):
             with self.subTest(value=value):
                 config["holdout"]["benchmark_models"] = value
@@ -92,7 +94,29 @@ class FoundationBenchmarkTests(unittest.TestCase):
         timestral.forecast.side_effect = [
             SimpleNamespace(median=p[None]) for p in points
         ]
-        suite.models = {"chronos": chronos, "timestral": timestral}
+        timeh2o = Mock()
+        timeh2o.config.context_length = 16384
+        timeh2o.forecast_many.return_value = [
+            SimpleNamespace(point=p.numpy()) for p in points
+        ]
+        timesfm = Mock()
+        timesfm.predict.side_effect = [
+            SimpleNamespace(forecast=p.numpy()) for p in points
+        ]
+        suite.context_limit = 48
+        suite.models = {"timesfm": timesfm}
+        result = suite.predict(contexts, 16)
+        # TimesFM gets the most recent points of targets and past covariates.
+        call = timesfm.predict.call_args
+        np.testing.assert_array_equal(call.args[0], contexts[1]["context"][0, :, -48:])
+        np.testing.assert_array_equal(
+            call.kwargs["past_only_covariates"],
+            contexts[1]["past_covariates"][0, :, -48:],
+        )
+        self.assertTrue(call.kwargs["use_symmetric_averaging"])
+        self.assertEqual(result[0]["timesfm"].shape, (2, 16))
+        suite.context_limit = 2048
+        suite.models = {"chronos": chronos, "timestral": timestral, "timeh2o": timeh2o}
         suite.options = {"chronos": {"batch_size": 32}}
         result = suite.predict(contexts, 16)
         kwargs = chronos.predict_quantiles.call_args.kwargs
@@ -106,7 +130,13 @@ class FoundationBenchmarkTests(unittest.TestCase):
         for context, saved in zip(contexts, original):
             for key in context:
                 torch.testing.assert_close(context[key], saved[key])
-        self.assertEqual(set(result[0]), {"chronos", "timestral"})
+        self.assertEqual(set(result[0]), {"chronos", "timestral", "timeh2o"})
+        # TimeH2O-v1 ignores past covariates, so it is sent the targets only.
+        call = timeh2o.forecast_many.call_args
+        self.assertEqual([tuple(c.shape) for c in call.args[0]], [(2, 32), (2, 64)])
+        self.assertEqual(call.args[1], 16)
+        self.assertEqual(call.kwargs, {"context_length": 2048})
+        np.testing.assert_array_equal(result[1]["timeh2o"], points[1].numpy())
         self.assertEqual(result[0]["chronos"].shape, (2, 16))
         chronos.predict_quantiles.return_value = ([], [torch.zeros(3, 16)] * 2)
         with self.assertRaisesRegex(ValueError, "Invalid chronos"):

@@ -11,7 +11,12 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
-from benchmarks import FoundationBenchmarks, benchmark_names, select_plot_tables
+from benchmarks import (
+    BENCHMARK_MODELS,
+    FoundationBenchmarks,
+    benchmark_names,
+    select_plot_tables,
+)
 from error_distribution import write_error_distribution, write_latency_distribution
 from fast_inference import inference_execution_summary
 from graph_profiles import configure_holdout_graph_profiles
@@ -193,7 +198,7 @@ def summarize(frame):
 
     scales = frame.get("mase_scale", pd.Series(np.nan, index=frame.index)).to_numpy()
     valid = np.isfinite(scales) & (scales > 0)
-    for method in ("rwkv", "prophet", "naive", "chronos", "timestral"):
+    for method in ("rwkv", *BENCHMARK_MODELS):
         if method not in frame:
             continue
         error = frame[method].to_numpy() - frame.actual.to_numpy()

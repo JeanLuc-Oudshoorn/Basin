@@ -159,7 +159,9 @@
     "benchmark_models": [
       "naive",
       "chronos",
-      "timestral"
+      "timestral",
+      "timeh2o",
+      "timesfm"
     ],
     "sample_percent": 15.0,
     "sample_seed": 7,
@@ -173,6 +175,16 @@
     "timestral": {
       "model_id": "mistralai/Timestral-209M",
       "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
+    },
+    "timeh2o": {
+      "model_id": "h2oai/timeh2o-v1",
+      "revision": "1310be782553943a4c520d2810a98ce8f56b2709",
+      "batch_size": 32
+    },
+    "timesfm": {
+      "model_id": "google/timesfm-3.0-pytorch",
+      "revision": "43046b85ec22d584a13f8098c2ed39c889e129c2",
+      "batch_size": 32
     },
     "percentiles": [
       1,
