@@ -21,6 +21,7 @@ for stage in (
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
+from benchmarks import benchmark_names, sample_holdout
 from fast_inference import configure_fast_inference, inference_execution_summary
 from holdout import evaluate_holdout, holdout_directory
 from output_cleanup import clear_holdout_outputs
@@ -44,8 +45,6 @@ from transform import (
     write_json,
 )
 from variate_attention import configure_variate_execution
-
-from benchmarks import benchmark_names, sample_holdout
 
 
 def holdout_checkpoint(config):
