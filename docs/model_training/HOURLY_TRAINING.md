@@ -130,7 +130,7 @@ Measurements and tests: [training speed, 2026-11-17](TRAINING_SPEED_2026-11-17.m
 | Setting (`training.*`) | Default in code | `configs/config.json` | Effect |
 | --- | --- | --- | --- |
 | `background_checkpoints` | `true` | `true` | The state is copied to host memory (about 2 s for the 221.5M model) and written by a background thread while training continues. "Atomically save" in the steps above then means "copy the state, start writing"; the file replaces the previous checkpoint only when complete. A run that fails or is interrupted still finishes the write in flight. If host memory is short, the write blocks as before. |
-| `checkpoint_upload` | off | `{"container": "checkpoints"}` | While a checkpoint is written, the same bytes are uploaded to Azure Blob Storage as `<paths.training>/latest_checkpoint.pt`. The local file stays the one training resumes from. See below. |
+| `checkpoint_upload` | off | `{"container": "checkpoints"}` | While a checkpoint is written, the same bytes are uploaded to Azure Blob Storage as `<paths.training>/latest_checkpoint.pt`. The local file stays the one training resumes from. After every validation, `validation_history.json` is uploaded beside it. See below. |
 | `validation_cache` | `false` | `"~/.cache/basin/validation_panels"` | The fixed validation panel is saved in `validation_panel.bin` during the first check; later checks read it instead of hashing, opening and slicing every source table again. Same windows, same scores. `true` keeps it in the training folder; a path keeps it elsewhere (one subfolder per training folder). WSL's own disk is read 20 times faster than its mount of the Windows drive. |
 | `log_every_tables` | `null` (every update) | `1000` | One journal record and one console block per that many tables, plus one before every checkpoint and validation. Sums cover every update. Per-update `window_ids`/`sources` are not written in this mode; `loss_history.json` and the checkpoint still hold the last 1,000 updates. Use `null` for per-update diagnostics (`scripts/diagnose_epoch_throughput.py`). |
 | `fused_master_optimizer` | `true` | `true` | One-pass CUDA kernel for the FP32-master AdamW update; bit-identical to the three-pass update, which remains the fallback. |
@@ -153,6 +153,13 @@ environment needs `azure-storage-blob` (`scripts/setup_rwkv7.sh` installs it).
   the write.
 - An upload still running when the next checkpoint is due is abandoned; the
   previous cloud copy stays in place.
+- After every validation (the one before training, the periodic ones and the
+  final one) the whole `validation_history.json` is uploaded as
+  `<paths.training>/validation_history.json` and its size and MD5 are checked
+  in the container. It is a small file (37 KB after 21 checks, 0.3 s). A
+  failure is logged as an error (`validation_history_upload_failed` in the
+  journal) and does not stop training; the next validation sends the history
+  again.
 - A run that is killed leaves the last complete local checkpoint and the last
   complete cloud copy in place, plus an unfinished `.latest_checkpoint.pt.*.tmp`
   file that the next start removes.

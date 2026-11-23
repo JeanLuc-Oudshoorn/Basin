@@ -431,9 +431,16 @@ class TimedTrainingTests(unittest.TestCase):
             def __init__(self, fail_first=False):
                 super().__init__()
                 self.fail_first, self.steps, self.checked = fail_first, [], 0
+                self.histories = []
 
             def preflight(self):
                 self.checked += 1
+
+            def upload(self, path, *, digests=None, metadata=None, cancel=None):
+                self.histories.append(
+                    (Path(path).name, json.loads(Path(path).read_text()), metadata)
+                )
+                return {"blob": f"prefix/{Path(path).name}", "bytes": 1, "seconds": 0.0}
 
             def begin(self, path, *, cancel=None):
                 store = self
@@ -465,6 +472,20 @@ class TimedTrainingTests(unittest.TestCase):
             self.assertEqual(store.steps[0], 1)
             self.assertEqual(store.steps[-1], 6)
             self.assertEqual(store.steps, sorted(store.steps))
+            # After every validation the history so far is uploaded as well.
+            saved = json.loads((root / "ok/validation_history.json").read_text())
+            self.assertEqual(len(store.histories), len(saved))
+            self.assertGreater(len(saved), 1)
+            for count, (name, history, metadata) in enumerate(store.histories, 1):
+                self.assertEqual(name, "validation_history.json")
+                self.assertEqual(history, saved[:count])
+                self.assertEqual(
+                    metadata,
+                    {
+                        "step": history[-1]["step"],
+                        "validation_check": history[-1]["validation_check"],
+                    },
+                )
             failing = Store(fail_first=True)
             with patch("timed_training.make_checkpoint_store", return_value=failing):
                 with self.assertRaisesRegex(RuntimeError, "could not be uploaded"):
@@ -472,6 +493,25 @@ class TimedTrainingTests(unittest.TestCase):
             # Training stopped at the first checkpoint, which is on disk.
             saved = torch.load(root / "failing/latest_checkpoint.pt", weights_only=True)
             self.assertEqual(saved["step"], 1)
+
+    def test_failed_validation_history_upload_does_not_stop_training(self):
+        class Store(FakeStore):
+            attempts = 0
+
+            def preflight(self):
+                pass
+
+            def upload(self, path, *, digests=None, metadata=None, cancel=None):
+                type(self).attempts += 1
+                raise ConnectionError("storage unreachable")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch("timed_training.make_checkpoint_store", return_value=Store()):
+                _, summary, _ = run_training(setup(root), Clock())
+            self.assertEqual(summary["completed_updates"], 6)
+            saved = json.loads((root / "validation_history.json").read_text())
+            self.assertEqual(Store.attempts, len(saved))
 
     def test_validation_time_does_not_count_as_active_training(self):
         with tempfile.TemporaryDirectory() as temporary:

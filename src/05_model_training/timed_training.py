@@ -31,6 +31,41 @@ from training_progress import duration
 from transform import location, write_json
 
 
+def upload_validation_history(store, path, **metadata):
+    """Copy the validation history to the checkpoint store after a validation.
+
+    The local file is the record; a copy that fails is reported and does not
+    stop training. The next validation sends the whole history again.
+    """
+    try:
+        upload = store.upload(path, metadata=metadata)
+    except Exception as error:
+        logger.error(
+            "VALIDATION HISTORY UPLOAD FAILED: {}: {}. The local file {} is "
+            "complete; training continues and the next validation uploads the "
+            "history again.",
+            type(error).__name__,
+            str(error).splitlines()[0] if str(error) else "",
+            path,
+        )
+        emit_training_event(
+            "validation_history_upload_failed",
+            error_type=type(error).__name__,
+            error=str(error),
+            **metadata,
+        )
+        return None
+    logger.info(
+        "VALIDATION HISTORY UPLOADED blob={} bytes={:,} seconds={:.1f} size and "
+        "MD5 verified in the container",
+        upload["blob"],
+        upload["bytes"],
+        upload["seconds"],
+    )
+    emit_training_event("validation_history_uploaded", **upload, **metadata)
+    return upload
+
+
 def fit_timed(
     model,
     records,
@@ -441,6 +476,15 @@ def _fit_timed(
             temporary_history.replace(directory / "validation_history.json")
         finally:
             temporary_history.unlink(missing_ok=True)
+        if store is not None:
+            # Beside the checkpoint in the container, so the scores of a run can
+            # be read without the training machine.
+            upload_validation_history(
+                store,
+                directory / "validation_history.json",
+                step=state["step"],
+                validation_check=index,
+            )
         emit_training_event(
             "validation_baseline" if baseline else "validation_complete",
             global_step=state["step"],
