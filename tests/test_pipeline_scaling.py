@@ -83,16 +83,7 @@ def corpus(directory, shards=3, tables=12):
     encoder = SimpleNamespace(
         config=SimpleNamespace(patch_size=16, context_length=2048)
     )
-
-    class CountingRecords(EncodedRecords):
-        passes = 0
-
-        def __iter__(self):
-            self.passes += 1
-            for i in range(len(self)):
-                yield self[i]
-
-    return CountingRecords(raw, encoder, LazyPatchRecord)
+    return EncodedRecords(raw, encoder, LazyPatchRecord)
 
 
 class PipelineScalingTests(unittest.TestCase):
@@ -148,18 +139,32 @@ class PipelineScalingTests(unittest.TestCase):
                 full["identity"]["dataset_identity_policy"], "ordered_stream_v1"
             )
 
-    def test_split_scans_metadata_twice_and_returns_compact_disjoint_training(self):
+    def test_split_reads_metadata_twice_and_returns_compact_disjoint_training(self):
         with tempfile.TemporaryDirectory() as temporary:
             records = corpus(Path(temporary))
             config = load_config("configs/legacy_500m.json")
             config["training"]["validation_sampling"]["tables"] = 2
             config["training"]["holdout_fraction"] = 0.2
-            with patch(
-                "sharded_records.load_shard",
-                side_effect=AssertionError("tensor read during split"),
+            read = ShardedRecords.record_metadata
+            reads = []
+
+            def counted(self, shard):
+                if self.metadata_index != shard:
+                    reads.append(shard)
+                return read(self, shard)
+
+            with (
+                patch(
+                    "sharded_records.load_shard",
+                    side_effect=AssertionError("tensor read during split"),
+                ),
+                patch.object(ShardedRecords, "record_metadata", counted),
             ):
                 train, validation, test, audit = split_datasets(records, config)
-            self.assertEqual(records.passes, 2)
+            # One pass builds the start-up index and at most one more fetches
+            # the selected validation and test records; the scans read nothing.
+            self.assertEqual(reads[:3], [0, 1, 2])
+            self.assertEqual(reads[3:], sorted(set(reads[3:])))
             self.assertIsInstance(train, RecordSelection)
             self.assertEqual(train.indices.itemsize, 8)
             self.assertEqual(len(train), 26)  # 36 sources - 8 test - 2 validation.

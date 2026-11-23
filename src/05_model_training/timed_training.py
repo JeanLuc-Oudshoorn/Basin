@@ -25,6 +25,7 @@ from learning_rate import make_scheduler, scheduler_snapshot
 from loguru import logger
 from performance import prepared_updates
 from rolling_validation import validate_origins
+from startup_index import light
 from training_log import emit_training_event
 from training_progress import duration
 from transform import location, write_json
@@ -88,7 +89,8 @@ def _fit_timed(
     if not records or not validation_records:
         raise ValueError("Need both training records and sampled validation origins")
     validation_sources = {r["source"] for r in validation_records}
-    if any(r["source"] in validation_sources for r in records):
+    # light: a corpus handle answers from the start-up index, not its shard.
+    if any(light(r)["source"] in validation_sources for r in records):
         raise ValueError(
             "Validation tables must be dataset-disjoint from gradient training"
         )

@@ -92,6 +92,7 @@ def holdout_request(config):
 def split_datasets(records, config):
     """Split whole admitted sources, never windows from the same source."""
     from augmentation_families import POLICY, excluded_evaluation_sources
+    from startup_index import fetch, scan
 
     patch = config["model"]["patch_size"]
     minimum = max(48, 3 * patch)
@@ -101,7 +102,9 @@ def split_datasets(records, config):
         len(records),
     )
     keys, hashes, source_rows, short_sources = {}, {}, {}, set()
-    for record in records:
+    # A sharded corpus is passed over through its start-up index: both loops
+    # over all records use a few small fields of each (see startup_index.py).
+    for record in scan(records):
         source = record["source"]
         if record["source_rows"] >= minimum:
             keys[source] = record.get("source_key", source)
@@ -188,7 +191,10 @@ def split_datasets(records, config):
     train = RecordSelection(records) if compact else []
     validation, test = [], []
     missing_train_sources = set(train_sources)
-    for position, record in enumerate(records):
+    # A compact corpus is scanned, which yields indexed fields only. The
+    # selected evaluation records are needed whole: their positions are kept
+    # and the records fetched below.
+    for position, record in enumerate(scan(records) if compact else records):
         source = record["source"]
         if record["split"] == "train" and source in train_sources:
             if compact:
@@ -198,9 +204,12 @@ def split_datasets(records, config):
             missing_train_sources.discard(source)
         elif record["split"] == "evaluation":
             if source in validation_sources:
-                validation.append(record)
+                validation.append(position if compact else record)
             elif source in test_sources:
-                test.append(record)
+                test.append(position if compact else record)
+    if compact:
+        fetched = fetch(records, validation + test)
+        validation, test = fetched[: len(validation)], fetched[len(validation) :]
     if missing_train_sources:
         raise ValueError(
             "Missing training records; rerun transform.py and index_patches.py"

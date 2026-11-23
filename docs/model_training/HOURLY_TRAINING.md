@@ -246,6 +246,21 @@ These indexes live alongside processed data on the project drive. See the
 [startup investigation](../audits/2026-11-08/training_startup.md) for evidence and
 measurement limits.
 
+The passes that run before the first update (two for the split, one for the
+check that validation tables are not trained on, two for batch planning, two
+for the checkpoint digests) read a few small fields of every record. Those
+fields are kept in a start-up index, `.startup_index` beside the processed
+shards: flat arrays that the passes read instead of the JSON sidecars. The
+first start after a corpus is transformed builds it with one pass over the
+sidecars; later starts check its checksums and reuse it. The whole validation
+and test records, which a start also needs, are saved there after the first
+read. The index is bound to the ordered shard checksums and is rebuilt when it
+does not match them; deleting the folder only costs the next start one rebuild.
+On the 23-million-record corpus (2026-11-23) the index is 3.7 GiB, took 8
+minutes to build, and a resume reached its first update after 16 minutes
+instead of 58, with the same split, batch order and checkpoint identity
+(`src/03_transforming_input_data/startup_index.py`).
+
 Augmentation-family screening resolves shared date folders once and uses the
 generated table names, avoiding millions of per-source path-resolution calls
 over WSL. It reports indexing, directory-scan and classification progress about

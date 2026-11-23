@@ -50,13 +50,29 @@ def pack_records(records):
     return packed
 
 
-def _context_length(record):
+def _details(record):
+    """The record for planning; a corpus handle answers from the start-up index."""
     if hasattr(record, "materialize"):
-        record = record.materialize()
+        # Imported here: only corpus handles need the corpus modules on the path.
+        from startup_index import light
+
+        return light(record)
+    return record
+
+
+def _context_length(record):
+    record = _details(record)
     if "context_rows" in record:
         start, stop = record["context_rows"]
         return stop - start
     return record["batch"]["context"].shape[-1]
+
+
+def _sorting_length(record):
+    record = _details(record)
+    return (
+        _context_length(record) if "batch" in record else record["prepared"]["tokens"]
+    )
 
 
 def _storage_key(record):
@@ -93,7 +109,7 @@ class BatchPlanner:
         self.storage_locality = storage_locality
         buckets = defaultdict(list)
         for record in records:
-            details = record.materialize() if hasattr(record, "materialize") else record
+            details = _details(record)
             if (
                 "batch" in details
                 and "roles" in details
@@ -133,15 +149,7 @@ class BatchPlanner:
             storage = _storage_key(record) if storage_locality else None
             buckets[(storage, key)].append(record)
         self.groups = [
-            (
-                storage,
-                sorted(
-                    group,
-                    key=lambda r: (
-                        _context_length(r) if "batch" in r else r["prepared"]["tokens"]
-                    ),
-                ),
-            )
+            (storage, sorted(group, key=_sorting_length))
             for (storage, _), group in buckets.items()
         ]
 
