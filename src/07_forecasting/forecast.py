@@ -67,9 +67,11 @@ def forecast(config):
         if {r["source"] for r in records} != test_sources:
             raise ValueError("Checkpoint holdout sources missing from patch index")
         records, selection = sample_holdout(records, config)
-        from holdout import holdout_directory
+        from holdout_runs import new_holdout_run
 
-        write_json(holdout_directory(config) / "sample_selection.json", selection)
+        # Its own new folder, like the holdout stage: earlier results are kept.
+        directory, config = new_holdout_run(config)
+        write_json(directory / "sample_selection.json", selection)
         return evaluate_holdout(model, records, config)
     metrics = []
     evaluation_records = [r for r in data["records"] if r["split"] == "evaluation"]

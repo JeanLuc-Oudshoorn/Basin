@@ -113,7 +113,8 @@ data/
 results/
   model/
     training/                     # model.pt, resumable timed checkpoint and metrics
-    holdout_test/                 # Out-of-sample metrics, predictions and plots
+    holdout_test/                 # One timestamped folder per holdout run:
+                                  # out-of-sample metrics, predictions and plots
     forecasts/                    # Forecast-stage outputs
     annealing/<experiment>/       # One folder per annealing experiment
   500m_model/                     # Archived 500M model, see ARCHIVE_MANIFEST.json
@@ -130,9 +131,13 @@ docs/                             # Architecture, benchmark reports and audit tr
 
 The default exported model is `results/model/training/model.pt`; resumable training
 state is `results/model/training/latest_checkpoint.pt`. Holdout evaluation reads
-the exported model and writes to `results/model/holdout_test`. The general
-forecasting stage writes to `results/model/forecasts`; when it delegates to the
-holdout evaluator, it uses the holdout directory. Paths remain configurable.
+the exported model and writes each run to its own new folder under
+`results/model/holdout_test`, named after the start time and the evaluated
+weights (for example `20261120T172808Z_epoch1_step1457590`). Earlier runs are
+never overwritten or cleared, so results after successive epochs can be compared.
+The general forecasting stage writes to `results/model/forecasts`; when it
+delegates to the holdout evaluator, it also gets a new run folder in the
+holdout directory. Paths remain configurable.
 
 After the main run, a short annealing phase can continue training on a small
 fresh set of tables in which chosen kinds of series are more common. Each such
@@ -952,7 +957,8 @@ table, configured by `holdout.percentiles`, with table-level progress and ETA.
 Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
 slider and model toggles. Regenerate them from existing saved predictions with
 `uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
-Results go to `results/model/holdout_test` by default
+It works on the most recent completed run, or on the one named with `--run`.
+Results go to a new run folder under `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
 exported `paths.training/model.pt` and its saved test split.
 Choose comparison models with `holdout.benchmark_models` (default

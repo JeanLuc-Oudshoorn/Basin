@@ -23,8 +23,8 @@ for stage in (
     sys.path.insert(0, str(ROOT / "src" / stage))
 from benchmarks import benchmark_names, sample_holdout
 from fast_inference import configure_fast_inference, inference_execution_summary
-from holdout import evaluate_holdout, holdout_directory
-from output_cleanup import clear_holdout_outputs
+from holdout import evaluate_holdout
+from holdout_runs import holdout_directory, new_holdout_run
 from performance import configure_cuda_memory
 from startup_cache import (
     artifact_digest,
@@ -410,9 +410,13 @@ def run(config):
         "evaluated-model training overlap rejected; selected raw checksums verified during evaluation"
     )
     del metadata, split_metadata
-    directory = holdout_directory(config)
-    directory.mkdir(parents=True, exist_ok=True)
-    clear_holdout_outputs(directory)
+    # Each run writes into its own new folder; earlier runs are never touched.
+    directory, config = new_holdout_run(
+        config,
+        epoch=model_identity["selected_epoch"],
+        step=model_identity["selected_step"],
+    )
+    logger.info("HOLDOUT run folder={}", directory)
     write_json(directory / "model_used.json", model_identity)
     write_json(directory / "sample_selection.json", selection)
     emit_training_event("holdout_start", **model_identity)

@@ -79,14 +79,17 @@ def write_holdout_plot(
     return figure
 
 
-def regenerate_saved_plots(config):
-    """Use the saved random selection; never load model weights or forecast again."""
+def regenerate_saved_plots(config, run=None):
+    """Use the saved random selection; never load model weights or forecast again.
+
+    Works on the most recent completed holdout run, or on the run folder named.
+    """
     import json
 
-    from holdout import holdout_directory
+    from holdout_runs import latest_holdout_run
     from transform import write_json
 
-    directory = holdout_directory(config)
+    directory = latest_holdout_run(config, run)
     selection = json.loads(
         (directory / "plot_selection.json").read_text(encoding="utf-8")
     )
@@ -128,10 +131,13 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/config.json"))
+    parser.add_argument(
+        "--run", help="holdout run folder name; default: most recent completed run"
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     with run_context(config, "holdout_plots"):
-        count = regenerate_saved_plots(config)
+        count = regenerate_saved_plots(config, args.run)
         logger.success("Saved {} interactive holdout HTML plots", count)
 
 

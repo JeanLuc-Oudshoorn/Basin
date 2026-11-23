@@ -261,14 +261,18 @@ def write_latency_distribution(result, requests, directory, config):
 def main():
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root / "src/03_transforming_input_data"))
-    from transform import load_config, location, run_context, write_json
+    from holdout_runs import latest_holdout_run
+    from transform import load_config, run_context, write_json
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(root / "configs/config.json"))
+    parser.add_argument(
+        "--run", help="holdout run folder name; default: most recent completed run"
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     with run_context(config, "holdout_error_distribution"):
-        directory = location(config, "holdout_test")
+        directory = latest_holdout_run(config, args.run)
         path = directory / "test_metrics.json"
         result = json.loads(path.read_text(encoding="utf-8"))
         tables = result.get("tables")

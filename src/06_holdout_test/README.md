@@ -92,16 +92,20 @@ model loader without rereading the checkpoint. Startup phase durations are logge
 model construction, GPU transfer and benchmark model initialization still take time.
 See the [startup and screening audit](../../docs/audits/2026-10-30/bolt_screening_startup/REPORT.md).
 
-Each new run clears generated outputs in its configured directory before
-writing the new model identity: old metrics, prediction files, request timings,
-and forecast/error/latency plots are removed. Files from tables/targets not
-selected in the new run cannot remain stale. User notes and subdirectories
-are preserved; no automatic archive is made. Cleanup is logged.
+Each run writes into its own new folder under the holdout directory, named
+after the start time (UTC) and the evaluated weights, for example
+`results/model/holdout_test/20261120T172808Z_epoch1_step1457590`. A run never
+writes into an existing folder and nothing is cleared, so the results after
+epoch 1, epoch 2 and epoch 3 stay side by side. A run that stops early leaves
+its folder without `test_metrics.json`; tools that look for "the latest run"
+skip it. Old run folders are removed by hand when no longer needed (one run
+of 7,500 tables is about 0.6 GB).
 
-The default output is `results/model/holdout_test`, configured
-by `paths.holdout_test`. It contains metrics JSON, prediction parquet files,
+The holdout directory is `results/model/holdout_test` by default, configured
+by `paths.holdout_test`. A run folder contains metrics JSON, prediction parquet files,
 interactive Plotly HTML plots, live progress/ETA and `model_used.json` recording the model's
-checksum and selected epoch. Ordinary logs and a timestamped JSONL journal are
+checksum and selected epoch. `plotting.py` and `error_distribution.py` work on
+the most recent completed run, or on the folder given with `--run <name>`. Ordinary logs and a timestamped JSONL journal are
 written under `logs/`, including when Windows routes execution to WSL.
 
 Each test table contributes up to five forecasts at the configured

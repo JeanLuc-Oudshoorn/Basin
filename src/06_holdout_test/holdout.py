@@ -20,6 +20,7 @@ from benchmarks import (
 from error_distribution import write_error_distribution, write_latency_distribution
 from fast_inference import inference_execution_summary
 from graph_profiles import configure_holdout_graph_profiles
+from holdout_runs import holdout_directory
 from horizon_policy import evaluation_weights
 from inference import forecast_contexts
 from latency import RequestTimer
@@ -29,7 +30,7 @@ from rolling_validation import table_mase_profile
 from training_log import emit_training_event
 from training_progress import duration
 from training_protocol import sampled_origins
-from transform import ROOT, file_digest, location, timed, write_json
+from transform import ROOT, file_digest, timed, write_json
 
 
 @contextmanager
@@ -719,10 +720,3 @@ def evaluate_holdout(model, records, config):
         return result
     finally:
         model.train(was_training)
-
-
-def holdout_directory(config):
-    """Dedicated results beside the training directory, also for older configs."""
-    if "holdout_test" in config["paths"]:
-        return location(config, "holdout_test")
-    return location(config, "training").parent / "holdout_test"
