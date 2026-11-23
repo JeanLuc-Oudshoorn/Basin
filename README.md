@@ -155,8 +155,13 @@ For most applications the near future is what matters. With daily data,
 practitioners usually want to know what happens tomorrow, next week or next
 month, not a year from now. Basin therefore forecasts **112 timesteps per
 pass**, which covers most practical needs, and spends its capacity on making
-those steps accurate. (Longer horizons are still possible by rolling the
-forecast forward.)
+those steps accurate.
+
+You can still forecast as far ahead as you like. Beyond 112 steps, Basin
+continues autoregressively: it treats its own forecast as if it were observed
+data and forecasts the next block from there. That can work well, but errors
+can build up from block to block, and Basin is not explicitly optimised for
+those longer horizons.
 
 Some uses don't need long horizons at all. In anomaly detection, for
 example, the actual values are already known: you re-forecast the series
