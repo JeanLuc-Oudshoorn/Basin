@@ -962,10 +962,10 @@ Results go to a new run folder under `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
 exported `paths.training/model.pt` and its saved test split.
 Choose comparison models with `holdout.benchmark_models` (default
-`["prophet", "naive", "chronos"]`; optional `"timestral"`, `"timeh2o"`, `"timesfm"`) and evaluate a
+`["prophet", "naive", "chronos"]`; optional `"timestral"`, `"timeh2o"`) and evaluate a
 reproducible portion of the test tables with `holdout.sample_percent` (default
 100, e.g. 1 for a quick 1% run). `configs/config.json` currently compares with
-`["naive", "chronos", "timestral", "timeh2o", "timesfm"]` on 15% of the test tables. The percentage
+`["naive", "chronos", "timestral", "timeh2o"]` on 15% of the test tables. The percentage
 applies to the admitted saved holdout split. See the [foundation benchmark audit](audits/2026-10-29/foundation_benchmarks/REPORT.md).
 Fresh training now records full epoch-zero validation before the first update;
 resumed runs retain their recorded baseline, if available. See the

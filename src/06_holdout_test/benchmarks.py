@@ -20,6 +20,8 @@ MODEL_DEFAULTS = {
     "timestral": {
         "model_id": "mistralai/Timestral-209M",
         "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365",
+        # Tables (all their targets and covariates) the model runs at once.
+        "batch_size": 32,
     },
     "timeh2o": {
         "model_id": "h2oai/timeh2o-v1",
@@ -27,13 +29,17 @@ MODEL_DEFAULTS = {
         # Rows (targets) the model runs at once; changes memory, not forecasts.
         "batch_size": 32,
     },
-    "timesfm": {
-        "model_id": "google/timesfm-3.0-pytorch",
-        "revision": "43046b85ec22d584a13f8098c2ed39c889e129c2",
-        "batch_size": 32,
-    },
 }
-INSTALL = "uv sync --inexact --extra benchmarks --extra validation"
+# TimesFM 3.0 is not among them. It pads the histories of one call to the
+# longest, and that padding changes its forecasts (up to 0.3 MASE units), so
+# it cannot share calls the way the stage needs; one request at a time it
+# alone took half the run.
+# The stage runs in the WSL environment, which uv does not manage.
+INSTALL = (
+    "uv sync --inexact --extra benchmarks --extra validation; in the WSL "
+    "environment (source scripts/activate_rwkv7.sh): "
+    "python -m pip install timestral h2ofm==0.43.1"
+)
 BENCHMARK_MODELS = ("prophet", "naive", *MODEL_DEFAULTS)
 
 
@@ -127,6 +133,73 @@ def select_plot_tables(records, config):
     }
 
 
+def select_latency_tables(records, config):
+    """The tables whose forecasts are requested one at a time and timed.
+
+    Timing every table makes the stage several times slower, and a few thousand
+    requests already separate the models. The other tables are forecast one
+    table (all its origins) per call and are not timed.
+    """
+    options = config.get("holdout", {}).get("latency", {})
+    count = options.get("tables", 500)
+    seed = options.get("sample_seed", config["seed"])
+    if count is not None and (
+        isinstance(count, bool) or not isinstance(count, int) or count < 1
+    ):
+        raise ValueError(
+            "holdout.latency.tables must be a positive integer, or null for every table"
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("holdout.latency.sample_seed must be an integer")
+    ranked = sorted(
+        range(len(records)),
+        key=lambda i: (
+            hashlib.sha256(
+                f"latency:{seed}:{records[i].get('source_key', records[i]['source'])}".encode()
+            ).hexdigest(),
+            records[i]["source"],
+        ),
+    )
+    selected = sorted(ranked if count is None else ranked[:count])
+    return set(selected), {
+        "requested_tables": count,
+        "measured_tables": len(selected),
+        "sample_seed": seed,
+        "selection": "seeded SHA-256 ranking within evaluated tables; measured before the other tables",
+        "other_tables": "all origins of a table in one call per model; not timed",
+        "sources": [records[i]["source"] for i in selected],
+    }
+
+
+def same_layout_batches(contexts, size):
+    """Positions of contexts that can share a call: equal target and covariate counts."""
+    groups = {}
+    for position, context in enumerate(contexts):
+        covariates = context.get("past_covariates")
+        key = (
+            context["context"].shape[1],
+            0 if covariates is None else covariates.shape[1],
+        )
+        groups.setdefault(key, []).append(position)
+    return [
+        members[start : start + size]
+        for members in groups.values()
+        for start in range(0, len(members), size)
+    ]
+
+
+def left_padded(series, length):
+    """Stack (1, rows, time) histories; NaN (missing) before the shorter ones."""
+    return torch.cat(
+        [
+            torch.nn.functional.pad(
+                s.float(), (length - s.shape[-1], 0), value=float("nan")
+            )
+            for s in series
+        ]
+    )
+
+
 class FoundationBenchmarks:
     """Load each requested model once; never send future values or other table labels."""
 
@@ -199,19 +272,6 @@ class FoundationBenchmarks:
                     cache_dir=str(cache),
                     batch_size=options["batch_size"],
                 )
-            elif name == "timesfm":
-                try:
-                    from timesfm3 import TimesFM3Forecaster
-                except ImportError as error:
-                    raise ImportError(f"TimesFM requires: {INSTALL}") from error
-                model = TimesFM3Forecaster.from_pretrained(
-                    options["model_id"],
-                    device=device,
-                    revision=options["revision"],
-                    cache_dir=str(cache),
-                    token=False,
-                    per_core_batch_size=options["batch_size"],
-                )
             else:
                 try:
                     from timestral import TimestralForecaster
@@ -246,11 +306,6 @@ class FoundationBenchmarks:
                 else "anonymous token=False",
                 "load_seconds": perf_counter() - started,
             }
-            if name == "timesfm":
-                self.metadata[name]["settings"] = (
-                    "averaged with the forecast of the mirrored series; "
-                    "forecasts not clamped at zero"
-                )
             logger.info("Loaded benchmark {} parameters={:,}", name, parameters)
 
     @torch.inference_mode()
@@ -288,28 +343,21 @@ class FoundationBenchmarks:
                         ),
                     )
                 ]
-            elif name == "timesfm":
-                limit = self.context_limit
-                points = [
-                    model.predict(
-                        c["context"][0, :, -limit:].numpy(),
-                        horizon,
-                        past_only_covariates=None
-                        if c.get("past_covariates") is None
-                        else c["past_covariates"][0, :, -limit:].numpy(),
-                        use_symmetric_averaging=True,
-                    ).forecast
-                    for c in contexts
-                ]
             else:
-                points = [
-                    model.forecast(
-                        c["context"],
+                points = [None] * len(contexts)
+                size = self.options.get(name, MODEL_DEFAULTS[name])["batch_size"]
+                for members in same_layout_batches(contexts, size):
+                    chunk = [contexts[i] for i in members]
+                    length = max(c["context"].shape[-1] for c in chunk)
+                    medians = model.forecast(
+                        left_padded([c["context"] for c in chunk], length),
                         prediction_length=horizon,
-                        past_covariates=c.get("past_covariates"),
-                    ).median[0]
-                    for c in contexts
-                ]
+                        past_covariates=None
+                        if chunk[0].get("past_covariates") is None
+                        else left_padded([c["past_covariates"] for c in chunk], length),
+                    ).median
+                    for i, median in zip(members, medians, strict=True):
+                        points[i] = median
             if len(points) != len(contexts):
                 raise ValueError(
                     f"{name} returned a different number of forecast contexts"

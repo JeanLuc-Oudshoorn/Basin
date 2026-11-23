@@ -160,8 +160,7 @@
       "naive",
       "chronos",
       "timestral",
-      "timeh2o",
-      "timesfm"
+      "timeh2o"
     ],
     "sample_percent": 15.0,
     "sample_seed": 7,
@@ -181,11 +180,6 @@
       "revision": "1310be782553943a4c520d2810a98ce8f56b2709",
       "batch_size": 32
     },
-    "timesfm": {
-      "model_id": "google/timesfm-3.0-pytorch",
-      "revision": "43046b85ec22d584a13f8098c2ed39c889e129c2",
-      "batch_size": 32
-    },
     "percentiles": [
       1,
       25,
@@ -196,7 +190,8 @@
     "mase_seasonality": 1,
     "latency": {
       "warmup_requests": 1,
-      "repeats": 1
+      "repeats": 1,
+      "tables": 500
     },
     "progress_every_tables": 100,
     "graph_min_profile_requests": 8

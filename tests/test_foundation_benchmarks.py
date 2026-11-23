@@ -27,7 +27,8 @@ class FoundationBenchmarkTests(unittest.TestCase):
         self.assertEqual(benchmark_names(config), ["prophet", "naive", "chronos"])
         config["holdout"]["benchmark_models"] = ["timestral", "timeh2o"]
         self.assertEqual(benchmark_names(config), ["timestral", "timeh2o"])
-        for value in (["rwkv"], ["chronos", "chronos"], "chronos", [1]):
+        # TimesFM 3.0 was taken out of the comparison (see the stage README).
+        for value in (["rwkv"], ["timesfm"], ["chronos", "chronos"], "chronos", [1]):
             with self.subTest(value=value):
                 config["holdout"]["benchmark_models"] = value
                 with self.assertRaises(ValueError):
@@ -91,31 +92,12 @@ class FoundationBenchmarkTests(unittest.TestCase):
         original = copy.deepcopy(contexts)
         points = [torch.ones(2, 16), torch.full((2, 16), 2.0)]
         chronos.predict_quantiles.return_value = ([], points)
-        timestral.forecast.side_effect = [
-            SimpleNamespace(median=p[None]) for p in points
-        ]
+        timestral.forecast.return_value = SimpleNamespace(median=torch.stack(points))
         timeh2o = Mock()
         timeh2o.config.context_length = 16384
         timeh2o.forecast_many.return_value = [
             SimpleNamespace(point=p.numpy()) for p in points
         ]
-        timesfm = Mock()
-        timesfm.predict.side_effect = [
-            SimpleNamespace(forecast=p.numpy()) for p in points
-        ]
-        suite.context_limit = 48
-        suite.models = {"timesfm": timesfm}
-        result = suite.predict(contexts, 16)
-        # TimesFM gets the most recent points of targets and past covariates.
-        call = timesfm.predict.call_args
-        np.testing.assert_array_equal(call.args[0], contexts[1]["context"][0, :, -48:])
-        np.testing.assert_array_equal(
-            call.kwargs["past_only_covariates"],
-            contexts[1]["past_covariates"][0, :, -48:],
-        )
-        self.assertTrue(call.kwargs["use_symmetric_averaging"])
-        self.assertEqual(result[0]["timesfm"].shape, (2, 16))
-        suite.context_limit = 2048
         suite.models = {"chronos": chronos, "timestral": timestral, "timeh2o": timeh2o}
         suite.options = {"chronos": {"batch_size": 32}}
         result = suite.predict(contexts, 16)
@@ -131,6 +113,18 @@ class FoundationBenchmarkTests(unittest.TestCase):
             for key in context:
                 torch.testing.assert_close(context[key], saved[key])
         self.assertEqual(set(result[0]), {"chronos", "timestral", "timeh2o"})
+        # Timestral gets both tables in one call; the shorter history is
+        # padded on the left with missing values, covariates included.
+        call = timestral.forecast.call_args
+        self.assertEqual(timestral.forecast.call_count, 1)
+        self.assertEqual(tuple(call.args[0].shape), (2, 2, 64))
+        self.assertTrue(torch.isnan(call.args[0][0, :, :32]).all())
+        torch.testing.assert_close(call.args[0][0, :, 32:], contexts[0]["context"][0])
+        torch.testing.assert_close(call.args[0][1], contexts[1]["context"][0])
+        covariates = call.kwargs["past_covariates"]
+        self.assertEqual(tuple(covariates.shape), (2, 1, 64))
+        self.assertTrue(torch.isnan(covariates[0, :, :32]).all())
+        np.testing.assert_array_equal(result[1]["timestral"], points[1].numpy())
         # TimeH2O-v1 ignores past covariates, so it is sent the targets only.
         call = timeh2o.forecast_many.call_args
         self.assertEqual([tuple(c.shape) for c in call.args[0]], [(2, 32), (2, 64)])

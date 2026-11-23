@@ -123,8 +123,8 @@ for boundary handling, per-horizon metrics and interpretation. This replaces
 the previous sampled-horizon protocol. Legacy `horizon_probabilities` and
 `horizon_seed` settings are ignored by evaluation.
 `holdout.benchmark_models` selects comparisons (RWKV is always included):
-`["prophet", "naive", "chronos"]` by default; add `"timestral"`, `"timeh2o"` or
-`"timesfm"` to include them.
+`["prophet", "naive", "chronos"]` by default; add `"timestral"` or `"timeh2o"`
+to include them.
 `holdout.sample_percent` defaults to 100; set it to e.g. 1 for a seeded 1% sample
 of the saved holdout tables. `sample_selection.json` records the selected sources.
 All models use those same sources, origins and historical context.
@@ -193,6 +193,32 @@ with four complete future tokens available for scoring. Requests run
 serially with batch size 1, and their model order rotates across origins.
 This replaces the old holdout `inference_batch_size` setting; training and
 validation batching are unaffected.
+
+Only a sample of the tables is timed this way: `holdout.latency.tables=500`
+(about 2,500 requests per model; `null` times every table). The sample is a
+seeded random choice (`holdout.latency.sample_seed`, default the global seed),
+listed in `latency_selection.json`, and is forecast first. Every other table is
+forecast in one call per model for all its origins, which is several times
+faster and is not timed. Forecasts and scores of both kinds of table enter the
+accuracy results in the same way. One-off costs (RWKV's graph captures) weigh
+more in the mean of a few thousand requests than in a fully timed run; compare
+medians.
+
+A forecast made in a shared call should equal the one a request on its own
+gives. It does up to rounding, checked on 197 tables forecast both ways on the
+GPU (2026-11-23): single points differ on average by 0.4% of the history's
+standard deviation for RWKV (BF16) and by less than 0.02% for Chronos-2,
+Timestral and TimeH2O, in neither direction more often; the table MASE
+percentiles of every model agree to three or four digits.
+
+TimesFM 3.0 was part of the comparison for one run (epoch 2, 2026-11-23) and
+was then taken out. It pads the histories of one call to the longest, and that
+padding moved its forecasts by up to 0.3 MASE units, so it could not share
+calls. That run's TimesFM latency (median 332 ms) is mostly not the model's
+own: the `timesfm` package runs Python's garbage collection after every call.
+In the holdout process that took 156 ms per call in a 200-table check, and more
+as a run collects results; the same request in a process of its own takes 47 to
+123 ms.
 
 Timing starts with the historical CPU request payload already constructed,
 includes adapter preprocessing/tokenization, device transfers and forecasting,
@@ -266,6 +292,15 @@ authentication and is an optional dependency:
 uv sync --inexact --extra validation --extra benchmarks
 ```
 
+That command only fills the Windows environment. On Windows the stage itself runs
+in the WSL environment, which is managed with pip, so install the packages there
+too (versions as in the `benchmarks` extra of `pyproject.toml`):
+
+```bash
+source scripts/activate_rwkv7.sh
+python -m pip install timestral h2ofm==0.43.1
+```
+
 Both weights are downloaded anonymously into `.cache/huggingface` on first use.
 
 TimeH2O-v1 (`"timeh2o"`, 108.8M parameters, `h2ofm` package in the same
@@ -280,13 +315,6 @@ TimeH2O-v1 (`"timeh2o"`, 108.8M parameters, `h2ofm` package in the same
   receive the past covariates.
 - It runs with the package defaults, which average the forecasts of up to four
   patch sizes (one pass each), so its latency covers those passes.
-
-TimesFM 3.0 (`"timesfm"`, 330.7M parameters, `timesfm` package in the
-`benchmarks` extra) downloads anonymously; its weights are under Google's
-non-commercial licence. It receives the targets of a table together and the
-past covariates, like Chronos-2 and Timestral. Its forecast is averaged with
-that of the mirrored series (two series per pass, the setting its authors
-benchmark with), and is not clamped at zero.
 
 Chronos is a regular project dependency. Model IDs, pinned revisions and runtime
 parameter counts are recorded in the metrics report. See the

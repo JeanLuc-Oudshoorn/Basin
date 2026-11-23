@@ -161,6 +161,77 @@ class MaseTests(unittest.TestCase):
                 self.assertGreaterEqual(result["latency"][name]["min_ms"], 0)
             json.dumps(result, allow_nan=False)
 
+    def test_only_the_latency_sample_is_forecast_one_request_at_a_time(self):
+        config = load_config("configs/legacy_500m.json")
+        config["plot"]["max_plots"] = 0
+        config["holdout"].update(
+            benchmark_models=["naive", "chronos"],
+            latency={"warmup_requests": 0, "repeats": 1, "tables": 1},
+        )
+        model = torch.nn.Linear(1, 1)
+        model.config = SimpleNamespace(
+            patch_size=16, context_length=2048, quantiles=(0.1, 0.5, 0.9)
+        )
+        suite = Mock()
+        suite.names = config["holdout"]["benchmark_models"]
+        suite.metadata = {name: {"device": "cpu"} for name in suite.names}
+        calls = {"rwkv": [], "chronos": []}
+
+        def last(context):
+            return float(context["context"][0, 0, -1])
+
+        def neural(actual_model, contexts, batch_size, prediction_patches=1):
+            self.assertEqual(len(contexts), batch_size)
+            calls["rwkv"].append(len(contexts))
+            return [
+                torch.full((1, prediction_patches * 16, 3), last(c)) for c in contexts
+            ]
+
+        def foundation(contexts, horizon, *, model_names=None):
+            calls["chronos"].append(len(contexts))
+            return [{"chronos": np.full((1, horizon), last(c))} for c in contexts]
+
+        suite.predict.side_effect = foundation
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            records = []
+            for name, offset in (("first", 0), ("second", 1000)):
+                source = base / f"{name}.parquet"
+                pd.DataFrame({"outcome": np.arange(131) + offset}).to_parquet(source)
+                records.append(
+                    {
+                        "source": str(source),
+                        "source_sha256": file_digest(source),
+                        "targets": ["outcome"],
+                        "roles": {"past": []},
+                    }
+                )
+            config["paths"]["holdout_test"] = str(base / "output")
+            with (
+                patch("holdout.FoundationBenchmarks", return_value=suite),
+                patch("holdout.forecast_contexts", side_effect=neural),
+            ):
+                result = evaluate_holdout(model, records, config)
+            # One table: three single requests per model. The other: one call.
+            self.assertEqual(calls, {"rwkv": [1, 1, 1, 3], "chronos": [1, 1, 1, 3]})
+            selection = json.loads((base / "output/latency_selection.json").read_text())
+            self.assertEqual(selection["measured_tables"], 1)
+            requests = pd.read_parquet(base / "output/request_latencies.parquet")
+            self.assertEqual(set(requests.source), set(selection["sources"]))
+            self.assertEqual(len(requests), 3 * 3)
+            self.assertEqual(result["latency"]["rwkv"]["forecast_origins"], 3)
+            self.assertEqual(result["latency_protocol"]["tables"]["measured_tables"], 1)
+            # Either way every origin gets the forecast made from its own history.
+            self.assertEqual(result["table_count"], 2)
+            points = pd.read_parquet(base / "output/test_predictions.parquet")
+            self.assertEqual(len(points), 2 * 3 * 64)
+            for column in ("rwkv", "chronos", "naive"):
+                expected = (
+                    points.origin - 1 + 1000 * points.source.str.contains("second")
+                )
+                np.testing.assert_array_equal(points[column], expected)
+            json.dumps(result, allow_nan=False)
+
 
 class LatencyTests(unittest.TestCase):
     def test_warmup_retained_separately_repeats_keep_first_scored_forecast(self):

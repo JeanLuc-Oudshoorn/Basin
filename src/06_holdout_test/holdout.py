@@ -15,6 +15,7 @@ from benchmarks import (
     BENCHMARK_MODELS,
     FoundationBenchmarks,
     benchmark_names,
+    select_latency_tables,
     select_plot_tables,
 )
 from error_distribution import write_error_distribution, write_latency_distribution
@@ -301,6 +302,11 @@ def evaluate_holdout(model, records, config):
         )
     plot_indices, plot_selection = select_plot_tables(records, config)
     write_json(directory / "plot_selection.json", plot_selection, level="DEBUG")
+    # Latency is measured on a sample of the tables, one request at a time.
+    # Every other table is forecast in one call per model for all its origins.
+    timed_tables, latency_selection = select_latency_tables(records, config)
+    write_json(directory / "latency_selection.json", latency_selection, level="DEBUG")
+    table_order = sorted(range(len(records)), key=lambda i: (i not in timed_tables, i))
     cap = min(model.config.context_length, config["data"]["context_length"])
     benchmarks = FoundationBenchmarks(config, cap)
     benchmarks.metadata["rwkv"] = {
@@ -311,7 +317,7 @@ def evaluate_holdout(model, records, config):
         "inputs": "historical targets and time-matched past covariates",
     }
     methods = ["rwkv"] + benchmarks.names
-    graph_plan = configure_holdout_graph_profiles(model, records, config)
+    graph_plan = configure_holdout_graph_profiles(model, records, config, timed_tables)
     if graph_plan is not None:
         logger.info("Holdout graph profile admission: {}", graph_plan)
     rows, origin_metrics, table_metrics = [], [], []
@@ -324,6 +330,64 @@ def evaluate_holdout(model, records, config):
     latency_summary = {}
     latency_journal = directory / "request_latencies.jsonl"
     latency_journal.write_text("", encoding="utf-8")
+    forecast_tokens = len(probabilities)
+    horizon = forecast_tokens * patch
+    block = {"prediction_patches": forecast_tokens} if forecast_tokens > 1 else {}
+
+    def timed_forecasts(context, history, request, targets, covariates, shift):
+        """One request per model, each timed; `shift` rotates the model order."""
+        prediction, foundation, classic, regressors = None, {}, {}, None
+        # Rotate serial execution order to spread cache/clock/order effects.
+        for order_index, name in enumerate(methods[shift:] + methods[:shift]):
+            request["order_index"] = order_index
+            if name == "rwkv":
+                prediction = timer.measure(
+                    name,
+                    lambda: list(forecast_contexts(model, [context], 1, **block))[0],
+                    device=device,
+                    request=request,
+                )
+            elif name in ("prophet", "naive"):
+                classic[name], bundle = timer.measure(
+                    name,
+                    lambda name=name: classical_request(
+                        name, history, targets, covariates, horizon, config
+                    ),
+                    device="cpu",
+                    request=request,
+                )
+                if name == "prophet":
+                    regressors = bundle
+            else:
+                foundation[name] = timer.measure(
+                    name,
+                    lambda name=name: benchmarks.predict(
+                        [context], horizon, model_names=[name]
+                    )[0][name],
+                    device=benchmarks.metadata[name]["device"],
+                    request=request,
+                )
+        return prediction, foundation, classic, regressors
+
+    def table_forecasts(contexts, histories, targets, covariates):
+        """All origins of a table in one call per model; not timed."""
+        predictions = list(forecast_contexts(model, contexts, len(contexts), **block))
+        provided = benchmarks.predict(contexts, horizon)
+        forecasts = []
+        for prediction, foundation, history in zip(
+            predictions, provided, histories, strict=True
+        ):
+            classic, regressors = {}, None
+            for name in benchmarks.names:
+                if name in ("prophet", "naive"):
+                    classic[name], bundle = classical_request(
+                        name, history, targets, covariates, horizon, config
+                    )
+                    if name == "prophet":
+                        regressors = bundle
+            forecasts.append((prediction, foundation, classic, regressors))
+        return forecasts
+
     logger.info(
         "HOLDOUT start: {} tables, up to {} origins per table, models={}, output={}",
         len(records),
@@ -331,8 +395,21 @@ def evaluate_holdout(model, records, config):
         methods,
         directory,
     )
+    logger.info(
+        "HOLDOUT latency: the first {} tables are forecast one request at a time "
+        "and timed; the other {} in one call per table",
+        len(timed_tables),
+        len(records) - len(timed_tables),
+    )
+    batched_started, tables_done, batched_done = None, 0, 0
     try:
-        for table_index, record in enumerate(records):
+        for table_index in table_order:
+            record = records[table_index]
+            tables_done += 1
+            if table_index not in timed_tables:
+                if batched_started is None:
+                    batched_started = perf_counter()
+                batched_done += 1
             path = ROOT / record["source"]
             if file_digest(path) != record["source_sha256"]:
                 raise ValueError(f"Holdout source changed since transformation: {path}")
@@ -361,9 +438,10 @@ def evaluate_holdout(model, records, config):
                     record["source"],
                 )
                 continue
-            contexts = []
+            contexts, histories = [], []
             for origin in origins:
                 history = frame.iloc[max(0, origin - cap) : origin]
+                histories.append(history)
                 contexts.append(
                     {
                         "context": torch.tensor(
@@ -376,68 +454,36 @@ def evaluate_holdout(model, records, config):
                         )[None],
                     }
                 )
-            for origin_index, (origin, context) in enumerate(zip(origins, contexts)):
-                forecast_tokens = len(probabilities)
-                horizon = forecast_tokens * patch
+            if table_index in timed_tables:
+                forecasts = [
+                    timed_forecasts(
+                        context,
+                        history,
+                        {
+                            "table_index": table_index,
+                            "source": record["source"],
+                            "origin": origin,
+                            "context_points": len(history),
+                            "targets": len(targets),
+                            "covariates": len(covariates),
+                            "horizon": horizon,
+                            "forecast_tokens": forecast_tokens,
+                            "scored_horizon": min(origin + horizon, len(frame))
+                            - origin,
+                        },
+                        targets,
+                        covariates,
+                        (table_index + origin_index) % len(methods),
+                    )
+                    for origin_index, (origin, context, history) in enumerate(
+                        zip(origins, contexts, histories)
+                    )
+                ]
+            else:
+                forecasts = table_forecasts(contexts, histories, targets, covariates)
+            for origin, history, forecast in zip(origins, histories, forecasts):
+                prediction, foundation, classic, regressors = forecast
                 stop = min(origin + horizon, len(frame))
-                history = frame.iloc[max(0, origin - cap) : origin]
-                request = {
-                    "table_index": table_index,
-                    "source": record["source"],
-                    "origin": origin,
-                    "context_points": len(history),
-                    "targets": len(targets),
-                    "covariates": len(covariates),
-                    "horizon": horizon,
-                    "forecast_tokens": forecast_tokens,
-                    "scored_horizon": stop - origin,
-                }
-                foundation, classic = {}, {}
-                regressors = None
-                # Rotate serial execution order to spread cache/clock/order effects.
-                shift = (table_index + origin_index) % len(methods)
-                order = methods[shift:] + methods[:shift]
-                for order_index, name in enumerate(order):
-                    request["order_index"] = order_index
-                    if name == "rwkv":
-                        prediction = timer.measure(
-                            name,
-                            lambda: list(
-                                forecast_contexts(
-                                    model,
-                                    [context],
-                                    1,
-                                    **(
-                                        {"prediction_patches": forecast_tokens}
-                                        if forecast_tokens > 1
-                                        else {}
-                                    ),
-                                )
-                            )[0],
-                            device=device,
-                            request=request,
-                        )
-                    elif name in ("prophet", "naive"):
-                        points, bundle = timer.measure(
-                            name,
-                            lambda name=name: classical_request(
-                                name, history, targets, covariates, horizon, config
-                            ),
-                            device="cpu",
-                            request=request,
-                        )
-                        classic[name] = points
-                        if name == "prophet":
-                            regressors = bundle
-                    else:
-                        foundation[name] = timer.measure(
-                            name,
-                            lambda name=name: benchmarks.predict(
-                                [context], horizon, model_names=[name]
-                            )[0][name],
-                            device=benchmarks.metadata[name]["device"],
-                            request=request,
-                        )
                 quantiles = prediction[:, :horizon].numpy()
                 if quantiles.shape != (
                     len(targets),
@@ -557,12 +603,23 @@ def evaluate_holdout(model, records, config):
                     )
             elapsed = perf_counter() - started
             completed = len(table_metrics)
+            # The timed tables come first and are slower: until they are done
+            # the estimate assumes their pace for every table (an upper bound).
+            timing = batched_started is None
+            pace = (
+                elapsed / tables_done
+                if timing
+                else (perf_counter() - batched_started) / batched_done
+            )
             progress = {
                 "completed_tables": completed,
                 "total_tables": len(records),
                 "completed_origins": completed_origins,
                 "elapsed_seconds": elapsed,
-                "eta_seconds": elapsed / completed * (len(records) - completed),
+                "eta_seconds": pace * (len(records) - tables_done),
+                "phase": "timed, one request at a time"
+                if timing
+                else "one call per table, not timed",
                 "progress_percent": 100 * completed / len(records),
                 "last_table": metric,
                 "primary_metric": "table_mase_median",
@@ -577,13 +634,16 @@ def evaluate_holdout(model, records, config):
             ):
                 latency_summary = timer.summary()
                 logger.info(
-                    "HOLDOUT tables {:,}/{:,} ({:.1f}%) | origins={:,} | elapsed {} | ETA {}",
+                    "HOLDOUT tables {:,}/{:,} ({:.1f}%) | origins={:,} | elapsed {} | ETA {}{}",
                     completed,
                     len(records),
                     progress["progress_percent"],
                     completed_origins,
                     duration(elapsed),
                     duration(progress["eta_seconds"]),
+                    " at most (timed tables first; the others are faster)"
+                    if timing and len(timed_tables) < len(records)
+                    else "",
                 )
             progress["latency"] = latency_summary
             progress["rwkv_inference"] = inference_execution_summary(model)
@@ -621,7 +681,10 @@ def evaluate_holdout(model, records, config):
                 "aggregation": "weighted token means per origin and target, then equal origin-target weight; pooled point quantiles use the same weights; table_summary gives equal-table score percentiles",
                 "undefined": "zero scale, insufficient history or no finite lag pairs: null MASE and explicit excluded counts; no epsilon substitution",
             },
-            "latency_protocol": timer.metadata(),
+            "latency_protocol": dict(
+                timer.metadata(),
+                tables={k: v for k, v in latency_selection.items() if k != "sources"},
+            ),
             "latency": timer.summary(),
             "protocol": f"dataset-disjoint, sampled patch origins, always {len(probabilities)} forecast tokens, training-weighted scoring",
             "horizon_policy": {
@@ -668,6 +731,7 @@ def evaluate_holdout(model, records, config):
             "origins": "origin_metrics.json",
             "predictions": "test_predictions.parquet",
             "latencies": "request_latencies.parquet",
+            "latency_tables": "latency_selection.json",
         }
         write_error_distribution(result, directory, config, tables=table_metrics)
         write_latency_distribution(result, pd.DataFrame(timer.rows), directory, config)

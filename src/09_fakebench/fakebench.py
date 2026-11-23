@@ -45,7 +45,7 @@ from train import RWKVForecaster, launch_wsl
 from transform import load_config, run_context, timed, write_json
 from variate_attention import configure_variate_execution
 
-MODELS = ("basin", "chronos2", "timestral", "timeh2o", "timesfm")
+MODELS = ("basin", "chronos2", "timestral", "timeh2o")
 # The dataset published in the FakeBench-TS repository.
 DATA = PACKAGE.parent / "data" / "fakebench_v1.parquet"
 COMPLETED = "results.json"  # written by scoring, so it marks a finished run
@@ -120,8 +120,6 @@ def build(name, config):
         )
     if name == "timeh2o":
         return fakebench_models.timeh2o(**settings.get("timeh2o", {}), **shared)
-    if name == "timesfm":
-        return fakebench_models.timesfm(**settings.get("timesfm", {}), **shared)
     return fakebench_models.load_factory(name)()
 
 

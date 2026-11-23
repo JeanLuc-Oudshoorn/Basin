@@ -16,7 +16,7 @@ uv run python src/09_fakebench/fakebench.py
 ```
 
 This forecasts the 2,100 series of the `v1` dataset with Basin, Chronos-2,
-Timestral, TimeH2O and TimesFM 3.0 and scores them. Like the other GPU stages it routes itself to WSL.
+Timestral and TimeH2O and scores them. Like the other GPU stages it routes itself to WSL.
 On an idle RTX 5070 the whole run took 75 seconds and peaked at 3.1 GB of GPU
 memory.
 
@@ -24,7 +24,7 @@ memory.
   (`holdout.checkpoint`, otherwise the newer of `model.pt` and the best
   weights in `latest_checkpoint.pt` under `paths.training`), with the same
   inference set-up. Its point forecast is the median.
-- **Chronos-2, Timestral, TimeH2O and TimesFM 3.0** use the model IDs, pinned revisions,
+- **Chronos-2, Timestral and TimeH2O** use the model IDs, pinned revisions,
   device and cache folder under `holdout` in the configuration. TimeH2O's
   weights are gated: see the [holdout README](../06_holdout_test/README.md).
 - The series come from the dataset published in the submodule,
@@ -54,7 +54,7 @@ data instead of being computed again.
 
 | Option | Effect |
 |---|---|
-| `--models basin chronos2 timestral timeh2o timesfm` | which models to include; FakeBench-TS baselines such as `seasonal_naive` also work |
+| `--models basin chronos2 timestral timeh2o` | which models to include; FakeBench-TS baselines such as `seasonal_naive` also work |
 | `--limit 100` | forecast an even subset of the series for a quick trial |
 | `--rerun` | forecast the published models again instead of copying their forecasts |
 | `--batch-size 16` | series per forecast call |

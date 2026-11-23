@@ -42,6 +42,41 @@ class GraphProfileTests(unittest.TestCase):
                 },
             )
 
+    def test_a_table_forecast_in_one_call_has_a_shape_of_its_own(self):
+        records = [
+            {
+                "source": name,
+                "source_rows": 4096,
+                "targets": ["outcome"],
+                "roles": {"past": ["cov"]},
+            }
+            for name in ("timed", "one call")
+        ]
+        config = {
+            "data": {"context_length": 2048},
+            "holdout": {"horizon_probabilities": [0.8, 0.16, 0.03, 0.01]},
+        }
+        model = SimpleNamespace(
+            context_length=2048, patch_size=16, width=768, output_patches=4
+        )
+        with patch("graph_profiles.sampled_origins", return_value=[32, 1024, 3000]):
+            counts = profile_counts(records, model, config, "cuda:0", timed={0})
+            self.assertEqual(
+                counts,
+                {
+                    # The timed table: one request per origin.
+                    ((1, 2, 16, 768), 1, 4, "cuda:0"): 1,
+                    ((1, 2, 64, 768), 1, 4, "cuda:0"): 1,
+                    ((1, 2, 128, 768), 1, 4, "cuda:0"): 1,
+                    # The other: its three origins together, padded to the longest.
+                    ((3, 2, 128, 768), 1, 4, "cuda:0"): 1,
+                },
+            )
+            # A model that rolls out forecasts requests one at a time regardless.
+            model.output_patches = 1
+            rollout = profile_counts(records, model, config, "cuda:0", timed={0})
+            self.assertEqual({key[0][0] for key in rollout}, {1})
+
     def test_contexts_near_a_standard_length_share_its_graph(self):
         config = {
             "data": {"context_length": 2048},

@@ -39,7 +39,7 @@ explicit = true
 [project.optional-dependencies]
 data = ["numpy", "scipy", "pandas", "matplotlib", "pyarrow", "networkx"]
 validation = ["prophet>=1.1.5,<2", "numpy", "pandas", "pyarrow"]
-benchmarks = ["timestral", "h2ofm==0.43.1", "timesfm==3.0.2"]
+benchmarks = ["timestral", "h2ofm==0.43.1"]
 # Optional copy of training checkpoints in Azure Blob Storage (training.checkpoint_upload).
 cloud = ["azure-storage-blob>=12.19,<13"]
 
