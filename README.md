@@ -134,16 +134,6 @@ performance on the domain you care about.
 Timestral behave like general-purpose large language models, while Basin is
 closer to a *small* language model specialised for one field.
 
-**Scaling up is not free.** You could close the gap by simply making a
-general model bigger, but that has two costs:
-
-1. **Forecast latency.** Larger models take longer to produce a forecast.
-   Latency is already the weak spot of TSFMs compared with traditional
-   machine-learning methods, and Basin does not want to make it worse than
-   necessary.
-2. **Model size.** Larger models take more disk space and memory, and may
-   no longer fit in the RAM or VRAM of the machine that has to run them.
-
 ## Why a focus on short- to medium-term forecasting?
 
 Many mainstream TSFMs forecast very long horizons, often more than 1,000
