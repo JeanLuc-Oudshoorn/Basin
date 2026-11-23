@@ -219,7 +219,8 @@ episodes and faults.
 **Availability.** The large bundled collections that do exist, such as
 [GIFT-Eval Pretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain),
 mix data from many domains. Filtering them down to only the operational
-domain would be cumbersome.
+domain is challenging, because the origin and domain of a dataset are not
+always clear.
 
 ## Why is the project named Basin?
 
