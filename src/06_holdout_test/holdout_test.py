@@ -26,6 +26,7 @@ from fast_inference import configure_fast_inference, inference_execution_summary
 from holdout import evaluate_holdout
 from holdout_runs import holdout_directory, new_holdout_run
 from performance import configure_cuda_memory
+from result_upload import make_result_store, upload_run
 from startup_cache import (
     artifact_digest,
     atomic_json,
@@ -315,7 +316,8 @@ def select_test_records(metadata, data):
 
 
 @logged_training("holdout_test")
-def run(config):
+def run(config, store=None):
+    """Test the trained model; with a `store`, copy the finished run folder to it."""
     startup_started = perf_counter()
     benchmark_names(config)
     checkpoint = holdout_checkpoint(config)
@@ -428,6 +430,9 @@ def run(config):
     write_json(directory / "test_metrics.json", metrics)
     emit_training_event("out_of_sample_evaluation", out_of_sample_metrics=metrics)
     logger.success("Holdout test complete: {}", directory)
+    if store is not None:
+        # After everything is on the local disk: a failed copy loses nothing.
+        emit_training_event("holdout_results_uploaded", **upload_run(store, directory))
     return metrics
 
 
@@ -442,7 +447,12 @@ def main():
         if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
             raise RuntimeError("Use the configured WSL CUDA bf16 runtime")
         with timed("HOLDOUT TEST stage", cuda=True):
-            run(config)
+            # Only this entry point uploads; find out now, not after the
+            # test, that the container cannot be written.
+            store = make_result_store(config)
+            if store is not None:
+                store.preflight()
+            run(config, store)
 
 
 if __name__ == "__main__":

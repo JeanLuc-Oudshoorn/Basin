@@ -194,7 +194,13 @@
       "tables": 500
     },
     "progress_every_tables": 100,
-    "graph_min_profile_requests": 8
+    "graph_min_profile_requests": 8,
+    "result_upload": {
+      "container": "checkpoints",
+      "prefix": null,
+      "block_mib": 16,
+      "concurrency": 8
+    }
   },
   "plot": {
     "width": 12,

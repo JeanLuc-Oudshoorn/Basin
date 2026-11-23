@@ -101,6 +101,56 @@ its folder without `test_metrics.json`; tools that look for "the latest run"
 skip it. Old run folders are removed by hand when no longer needed (one run
 of 7,500 tables is about 0.6 GB).
 
+### Copy of the results in Azure Blob Storage
+
+With `holdout.result_upload` set, the stage copies every finished run folder
+to a storage container, as training does with its checkpoints, so that a lost
+disk does not cost the results:
+
+```json
+"result_upload": {"container": "checkpoints", "prefix": null, "block_mib": 16, "concurrency": 8}
+```
+
+A file of a run becomes the blob `<prefix>/<run folder>/<file>`. `prefix`
+defaults to the holdout directory, so the container mirrors the project:
+`results/model/holdout_test/20261123T074856Z_epoch2_step2972000/test_metrics.json`
+next to `results/model/training/latest_checkpoint.pt`. The account is the one
+the checkpoints use (`AZURE_ENDPOINT` and `AZURE_STORAGE_KEY`, in the
+environment or in `.env`). Remove the setting, or add `"enabled": false`, to
+keep results on the local disk only.
+
+- Before the test starts, a small blob is written, read back and deleted.
+  Wrong keys, a missing container or no network stop the stage there, before
+  the model is loaded.
+- The copy is made when the run is complete and `test_metrics.json` is on the
+  local disk. The service checks an MD5 of every request; afterwards the
+  container is listed and the size and MD5 of every file are compared with the
+  local files.
+- `test_metrics.json` is sent last, and only after the other files were found
+  complete. As on the local disk, a run folder in the container that has this
+  file is a complete run.
+- If the copy fails, the stage ends with an error. The error says that the
+  results are complete on the local disk and names the command that sends
+  them again.
+- Sending a folder again sends only files that are missing or different.
+  `plotting.py` and `error_distribution.py` do this after they have rewritten
+  their files. Nothing is ever deleted from the container.
+- Only the stage's command line (`holdout_test.py`) uploads. Tests and
+  verification scripts that call `run(config)` themselves do not.
+
+```powershell
+uv run python src/06_holdout_test/result_upload.py check
+uv run python src/06_holdout_test/result_upload.py list
+uv run python src/06_holdout_test/result_upload.py upload            # most recent completed run
+uv run python src/06_holdout_test/result_upload.py upload --run <name>
+uv run python src/06_holdout_test/result_upload.py upload --all
+uv run python src/06_holdout_test/result_upload.py download --run <name>
+```
+
+`download` brings a run folder back into the holdout directory and checks
+every file against the SHA-256 recorded at upload; files that are already
+there and identical are kept.
+
 The holdout directory is `results/model/holdout_test` by default, configured
 by `paths.holdout_test`. A run folder contains metrics JSON, prediction parquet files,
 interactive Plotly HTML plots, live progress/ETA and `model_used.json` recording the model's

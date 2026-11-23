@@ -126,7 +126,9 @@ def regenerate_saved_plots(config, run=None):
 def main():
     for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_test"):
         sys.path.insert(0, str(ROOT / "src" / stage))
+    from holdout_runs import latest_holdout_run
     from loguru import logger
+    from result_upload import upload_changed_run
     from transform import load_config, run_context
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -139,6 +141,7 @@ def main():
     with run_context(config, "holdout_plots"):
         count = regenerate_saved_plots(config, args.run)
         logger.success("Saved {} interactive holdout HTML plots", count)
+        upload_changed_run(config, latest_holdout_run(config, args.run))
 
 
 if __name__ == "__main__":

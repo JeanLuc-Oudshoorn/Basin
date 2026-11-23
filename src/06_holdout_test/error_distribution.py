@@ -262,6 +262,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root / "src/03_transforming_input_data"))
     from holdout_runs import latest_holdout_run
+    from result_upload import upload_changed_run
     from transform import load_config, run_context, write_json
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -304,6 +305,7 @@ def main():
         result.pop("tables", None)
         result.pop("origins", None)
         write_json(path, result)
+        upload_changed_run(config, directory)
 
 
 if __name__ == "__main__":

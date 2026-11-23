@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -218,6 +219,73 @@ class HoldoutStageTests(unittest.TestCase):
             self.assertEqual(holdout_runs(config), sorted(folders))
             self.assertEqual(latest_holdout_run(config), max(folders))
             self.assertEqual(latest_holdout_run(config, folders[0].name), folders[0])
+
+    def test_a_store_receives_the_finished_run_folder_and_only_when_given(self):
+        metadata, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            # The stage's command line makes the store; a bare run() must not.
+            self.assertIn("result_upload", config["holdout"])
+            config["paths"].update(
+                training=str(base / "training"),
+                holdout_test=str(base / "holdout_test"),
+                logs=str(base / "logs"),
+            )
+            (base / "training").mkdir()
+            (base / "training/model.pt").touch()
+            model = Mock()
+            model.eval.return_value = model
+            metrics = {"table_count": 1, "pooled": {"rwkv": {"rmse": 0.2}}}
+            seen = []
+
+            def sync(folder, name):
+                # Called once everything, the completion mark included, is on disk.
+                seen.append((folder, name, (folder / "test_metrics.json").is_file()))
+                return {
+                    "destination": "container/run",
+                    "files": 3,
+                    "bytes": 10,
+                    "uploaded_files": 3,
+                    "unchanged_files": 0,
+                    "seconds": 0.1,
+                }
+
+            store = Mock()
+            store.sync.side_effect = sync
+
+            def patched():
+                return (
+                    patch("holdout_test.torch.load", return_value=metadata),
+                    patch("holdout_test.populate_test_schema"),
+                    patch("holdout_test.artifact_digest", return_value="digest"),
+                    patch("holdout_test.RWKVForecaster.load", return_value=model),
+                    patch("holdout_test.configure_cuda_memory"),
+                    patch("holdout_test.configure_variate_execution"),
+                    patch("holdout_test.evaluate_holdout", return_value=metrics),
+                )
+
+            with ExitStack() as stack, patch("result_upload.make_result_store") as make:
+                for item in patched():
+                    stack.enter_context(item)
+                run(config)
+                make.assert_not_called()
+                store.sync.assert_not_called()
+                self.assertEqual(run(config, store), metrics)
+                (folder, name, complete), *others = seen
+                self.assertEqual((others, complete, name), ([], True, folder.name))
+                self.assertEqual(folder, latest_holdout_run(config))
+                # A failed copy is an error, but the results stay complete.
+                store.sync.side_effect = ConnectionError("network is gone")
+                with self.assertRaisesRegex(RuntimeError, "results are complete in"):
+                    run(config, store)
+            self.assertEqual(len(holdout_runs(config)), 3)
+            journals = sorted((base / "logs").glob("rwkv7_holdout_test*.jsonl"))
+            uploaded = [
+                "holdout_results_uploaded" in journal.read_text()
+                for journal in journals
+            ]
+            self.assertEqual(uploaded, [False, True, False])
 
     def test_results_saved_before_run_folders_count_as_the_oldest_run(self):
         with tempfile.TemporaryDirectory() as temporary:

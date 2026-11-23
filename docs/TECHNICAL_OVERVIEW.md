@@ -275,9 +275,11 @@ disk. Writes are not affected in the same way (59 MiB/s). Resuming from a
 saved validation panel is kept on WSL's disk (`~/.cache/basin/validation_panels`).
 
 The setup script also installs `azure-storage-blob` (optional dependency group
-`cloud`) for checkpoint copies. Their credentials, `AZURE_ENDPOINT` and
-`AZURE_STORAGE_KEY`, are read from the environment or from a git-ignored `.env`
-file in the repository root.
+`cloud`) for checkpoint copies and for the copy of every finished holdout run
+folder (`holdout.result_upload`, see the
+[holdout stage](../src/06_holdout_test/README.md)). Their credentials,
+`AZURE_ENDPOINT` and `AZURE_STORAGE_KEY`, are read from the environment or from
+a git-ignored `.env` file in the repository root.
 
 ## Convert public MATLAB datasets
 

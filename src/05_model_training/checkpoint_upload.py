@@ -77,40 +77,43 @@ def read_environment_file(path):
         os.environ.setdefault(name, value)
 
 
-def upload_options(training):
-    """Validated `training.checkpoint_upload`; None when uploads are off."""
-    options = training.get("checkpoint_upload")
+def upload_options(section, key="checkpoint_upload", name="training"):
+    """Validated `training.checkpoint_upload`; None when uploads are off.
+
+    Other stages keep the same settings under their own name, for example
+    `holdout.result_upload` (`key="result_upload", name="holdout"`).
+    """
+    setting = f"{name}.{key}"
+    options = section.get(key)
     if options is None:
         return None
     if not isinstance(options, dict):
-        raise ValueError("training.checkpoint_upload must be an object or null")
+        raise ValueError(f"{setting} must be an object or null")
     unknown = set(options) - OPTIONS
     if unknown:
-        raise ValueError(
-            f"Unknown training.checkpoint_upload fields: {sorted(unknown)}"
-        )
+        raise ValueError(f"Unknown {setting} fields: {sorted(unknown)}")
     if not isinstance(options.get("enabled", True), bool):
-        raise ValueError("training.checkpoint_upload.enabled must be boolean")
+        raise ValueError(f"{setting}.enabled must be boolean")
     if not options.get("enabled", True):
         return None
     container = options.get("container", "checkpoints")
     prefix = options.get("prefix")
     if not isinstance(container, str) or not container.strip():
-        raise ValueError("training.checkpoint_upload.container must be a name")
+        raise ValueError(f"{setting}.container must be a name")
     if prefix is not None and (not isinstance(prefix, str) or not prefix.strip("/")):
-        raise ValueError("training.checkpoint_upload.prefix must be a path or null")
+        raise ValueError(f"{setting}.prefix must be a path or null")
     result = {"container": container, "prefix": prefix}
-    for name, default, maximum in (("block_mib", 16, 4000), ("concurrency", 4, 32)):
-        value = options.get(name, default)
+    for field, default, maximum in (("block_mib", 16, 4000), ("concurrency", 4, 32)):
+        value = options.get(field, default)
         if (
             isinstance(value, bool)
             or not isinstance(value, int)
             or not (1 <= value <= maximum)
         ):
             raise ValueError(
-                f"training.checkpoint_upload.{name} must be an integer from 1 to {maximum}"
+                f"{setting}.{field} must be an integer from 1 to {maximum}"
             )
-        result[name] = value
+        result[field] = value
     return result
 
 
@@ -221,7 +224,7 @@ class BlobUpload:
         stored_md5 = properties.content_settings.content_md5
         if properties.size != size or bytes(stored_md5 or b"") != digests["md5"]:
             raise RuntimeError(
-                f"Uploaded checkpoint {self.name} does not match the local file: "
+                f"Uploaded blob {self.name} does not match the local file: "
                 f"size {properties.size} vs {size}"
             )
         seconds = perf_counter() - self.started
@@ -244,19 +247,27 @@ class BlobUpload:
 
 
 class AzureCheckpointStore:
+    # What the messages name; a store for another stage's files overrides these.
+    setting = "training.checkpoint_upload"
+    label = "Checkpoint upload"
+    if_unavailable = (
+        "Training has not started. Fix the storage settings, or remove "
+        "training.checkpoint_upload to train without a cloud copy."
+    )
+
     def __init__(self, options, *, prefix, root=ROOT):
         try:
             from azure.storage.blob import BlobServiceClient
         except ImportError as error:
             raise RuntimeError(
-                "training.checkpoint_upload needs the azure-storage-blob package: "
+                f"{self.setting} needs the azure-storage-blob package: "
                 "pip install 'azure-storage-blob>=12.19,<13' in the training environment"
             ) from error
         read_environment_file(Path(root) / ".env")
         endpoint, key = os.environ.get(ENDPOINT_VARIABLE), os.environ.get(KEY_VARIABLE)
         if not endpoint or not key:
             raise RuntimeError(
-                f"training.checkpoint_upload needs {ENDPOINT_VARIABLE} and "
+                f"{self.setting} needs {ENDPOINT_VARIABLE} and "
                 f"{KEY_VARIABLE} in the environment or in {Path(root) / '.env'}"
             )
         self.container_name = options["container"]
@@ -296,18 +307,17 @@ class AzureCheckpointStore:
             blob.delete_blob()
         except Exception as error:
             raise RuntimeError(
-                f"Checkpoint upload check failed for {self.describe()}: "
+                f"{self.label} check failed for {self.describe()}: "
                 f"{type(error).__name__}: {str(error).splitlines()[0] if str(error) else ''}. "
-                "Training has not started. Fix the storage settings, or remove "
-                "training.checkpoint_upload to train without a cloud copy."
+                f"{self.if_unavailable}"
             ) from error
         if returned != payload:
             raise RuntimeError(
-                f"Checkpoint upload check for {self.describe()} read back different bytes"
+                f"{self.label} check for {self.describe()} read back different bytes"
             )
         logger.info(
-            "Checkpoint upload check passed: wrote, read back and deleted a test "
-            "blob in {} ({:.1f}s)",
+            "{} check passed: wrote, read back and deleted a test blob in {} ({:.1f}s)",
+            self.label,
             self.describe(),
             perf_counter() - started,
         )
@@ -316,8 +326,9 @@ class AzureCheckpointStore:
         """Start an upload that is fed the file's bytes while they are written."""
         return BlobUpload(self, self.blob_name(path), cancel)
 
-    def upload(self, path, *, digests=None, metadata=None, cancel=None):
-        """Replace `<prefix>/<file name>` with a file on disk; verify the result.
+    def upload(self, path, *, name=None, digests=None, metadata=None, cancel=None):
+        """Replace `<prefix>/<file name>` (or the blob `name`) with a file on disk
+        and verify the result.
 
         Training does not use this for its checkpoints: reading a multi-GB file
         back from a busy hard disk can take longer than writing it did (5 MB/s
@@ -325,7 +336,7 @@ class AzureCheckpointStore:
         """
         path = Path(path)
         digests = digests or file_digests(path)
-        session = self.begin(path, cancel=cancel)
+        session = BlobUpload(self, name or self.blob_name(path), cancel)
         try:
             with path.open("rb") as stream:
                 while data := stream.read(self.block_bytes):
