@@ -1,8 +1,7 @@
-# Benchmark results
+# Benchmark results: holdout set
 
-Results of Basin against published time-series foundation models. Each
-section names the run it comes from, so the numbers can be traced to the
-result files.
+Results of Basin against published time-series foundation models on the
+holdout set. The other benchmarks are listed in the [index](README.md).
 
 ## Holdout set (epoch 3)
 
