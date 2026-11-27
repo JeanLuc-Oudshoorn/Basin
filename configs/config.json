@@ -288,6 +288,17 @@
       "concurrency": 8
     }
   },
+  "ind_eval": {
+    "path": "benchmarks/IND-Eval",
+    "revision": "v0.1.3",
+    "models": ["basin", "naive", "holtwinters", "chronos2", "timestral", "timeh2o"],
+    "sources": null,
+    "batch_size": 16,
+    "context_points": 2048,
+    "horizon": 112,
+    "max_series_per_task": null,
+    "holt_winters_workers": 10
+  },
   "operational_benchmarks": {
     "models": ["basin", "naive", "chronos2", "timestral", "timeh2o"],
     "horizon": 112,

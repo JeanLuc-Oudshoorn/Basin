@@ -102,6 +102,7 @@ src/
   09_fakebench/                  # Basin on the FakeBench-TS random-walk benchmark
   10_annealing/                  # Short final training phase on a chosen mix of tables
   11_operational_benchmarks/     # Forecasting and anomaly detection on public operational datasets
+  12_ind_eval/                   # Forecasting on the IND-Eval industrial benchmark
 data/
   01_generated/YYYY-MM-DD/.../data.parquet
   02_processed/

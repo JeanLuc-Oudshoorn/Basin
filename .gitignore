@@ -57,3 +57,4 @@ wandb/
 /benchmarks/UCR_TimeSeriesAnomalyDatasets2021/
 /benchmarks/cloud-monitoring-dataset/
 /benchmarks/micromill-caster/
+/benchmarks/IND-Eval/
