@@ -49,9 +49,7 @@ Holt-Winters and the naive forecast.
 
 Holt-Winters (triple exponential smoothing) is fitted anew to the history of
 every request; it has no pretrained weights. It was added to this run
-afterwards, on the same tables, origins and points
-(`src/06_holdout_test/add_classical.py`; results in the run folder under
-`holtwinters/`). The tables do not state a seasonal cycle, so the model takes
+afterwards, on the same tables, origins and points. The tables do not state a seasonal cycle, so the model takes
 it from the history, and falls back to smoothing with a damped trend when a
 seasonal model does not fit better.
 
@@ -104,31 +102,9 @@ and the naive forecast are well behind in every group. Holt-Winters is ahead
 of the naive forecast on the easiest tenth and on the hardest tenth of the
 tables, and behind it in between.
 
-The same grouping, now table by table against Timestral, the runner-up
-overall. For every table, Basin's MASE is compared with Timestral's MASE on
-that table:
-
-| Tables, by naive MASE | Basin better on | Lead on the median table | Average lead | Lead above 20% on | Behind by more than 20% on |
-|---|---|---|---|---|---|
-| Easiest 10% | 52.0% of tables | 0.2% | -0.8% | 5.3% | 7.1% |
-| 10% to 25% | 61.3% | 2.1% | 3.5% | 8.8% | 5.6% |
-| 25% to 50% | 63.9% | 2.9% | 5.0% | 11.7% | 5.1% |
-| 50% to 75% | 66.4% | 4.7% | 7.9% | 18.1% | 5.3% |
-| 75% to 90% | 72.5% | 8.6% | 13.1% | 29.5% | 6.7% |
-| 90% to 95% | 69.3% | 8.2% | 13.7% | 33.0% | 10.7% |
-| Hardest 5% | 67.2% | 1.7% | 13.0% | 27.1% | 9.5% |
-
-The average lead is the geometric mean of the per-table ratios, so a table
-where Basin is twice as good and one where it is twice as bad cancel out.
-Over all tables it is 7.1% against Timestral, 7.2% against TimeH2O and 13.8%
-against Chronos-2. Basin has a lower MASE than Timestral on 64.7% of the
-tables, than TimeH2O on 64.1%, than Chronos-2 on 73.3% and than the naive
-forecast on 85.3%.
-
-The two tables measure different things. The first compares the middle table
-of each model within a group and gives the larger figures (up to 19.6%). The
-second pairs every table with itself and is the stricter comparison: on the
-hard tables Basin's lead on a typical table is 8% to 9%, and 13% on average.
+Table by table, Basin has a lower MASE than Timestral on 64.7% of the tables,
+than TimeH2O on 64.1%, than Chronos-2 on 73.3% and than the naive forecast on
+85.3%.
 
 ![Basin's lead over every other model by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty_all_models.png)
 
@@ -152,12 +128,11 @@ wide), written as a lead in percent.
 
 ![Basin's lead over Timestral by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty.png)
 
-The second figure shows the comparison with Timestral for every table. The horizontal
-position is the difficulty of the table, the vertical position how much lower
+The second figure compares Basin with Timestral, the runner-up overall, on
+every single table. The horizontal position is the difficulty of the table, the vertical position how much lower
 Basin's MASE is than Timestral's on it. The shading shows where the tables
 lie, the solid blue line the median table, the dashed lines the middle half
-of the tables, and the orange line the average. Both figures are drawn by
-`docs/benchmark_results/holdout_lead_by_difficulty.py`.
+of the tables, and the orange line the average.
 
 ### What we think explains the pattern
 
@@ -177,8 +152,8 @@ separately.
   no usable information at all. Basin's training data deliberately keeps
   such tables, because a model in real use will also meet series that
   cannot be forecast. On a table without information no model can beat
-  another by skill. The table-by-table figures fit this: on the median table
-  of this group Basin and Timestral are level (1.7%), while on a quarter of
-  the tables Basin is more than 20% ahead. The group looks like a mix of
+  another by skill. The second figure fits this: on the median table of this
+  group Basin and Timestral are level, while on a quarter of the tables
+  Basin is more than 20% ahead. The group looks like a mix of
   tables where no model has anything to work with and tables where Basin's
   training still helps.
