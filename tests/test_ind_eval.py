@@ -39,15 +39,16 @@ def rows_of(instances, horizon, context=64, **extra):
             "instance_id": f"run-{i}",
             "channel": channel,
             "window": window,
-            "context": (series * (1 + i)).tolist()[:context],
-            "target": (series * (1 + i)).tolist()[context:],
+            # Every window and channel has values of its own.
+            "context": (series * (1 + i + window / 4 + shift)).tolist()[:context],
+            "target": (series * (1 + i + window / 4 + shift)).tolist()[context:],
             "freq": "10s",
             "prediction_length": horizon,
             **extra,
         }
         for i in range(instances)
         for window in (0, 1)
-        for channel in ("pressure", "flow")
+        for channel, shift in (("pressure", 0.0), ("flow", 0.1))
     ]
 
 
@@ -189,6 +190,59 @@ class IndEvalTests(unittest.TestCase):
         board = self.scoring.leaderboard(results)
         self.assertIn("## nMASE by source", board)
         self.assertIn("| model | 0.354 | 0.354 |", board)
+
+    def test_series_that_repeat_an_earlier_task_are_left_out(self):
+        # Three horizons from the same starting points, as in the benchmark.
+        for name, horizon in (("long", 40), ("medium", 20), ("short", 8)):
+            write_task(
+                self.root / f"data/tablet/{name}.parquet",
+                rows_of(2, horizon, seasonality=1),
+            )
+        write_task(self.root / "data/other/long.parquet", rows_of(1, 40))
+        options = self.options(horizon=10)
+        tasks = self.data.list_tasks(options)
+        index = self.data.duplicate_index(tasks, options, log=lambda text: None)
+        # Cut to 10 points, `medium` is `long` again; `short` has 8 points and
+        # is a forecast of its own. Another source is never compared.
+        self.assertEqual(
+            {key: len(entry["duplicates"]) for key, entry in index.items()},
+            {
+                "other__long": 0,
+                "tablet__long": 0,
+                "tablet__medium": 8,
+                "tablet__short": 0,
+            },
+        )
+        self.assertEqual(index["tablet__medium"]["series"], 8)
+        kept = [
+            s.key
+            for group in self.data.read_task(tasks[2], options, skip={0, 1, 2, 5})
+            for s in group
+        ]
+        everything = [s.key for g in self.data.read_task(tasks[2], options) for s in g]
+        self.assertEqual(kept, [everything[i] for i in (3, 4, 6, 7)])
+        # The list is kept next to the data and read back.
+        self.assertEqual(len(list(self.root.glob("duplicates_*.json"))), 1)
+        self.assertEqual(
+            self.data.duplicate_index(tasks, options, log=self.fail), index
+        )
+        config = {
+            "paths": {"ind_eval": str(self.root / "results")},
+            "ind_eval": {"path": str(self.root), "horizon": 10},
+        }
+        args = SimpleNamespace(models=["naive"], sources=None, limit=None, resume=None)
+        output = self.stage.run(config, args)
+        results = json.loads((output / "results.json").read_text())
+        self.assertEqual(
+            sorted(results["tasks"]), ["other/long", "tablet/long", "tablet/short"]
+        )
+        self.assertEqual(results["run"]["repeated_series_left_out"], 8)
+        self.assertEqual(
+            results["run"]["tasks_left_out_as_repeats"], ["tablet__medium"]
+        )
+        self.assertIn(
+            "Repeated series left out", (output / "leaderboard.md").read_text()
+        )
 
     def test_a_run_on_the_cpu_can_be_continued_with_another_model(self):
         write_task(

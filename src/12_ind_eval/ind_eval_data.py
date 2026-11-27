@@ -9,6 +9,7 @@ values that follow it directly and are to be forecast.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -201,12 +202,14 @@ def chosen_rows(rows, limit):
     return set(np.linspace(0, rows - 1, int(limit)).round().astype(int).tolist())
 
 
-def read_task(task, options, rows_per_read=512):
+def read_task(task, options, rows_per_read=512, skip=None):
     """Yield the task's series in lists of up to `rows_per_read` file rows.
 
     Rows that hold a covariate (PRONTO's known control inputs) are not
     forecasting targets and are left out. A context is cut to its latest
     `context_points` points and a target to its first `horizon` points.
+    `skip` holds the positions of series to leave out, counted over the
+    series this would yield without it (see `duplicate_index`).
     """
     file = pq.ParquetFile(task.path)
     names = [name for name in COLUMNS if name in file.schema_arrow.names]
@@ -215,7 +218,7 @@ def read_task(task, options, rows_per_read=512):
             raise ValueError(f"{task.path} has no column {needed!r}")
     keep = chosen_rows(file.metadata.num_rows, options["max_series_per_task"])
     cap, horizon = options["context_points"], options["horizon"]
-    first = 0
+    first = position = 0
     for batch in file.iter_batches(batch_size=rows_per_read, columns=names):
         table = {name: batch.column(name) for name in names}
         plain = {
@@ -251,8 +254,55 @@ def read_task(task, options, rows_per_read=512):
                 )
             )
         first += batch.num_rows
+        count = len(series)
+        if skip:
+            series = [s for n, s in enumerate(series, position) if n not in skip]
+        position += count
         if series:
             yield series
+
+
+def duplicate_index(tasks, options, log=print):
+    """For every task, how many series it has and which repeat an earlier one.
+
+    A source's tasks for different horizons often start at the same points.
+    Cut to the same forecast length they are then the same history and the
+    same target, and scoring them again adds nothing. Within a source, a
+    series with the same history and target as one in an earlier task (or
+    earlier in the same task) is a duplicate. Returns
+    {task key: {"series": count, "duplicates": [positions]}}; the result is
+    kept next to the data, for these settings.
+    """
+    signature = {
+        name: options[name]
+        for name in ("revision", "context_points", "horizon", "max_series_per_task")
+    }
+    signature["tasks"] = [task.key for task in tasks]
+    name = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+    path = data_directory(options) / f"duplicates_{name[:12]}.json"
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))["tasks"]
+    log(f"Looking for repeated series in {len(tasks)} tasks (once per setting)")
+    index, seen, source = {}, set(), None
+    for task in tasks:
+        if task.source != source:
+            seen, source = set(), task.source
+        duplicates, position = [], 0
+        for group in read_task(task, options):
+            for series in group:
+                mark = hashlib.blake2b(
+                    series.context.tobytes() + b"|" + series.target.tobytes(),
+                    digest_size=16,
+                ).digest()
+                if mark in seen:
+                    duplicates.append(position)
+                seen.add(mark)
+                position += 1
+        index[task.key] = {"series": position, "duplicates": duplicates}
+    path.write_text(
+        json.dumps({"settings": signature, "tasks": index}), encoding="utf-8"
+    )
+    return index
 
 
 def main():

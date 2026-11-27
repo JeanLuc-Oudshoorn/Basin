@@ -33,6 +33,7 @@ from holt_winters import holt_winters_forecast
 from ind_eval_data import (
     RECORD,
     data_directory,
+    duplicate_index,
     list_tasks,
     model_context,
     read_task,
@@ -137,14 +138,14 @@ def score_path(output, model, task):
     return output / "scores" / model / f"{task.key}.parquet"
 
 
-def forecast_task(forecaster, model, task, options, output):
+def forecast_task(forecaster, model, task, options, output, skip=None):
     """Forecast and score one task; its per-series scores are written whole."""
     points = options["context_points"]
     batch_size = options["batch_size"]
     if model == "holtwinters":
         batch_size = max(batch_size, 8 * options["holt_winters_workers"])
     rows, skipped, seconds = [], 0, 0.0
-    for group in read_task(task, options):
+    for group in read_task(task, options, skip=skip):
         layouts = {}
         for series in group:
             context = model_context(series.context, points)
@@ -213,6 +214,8 @@ def score_run(output, record):
         "Inputs": INPUTS,
         "History given": f"the latest {record['context_points']:,} points at most",
         "Forecast": f"the first {record['horizon']} points of each target at most",
+        "Repeated series left out": f"{record['repeated_series_left_out']:,}, and "
+        f"{len(record['tasks_left_out_as_repeats'])} tasks that only repeat others",
     }
     (output / "leaderboard.md").write_text(leaderboard(results, facts), "utf-8")
     write_json(output / COMPLETED, {"run": record, **results})
@@ -227,6 +230,12 @@ def run(config, args):
     if trial:
         options["max_series_per_task"] = args.limit
     tasks = list_tasks(options)
+    # Series that repeat one of an earlier task of their source are left out,
+    # and with them a task that has no other series.
+    repeats = duplicate_index(tasks, options, log=logger.info)
+    skip = {key: set(entry["duplicates"]) for key, entry in repeats.items()}
+    emptied = [t.key for t in tasks if repeats[t.key]["series"] == len(skip[t.key])]
+    tasks = [task for task in tasks if task.key not in emptied]
     download = data_directory(options) / RECORD
     data = json.loads(download.read_text("utf-8")) if download.is_file() else {}
     # Basin first: its checkpoint names the run folder. The reference always.
@@ -242,6 +251,8 @@ def run(config, args):
         "context_points": options["context_points"],
         "horizon": options["horizon"],
         "sources": options["sources"],
+        "repeated_series_left_out": sum(len(s) for s in skip.values()),
+        "tasks_left_out_as_repeats": emptied,
         "models": {},
     }
     loaded = {}
@@ -286,7 +297,9 @@ def run(config, args):
             record["basin"] = forecaster.details
         started = perf_counter()
         for number, task in enumerate(todo, 1):
-            done = forecast_task(forecaster, name, task, options, output)
+            done = forecast_task(
+                forecaster, name, task, options, output, skip[task.key]
+            )
             elapsed = perf_counter() - started
             logger.info(
                 "{} {}/{} {}: {} series in {:.0f} s | elapsed {:.1f} min, "

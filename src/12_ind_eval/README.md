@@ -127,12 +127,16 @@ step:
 
 Forecasts themselves are not kept, only the scores of every series.
 
-**Tasks that become alike.** Within a source, the tasks for different
+**Repeated series are left out.** Within a source, the tasks for different
 horizons often start at the same points (confirmed for tablet compression
 and MetroPT-3). Cut to 112 points, a 512-point and a 1,024-point task of the
-same windows are then the same forecasts scored twice. This does not change
-a source's score, which is a geometric mean over its tasks, but it does
-double the work. `--sources` and `ind_eval.max_series_per_task` limit it.
+same windows are then the same history and the same target. Before the
+first model runs, the stage reads every task once and marks each series
+whose history and target are identical to one in an earlier task of its
+source. Those are neither forecast nor scored, and a task that holds nothing
+else is dropped. `run.json` and `leaderboard.md` record how many. The list
+is kept next to the data (`duplicates_<settings>.json`), so it is made once
+for a given history length, forecast length and subset.
 
 ## Before the first full run
 
