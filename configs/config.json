@@ -287,5 +287,40 @@
       "block_mib": 16,
       "concurrency": 8
     }
+  },
+  "operational_benchmarks": {
+    "models": ["basin", "naive", "chronos2", "timestral", "timeh2o"],
+    "horizon": 112,
+    "context_lengths": [128, 512, 2048],
+    "forecast": {
+      "origins": {"cats": 40, "ucr": 24, "cloud": 24, "caster": 12},
+      "anomaly_margin": {"cats": 100, "ucr": 100, "cloud": 16, "caster": 240}
+    },
+    "anomaly": {
+      "lead_points": [16, 64],
+      "normal_points_before": 128,
+      "interval": "quantiles",
+      "quantiles": [0.1, 0.9],
+      "interval_sigmas": 2.0,
+      "min_share_outside": 0.0
+    },
+    "covariates": {"count": 5, "seed": 7},
+    "cats": {
+      "path": "benchmarks/CATS Dataset",
+      "seconds_per_point": 10
+    },
+    "ucr": {
+      "path": "benchmarks/UCR_TimeSeriesAnomalyDatasets2021",
+      "categories": ["electricity", "weather", "spacecraft_telemetry"]
+    },
+    "cloud": {
+      "path": "benchmarks/cloud-monitoring-dataset",
+      "categories": ["cloud_service_telemetry", "software_crash_rate"]
+    },
+    "caster": {
+      "path": "benchmarks/micromill-caster",
+      "samples_per_point": 1
+    },
+    "batch_size": 16
   }
 }

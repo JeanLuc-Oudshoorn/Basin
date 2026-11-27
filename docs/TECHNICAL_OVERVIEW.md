@@ -101,6 +101,7 @@ src/
   08_model_export/               # Portable (pure PyTorch / FLA) model exports
   09_fakebench/                  # Basin on the FakeBench-TS random-walk benchmark
   10_annealing/                  # Short final training phase on a chosen mix of tables
+  11_operational_benchmarks/     # Forecasting and anomaly detection on public operational datasets
 data/
   01_generated/YYYY-MM-DD/.../data.parquet
   02_processed/
