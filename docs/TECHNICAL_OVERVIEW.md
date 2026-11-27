@@ -99,6 +99,8 @@ src/
   06_holdout_test/
   07_forecasting/
   08_model_export/               # Portable (pure PyTorch / FLA) model exports
+  09_fakebench/                  # Basin on the FakeBench-TS random-walk benchmark
+  10_annealing/                  # Short final training phase on a chosen mix of tables
 data/
   01_generated/YYYY-MM-DD/.../data.parquet
   02_processed/
@@ -107,11 +109,13 @@ data/
   03_patch_index/
     model/patch_index.pt          # Default model's lazy patch index
     447m_model/                   # Archived model's patch index
+  04_annealing/<set>/             # Annealing sets: tables, processed data, patch index
 results/
   model/
     training/                     # model.pt, resumable timed checkpoint and metrics
     holdout_test/                 # Out-of-sample metrics, predictions and plots
     forecasts/                    # Forecast-stage outputs
+    annealing/<experiment>/       # One folder per annealing experiment
   500m_model/                     # Archived 500M model, see ARCHIVE_MANIFEST.json
     training/
     holdout_test/
@@ -129,6 +133,11 @@ state is `results/model/training/latest_checkpoint.pt`. Holdout evaluation reads
 the exported model and writes to `results/model/holdout_test`. The general
 forecasting stage writes to `results/model/forecasts`; when it delegates to the
 holdout evaluator, it uses the holdout directory. Paths remain configurable.
+
+After the main run, a short annealing phase can continue training on a small
+fresh set of tables in which chosen kinds of series are more common. Each such
+experiment has its own folders and leaves the main run's files unchanged; see
+[Annealing](annealing/ANNEALING.md).
 
 The folder rename preserves existing binary data and checkpoint contents. It does
 not convert archived weights into the current default architecture. The

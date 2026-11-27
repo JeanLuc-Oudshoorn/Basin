@@ -247,9 +247,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scm_generator import OperationalSCMGenerator
 
 
-def main():
-    generator = OperationalSCMGenerator(
-        OUTPUT_DIR,
+def generator_settings():
+    """The settings above as OperationalSCMGenerator keyword arguments.
+
+    Other tools (the annealing-set builder) use this to draw tables from
+    exactly the distribution the training corpus was generated with.
+    """
+    return dict(
         seed=SEED,
         min_rows=MIN_ROWS,
         max_rows=MAX_ROWS,
@@ -339,6 +343,10 @@ def main():
         seasonal_wander_probability=SEASONAL_WANDER_PROBABILITY,
         reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
+
+
+def main():
+    generator = OperationalSCMGenerator(OUTPUT_DIR, **generator_settings())
     paths = generator.generate(NUM_TABLES)
     print(f"Saved {len(paths)} tables under {paths[0].parent}")
 
