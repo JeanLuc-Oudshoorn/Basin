@@ -201,8 +201,8 @@ for boundary handling, per-horizon metrics and interpretation. This replaces
 the previous sampled-horizon protocol. Legacy `horizon_probabilities` and
 `horizon_seed` settings are ignored by evaluation.
 `holdout.benchmark_models` selects comparisons (RWKV is always included):
-`["prophet", "naive", "chronos"]` by default; add `"timestral"` or `"timeh2o"`
-to include them.
+`["prophet", "naive", "chronos"]` by default; add `"timestral"`, `"timeh2o"`
+or `"holtwinters"` to include them.
 `holdout.sample_percent` defaults to 100; set it to e.g. 1 for a seeded 1% sample
 of the saved holdout tables. `sample_selection.json` records the selected sources.
 All models use those same sources, origins and historical context.
@@ -347,6 +347,34 @@ as regressors for its outcome prediction (`prophet.covariate_forecast="prophet"`
 No observed future covariates are supplied. Set `covariate_forecast="naive"`
 to carry covariates forward for a faster comparison, or `use_covariates=false`
 to reproduce the univariate baseline. Extra fits increase evaluation time.
+
+### Holt-Winters, and adding a classical model to a finished run
+
+`holtwinters` is triple exponential smoothing, fitted anew to the history of
+every request (`holt_winters.py`). The tables do not say how long their
+seasonal cycle is, so it is taken from the history: the lag, up to 512
+points, at which the detrended history correlates best with itself. A model
+with that season and one without a season are both fitted, and the one with
+the lower AICc forecasts. Trend and season are additive, and the trend is
+damped; an undamped trend was several times worse over 112 steps. It reads
+the target only.
+
+A classical model needs neither the GPU nor Basin's weights, so it can be
+added to a finished run without repeating it:
+
+```powershell
+uv run python src/06_holdout_test/add_classical.py results/model/holdout_test/<run folder>
+```
+
+This reads the points the run saved for every table, fits the model to the
+same histories at the same origins and scores it on the same points with the
+same code. Latency is measured as in the stage: the run's timed tables first,
+one request at a time while nothing else runs, then the other tables with
+several processes at once (`--workers`). It writes to `<run folder>/holtwinters`
+(`metrics.json`, `table_metrics.json` and the forecasts in `part_*.parquet`)
+and leaves the run's own files as they are. Started again after an
+interruption, it continues where it stopped. About 35 minutes for the full
+holdout on 10 processor cores.
 
 Holdout comparison plots use a separate reproducible random sample of the
 evaluated tables: `plot.max_plots=10`, `plot.sample_seed=7`. Each plot overlays

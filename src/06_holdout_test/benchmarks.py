@@ -40,7 +40,9 @@ INSTALL = (
     "environment (source scripts/activate_rwkv7.sh): "
     "python -m pip install timestral h2ofm==0.43.1"
 )
-BENCHMARK_MODELS = ("prophet", "naive", *MODEL_DEFAULTS)
+# Models fitted to each history on the CPU; the others are pretrained.
+CLASSICAL_MODELS = ("prophet", "naive", "holtwinters")
+BENCHMARK_MODELS = (*CLASSICAL_MODELS, *MODEL_DEFAULTS)
 
 
 def benchmark_names(config):
@@ -221,9 +223,13 @@ class FoundationBenchmarks:
             if name not in MODEL_DEFAULTS:
                 self.metadata[name] = {
                     "inputs": "historical target only",
-                    "point_forecast": "last finite value"
-                    if name == "naive"
-                    else "yhat",
+                    "point_forecast": {
+                        "naive": "last finite value",
+                        "holtwinters": "Holt-Winters fitted to the history of "
+                        "each request (additive damped trend; additive season "
+                        "of a length taken from the history, kept if its AICc "
+                        "is lower)",
+                    }.get(name, "yhat"),
                 }
                 if name == "prophet":
                     enabled = config["prophet"].get("use_covariates", True)

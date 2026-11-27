@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 import torch
 from benchmarks import (
     BENCHMARK_MODELS,
+    CLASSICAL_MODELS,
     FoundationBenchmarks,
     benchmark_names,
     select_latency_tables,
@@ -27,6 +28,7 @@ from error_distribution import (
 from fast_inference import inference_execution_summary
 from graph_profiles import configure_holdout_graph_profiles
 from holdout_runs import holdout_directory
+from holt_winters import holt_winters_forecast
 from horizon_policy import evaluation_weights
 from inference import forecast_contexts
 from latency import RequestTimer
@@ -58,14 +60,14 @@ def quiet_baseline_info():
 def baseline_forecasts(
     history, horizon, config, *, past_covariates=None, regressors=None
 ):
-    """Fit Prophet and carry forward the last observed target, using history only."""
+    """The classical forecasts asked for, each made from the history only."""
     observed = np.asarray(history)[np.isfinite(history)]
     if not len(observed):
         raise ValueError("Cannot fit baselines to an entirely missing target context")
     naive = np.full(horizon, observed[-1], dtype=float)
     names = benchmark_names(config)
     result = {"naive": naive} if "naive" in names else {}
-    if "prophet" not in names:
+    if "prophet" not in names and "holtwinters" not in names:
         return result
 
     if not np.isfinite(history).all():
@@ -77,9 +79,12 @@ def baseline_forecasts(
     )
     if not np.isfinite(history).all():
         raise ValueError("Cannot fit baselines to an entirely missing target context")
-    if regressors is None:
-        regressors = prophet_regressor_inputs(past_covariates, horizon, config)
-    result["prophet"] = prophet_forecast(history, horizon, config, regressors)
+    if "holtwinters" in names:
+        result["holtwinters"] = holt_winters_forecast(history, horizon)
+    if "prophet" in names:
+        if regressors is None:
+            regressors = prophet_regressor_inputs(past_covariates, horizon, config)
+        result["prophet"] = prophet_forecast(history, horizon, config, regressors)
     if any(not np.isfinite(v).all() for v in result.values()):
         raise FloatingPointError("Nonfinite baseline forecast")
     return result
@@ -515,7 +520,7 @@ def evaluate_holdout(model, records, config):
                     device=device,
                     request=request,
                 )
-            elif name in ("prophet", "naive"):
+            elif name in CLASSICAL_MODELS:
                 classic[name], bundle = timer.measure(
                     name,
                     lambda name=name: classical_request(
@@ -547,7 +552,7 @@ def evaluate_holdout(model, records, config):
         ):
             classic, regressors = {}, None
             for name in benchmarks.names:
-                if name in ("prophet", "naive"):
+                if name in CLASSICAL_MODELS:
                     classic[name], bundle = classical_request(
                         name, history, targets, covariates, horizon, config
                     )
@@ -770,7 +775,7 @@ def evaluate_holdout(model, records, config):
                                 "rwkv": float(point[target_index, offset]),
                                 **{
                                     name: float(classic[name][target_index, offset])
-                                    if name in ("prophet", "naive")
+                                    if name in CLASSICAL_MODELS
                                     else float(foundation[name][target_index, offset])
                                     for name in benchmarks.names
                                 },
