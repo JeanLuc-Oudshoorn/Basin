@@ -12,6 +12,8 @@ from plotly.colors import qualitative
 from plotly.subplots import make_subplots
 
 METRICS = ("mase", "rmse", "mae", "normalized_rmse", "normalized_pinball")
+# Percentiles of the per-table scores, besides the mean and the median.
+PERCENTILES = {"p5": 0.05, "p10": 0.1, "p90": 0.9, "p95": 0.95}
 
 
 def table_values(tables, method, metric):
@@ -33,8 +35,10 @@ def summarize_tables(tables, methods):
             models[method][metric] = {
                 "mean": float(values.mean()) if len(values) else None,
                 "median": float(np.median(values)) if len(values) else None,
-                "p10": float(np.quantile(values, 0.1)) if len(values) else None,
-                "p90": float(np.quantile(values, 0.9)) if len(values) else None,
+                **{
+                    name: float(np.quantile(values, level)) if len(values) else None
+                    for name, level in PERCENTILES.items()
+                },
                 "valid_tables": len(values),
                 "undefined_tables": len(tables) - len(values),
             }
@@ -43,6 +47,16 @@ def summarize_tables(tables, methods):
         "table_count": len(tables),
         "models": models,
     }
+
+
+def table_mase_tails(result):
+    """Put the p5 and p95 of the per-table MASE on the leaderboard rows.
+
+    The ranking and `table_mase_profile` stay on the median, p10 and p90.
+    """
+    for row in result.get("leaderboard", []):
+        mase = result["table_summary"]["models"][row["model"]]["mase"]
+        row["table_mase_p5"], row["table_mase_p95"] = mase["p5"], mase["p95"]
 
 
 def bandwidth(values):
@@ -284,6 +298,8 @@ def main():
                 )
             )
         write_error_distribution(result, directory, config, tables=tables)
+        # A run of before the p5 and p95 were reported gets them here.
+        table_mase_tails(result)
         import pandas as pd
 
         write_latency_distribution(

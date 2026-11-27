@@ -24,7 +24,7 @@ for stage in (
 from benchmarks import benchmark_names, sample_holdout
 from fast_inference import configure_fast_inference, inference_execution_summary
 from holdout import evaluate_holdout
-from holdout_runs import holdout_directory, new_holdout_run
+from holdout_runs import holdout_directory, new_holdout_run, resume_holdout_run
 from performance import configure_cuda_memory
 from result_upload import make_result_store, upload_run
 from startup_cache import (
@@ -315,9 +315,43 @@ def select_test_records(metadata, data):
     return [r for r in records if r["source"] in eligible]
 
 
+# What must be the same for an interrupted run to be continued.
+SAME_MODEL = (
+    "checkpoint_sha256",
+    "evaluated_weights_sha256",
+    "split_checkpoint_sha256",
+    "selected_epoch",
+    "selected_step",
+    "test_tables",
+    "checkpoint_weights",
+)
+
+
+def check_resumable(directory, model_identity, selection):
+    """An interrupted run is continued only with its own model and tables."""
+    used = json.loads((directory / "model_used.json").read_text(encoding="utf-8"))
+    differing = [key for key in SAME_MODEL if used.get(key) != model_identity.get(key)]
+    if differing:
+        raise ValueError(
+            f"{directory} was started with another model ({', '.join(differing)} "
+            "differ); it cannot be resumed with this one"
+        )
+    saved = json.loads(
+        (directory / "sample_selection.json").read_text(encoding="utf-8")
+    )
+    if saved.get("selected_sources") != selection.get("selected_sources"):
+        raise ValueError(
+            f"{directory} was started with other holdout tables; it cannot be "
+            "resumed with this selection"
+        )
+
+
 @logged_training("holdout_test")
-def run(config, store=None):
-    """Test the trained model; with a `store`, copy the finished run folder to it."""
+def run(config, store=None, resume=None):
+    """Test the trained model; with a `store`, copy the finished run folder to it.
+
+    `resume` names the folder of an interrupted run to continue.
+    """
     startup_started = perf_counter()
     benchmark_names(config)
     checkpoint = holdout_checkpoint(config)
@@ -412,15 +446,20 @@ def run(config, store=None):
         "evaluated-model training overlap rejected; selected raw checksums verified during evaluation"
     )
     del metadata, split_metadata
-    # Each run writes into its own new folder; earlier runs are never touched.
-    directory, config = new_holdout_run(
-        config,
-        epoch=model_identity["selected_epoch"],
-        step=model_identity["selected_step"],
-    )
-    logger.info("HOLDOUT run folder={}", directory)
-    write_json(directory / "model_used.json", model_identity)
-    write_json(directory / "sample_selection.json", selection)
+    if resume:
+        directory, config = resume_holdout_run(config, resume)
+        check_resumable(directory, model_identity, selection)
+        logger.info("HOLDOUT resuming run folder={}", directory)
+    else:
+        # Each run writes into its own new folder; earlier runs are never touched.
+        directory, config = new_holdout_run(
+            config,
+            epoch=model_identity["selected_epoch"],
+            step=model_identity["selected_step"],
+        )
+        logger.info("HOLDOUT run folder={}", directory)
+        write_json(directory / "model_used.json", model_identity)
+        write_json(directory / "sample_selection.json", selection)
     emit_training_event("holdout_start", **model_identity)
     metrics = evaluate_holdout(model, records, config)
     metrics["rwkv_model_load_seconds"] = model_identity["load_seconds"]
@@ -439,10 +478,17 @@ def run(config, store=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/config.json"))
+    parser.add_argument(
+        "--resume",
+        metavar="RUN",
+        help="continue an interrupted run: the name of its folder under the "
+        "holdout results; saved tables are read back, the others are forecast",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     with run_context(config, "holdout_test"):
-        if launch_wsl(__file__, args.config):
+        extra = ["--resume", args.resume] if args.resume else []
+        if launch_wsl(__file__, args.config, extra_args=extra):
             return
         if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
             raise RuntimeError("Use the configured WSL CUDA bf16 runtime")
@@ -452,7 +498,7 @@ def main():
             store = make_result_store(config)
             if store is not None:
                 store.preflight()
-            run(config, store)
+            run(config, store, resume=args.resume)
 
 
 if __name__ == "__main__":
