@@ -130,13 +130,33 @@ of each model within a group and gives the larger figures (up to 19.6%). The
 second pairs every table with itself and is the stricter comparison: on the
 hard tables Basin's lead on a typical table is 8% to 9%, and 13% on average.
 
+![Basin's lead over every other model by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty_all_models.png)
+
+The first figure shows Basin's average lead over each of the other models as
+the tables get harder. For every table Basin's MASE is divided by the other
+model's MASE on the same table; a line is the geometric mean of those ratios
+over the tables around that difficulty (a sliding window four percentiles
+wide), written as a lead in percent.
+
+- Against the three neural models the lead rises steadily: from about zero
+  on the easiest tables to 13% to 15% over Timestral and TimeH2O, and to more
+  than 20% over Chronos-2, on the hard ones.
+- Against Holt-Winters and the naive forecast the lead is 30% to 45% on most
+  tables.
+- At the far left the lines drop below zero, the naive line most of all. The
+  tables are ordered by the naive forecast's own MASE, so the easiest 1% are
+  by construction the tables where the naive forecast happens to be nearly
+  exact.
+- On the hardest 5% the lead over every model peaks and then falls, the
+  pattern discussed below.
+
 ![Basin's lead over Timestral by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty.png)
 
-The figure shows the second comparison for every table. The horizontal
+The second figure shows the comparison with Timestral for every table. The horizontal
 position is the difficulty of the table, the vertical position how much lower
 Basin's MASE is than Timestral's on it. The shading shows where the tables
 lie, the solid blue line the median table, the dashed lines the middle half
-of the tables, and the orange line the average. It is drawn by
+of the tables, and the orange line the average. Both figures are drawn by
 `docs/benchmark_results/holdout_lead_by_difficulty.py`.
 
 ### What we think explains the pattern
