@@ -232,6 +232,8 @@ MISSINGNESS_WEIGHTS = {"mcar": 0.35, "mar": 0.25, "structural": 0.40}
 ROW_GAP_PROBABILITY = 0.04  # Rows absent from the file: the series jumps.
 # Stored resolution, per continuous column: a fixed number of distinct levels over the signal's range (measurement_layer.RESOLUTION_LEVELS).
 RESOLUTION_PROBABILITY = 0.6
+# Per continuous column: the reading follows the process with a response time of 0.7 to 15 points (a damped transmitter, or a logger that stores interval means).
+DAMPING_PROBABILITY = 0.3
 # Resample tables whose outcome never moves (or moves by less than float32 can
 # hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
 REJECT_CONSTANT_OUTCOME = True
@@ -355,6 +357,7 @@ def generator_settings():
         nonseasonal_wander_probability=NONSEASONAL_WANDER_PROBABILITY,
         seasonal_wander_probability=SEASONAL_WANDER_PROBABILITY,
         resolution_probability=RESOLUTION_PROBABILITY,
+        damping_probability=DAMPING_PROBABILITY,
         reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
 

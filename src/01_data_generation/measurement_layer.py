@@ -8,8 +8,10 @@ measures. Randomness comes from a seed namespace separate from the simulator.
 """
 
 import numpy as np
+from scipy.signal import lfilter
 
 ARTIFACTS = (
+    "damping",
     "noise",
     "quantize",
     "clip",
@@ -22,6 +24,7 @@ ARTIFACTS = (
     "recalibration",
 )
 DEFAULT_ARTIFACT_WEIGHTS = {
+    "damping": 0.0,  # Drawn by its own setting, like the stored resolution.
     "noise": 4.0,
     "quantize": 4.0,
     "clip": 2.0,
@@ -37,6 +40,7 @@ MISSING_PARADIGMS = ("mcar", "mar", "structural")
 DEFAULT_MISSINGNESS_WEIGHTS = {"mcar": 0.35, "mar": 0.25, "structural": 0.40}
 # Fixed evaluation order: slow bias first, digitisation late, failures last.
 _ORDER = (
+    "damping",
     "drift",
     "recalibration",
     "noise",
@@ -88,7 +92,9 @@ def sample_row_gaps(rng, rows):
 
 def _sample_artifact(rng, kind):
     spec = {"kind": kind}
-    if kind == "noise":
+    if kind == "damping":
+        spec["tau"] = _log_uniform(rng, 0.7, 15)
+    elif kind == "noise":
         spec["fraction"] = _log_uniform(rng, 0.002, 0.06)
     elif kind == "quantize":
         spec.update(levels=_log_uniform(rng, 6, 3000), phase=float(rng.uniform(0, 1)))
@@ -247,6 +253,11 @@ def sample_observation(rng, columns, settings):
             spec["artifacts"][column["name"]] = [
                 _sample_artifact(rng, str(kind)) for kind in kinds
             ]
+        chance = settings.get("damping_probability", 0)
+        if chance and rng.random() < chance:
+            drawn = spec["artifacts"].setdefault(column["name"], [])
+            if not any(a["kind"] == "damping" for a in drawn):
+                drawn.append(_sample_artifact(rng, "damping"))
         chance = settings.get("resolution_probability", 0)
         if chance and rng.random() < chance:
             # A historian stores a reading with a fixed number of digits. This
@@ -284,7 +295,14 @@ def _apply_artifacts(clean, artifacts, rng):
     position = np.arange(rows) / max(1, rows - 1)
     for kind in _ORDER:
         for spec in (a for a in artifacts if a["kind"] == kind):
-            if kind == "drift":
+            if kind == "damping":
+                # A transmitter's response time, or a logger that stores the
+                # mean of an interval: the reading follows the process slowly.
+                alpha = 1 - np.exp(-1 / spec["tau"])
+                value = lfilter(
+                    [alpha], [1.0, alpha - 1], value, zi=[(1 - alpha) * value[0]]
+                )[0]
+            elif kind == "drift":
                 # Bias grows linearly and returns to zero at each recalibration.
                 since = position.copy()
                 for reset in spec["resets"]:
