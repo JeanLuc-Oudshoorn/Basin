@@ -21,7 +21,6 @@ for stage in (
     "05_model_training",
 ):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from benchmarks import benchmark_names, sample_holdout
 from fast_inference import configure_fast_inference, inference_execution_summary
 from holdout import evaluate_holdout, holdout_directory
 from output_cleanup import clear_holdout_outputs
@@ -45,6 +44,8 @@ from transform import (
     write_json,
 )
 from variate_attention import configure_variate_execution
+
+from benchmarks import benchmark_names, sample_holdout
 
 
 def holdout_checkpoint(config):
@@ -333,8 +334,15 @@ def run(config):
     split_metadata = metadata
     if split_checkpoint.resolve() != checkpoint.resolve():
         logger.info("HOLDOUT split checkpoint={}", split_checkpoint)
+        # A model trained on other tables (an annealing experiment) is tested on
+        # the holdout of the run it came from. That run's checkpoint is checked
+        # against that run's configuration, named by holdout.split_config.
+        split_config_option = config.get("holdout", {}).get("split_config")
+        split_config = (
+            load_config(split_config_option) if split_config_option else config
+        )
         with timed("load separate holdout split metadata"):
-            split_metadata = load_holdout_metadata(split_checkpoint, config)
+            split_metadata = load_holdout_metadata(split_checkpoint, split_config)
     records, selection = sample_holdout(
         evaluation_records(metadata, split_metadata), config
     )

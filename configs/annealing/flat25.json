@@ -1,0 +1,22 @@
+{
+  "experiment": "flat25_lr1e-5",
+  "description": "More flat stretches and smooth series, to sharpen forecasts that should hold a level.",
+  "base_config": "configs/config.json",
+  "set": {
+    "name": "flat25_smooth10_200k",
+    "tables": 200000,
+    "seed": 20261121,
+    "mix": {
+      "standard": 0.65,
+      "flat": 0.25,
+      "smooth": 0.10
+    }
+  },
+  "start": {
+    "checkpoint": null,
+    "weights": "best"
+  },
+  "training": {
+    "learning_rate": 1e-05
+  }
+}

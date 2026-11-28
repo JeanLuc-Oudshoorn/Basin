@@ -1,0 +1,29 @@
+{
+  "experiment": "smoke",
+  "description": "Tiny end-to-end trial of the annealing code path; not a real experiment.",
+  "base_config": "configs/config.json",
+  "set": {
+    "name": "smoke_300",
+    "tables": 300,
+    "seed": 1,
+    "mix": {
+      "standard": 0.6,
+      "flat": 0.25,
+      "smooth": 0.15
+    }
+  },
+  "start": {
+    "checkpoint": null,
+    "weights": "best",
+    "allow_unfinished": true
+  },
+  "training": {
+    "holdout_tables": 20,
+    "validation_sampling": {
+      "tables": 40
+    },
+    "validation_interval_seconds": 60,
+    "checkpoint_interval_seconds": 60,
+    "checkpoint_upload": null
+  }
+}

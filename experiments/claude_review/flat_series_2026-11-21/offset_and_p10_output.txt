@@ -1,0 +1,18 @@
+flat forecasts 150
+Spearman correlation of per-forecast level offset:
+              A     C    E1  timestral  chronos
+A          1.00  0.91  0.60       0.30     0.31
+C          0.91  1.00  0.66       0.31     0.32
+E1         0.60  0.66  1.00       0.17     0.17
+timestral  0.30  0.31  0.17       1.00     0.18
+chronos    0.31  0.32  0.17       0.18     1.00
+sign agreement A vs E1 0.68 A vs timestral 0.587
+median |offset| {'A': 0.00407, 'C': 0.00396, 'E1': 0.00348, 'timestral': 0.00077, 'chronos': 0.01005}
+p10 pooled: {'rwkv': 0.2455, 'timestral': 0.1817, 'chronos': 0.2721, 'naive': 0.3189}
+share of points in forecasts with constant visible history 0.0
+rwkv p10, naive on constant histories: 0.2455
+share of points after a flat run of 16+: 0.036
+rwkv p10, naive after flat runs of 16+: 0.2048
+rwkv p10, exact on every flat point (bound): 0.1721
+constant histories: holdout scale quantiles {0.1: 1.1368683772161603e-13, 0.5: 1.0, 0.9: 1.0} | level |naive| quantiles {0.1: 0.0, 0.5: 48.263, 0.9: 410.788}
+constant histories: rwkv abs error / max(1,|level|) median 8.917560599760012e-05

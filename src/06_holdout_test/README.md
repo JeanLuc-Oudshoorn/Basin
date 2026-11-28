@@ -75,6 +75,13 @@ sampling. Source checksums from the split checkpoint are verified as usual.
 No old raw datasets, patch-index artifacts or retraining are required. Omit
 `holdout.split_checkpoint` to retain the normal model-owned split behavior.
 
+When the split checkpoint comes from a run with another data configuration, as
+for an annealing experiment tested on the main run's holdout tables, name that
+run's configuration in `holdout.split_config`. The split checkpoint is then
+checked against it instead of against the configuration being run. Annealing
+experiments set both options themselves; see
+[Annealing](../../docs/annealing/ANNEALING.md).
+
 Startup reads the checkpoint once using memory mapping, samples its saved test
 sources, and reads only the selected Parquet schemas. It uses the checkpoint's
 original target/covariate policy, independently of today's data admission filter.
