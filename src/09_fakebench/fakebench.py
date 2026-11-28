@@ -68,10 +68,8 @@ def basin(config, checkpoint=None, batch_size=16, quantiles=False, covariates=Fa
     The returned function carries `details`: the checkpoint and, where the
     checkpoint records them, the epoch and step of the weights. It returns the
     median, or with `quantiles` the FakeBench-TS quantile levels,
-    [contexts, levels, horizon]. With `covariates` it also takes covariates:
-    past ones, [contexts, count, context length], and ones known into the
-    future, [contexts, count, context length + horizon]. Basin has no input
-    for future values, so of a known covariate it reads the history only.
+    [contexts, levels, horizon]. With `covariates` it also takes the history
+    of covariates, [contexts, count, context length], as every model does.
     """
     path = Path(checkpoint) if checkpoint else holdout_checkpoint(config)
     saved = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
@@ -98,14 +96,13 @@ def basin(config, checkpoint=None, batch_size=16, quantiles=False, covariates=Fa
     details["parameters"] = sum(p.numel() for p in model.parameters())
     logger.info("Basin {}", details)
 
-    def forecast(contexts, horizon, past_covariates=None, known_covariates=None):
-        given = [
-            np.asarray(values, dtype=np.float32)[..., : len(contexts[0])]
-            for values in (past_covariates, known_covariates)
-            if values is not None
-        ]
+    def forecast(contexts, horizon, past_covariates=None):
         # [contexts, count, context length], or None without covariates.
-        given = np.concatenate(given, axis=1) if given else None
+        given = (
+            None
+            if past_covariates is None
+            else np.asarray(past_covariates, dtype=np.float32)
+        )
         requests = [
             {
                 "context": torch.tensor(np.asarray(c, dtype=np.float32))[None, None],
@@ -191,7 +188,11 @@ def new_run(config, *, epoch=None, step=None, root=None):
 
 
 def earlier_forecasts(config, name, dataset, wanted):
-    """The newest completed run's forecasts of a published model on this data."""
+    """The newest completed run's forecasts of a published model on this data.
+
+    Only forecasts made with the covariates given as they are now: earlier
+    runs also gave some models the future values of covariates.
+    """
     root = results_root(config)
     runs = sorted(p for p in root.iterdir() if (p / COMPLETED).is_file())
     for directory in reversed(runs):
@@ -203,7 +204,11 @@ def earlier_forecasts(config, name, dataset, wanted):
                 not key.endswith(fakebench_metrics.COVARIATE_SUFFIX)
                 for key in forecasts
             )
-            if saved.get("dataset_sha256") == dataset.sha256 and series == wanted:
+            if (
+                saved.get("dataset_sha256") == dataset.sha256
+                and saved.get("covariates") == fakebench_models.COVARIATES_GIVEN
+                and series == wanted
+            ):
                 return path
     return None
 

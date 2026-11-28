@@ -63,3 +63,5 @@
 - Distribution needs to be tail heavy? (more 2048+ contexts) - DONE
 - Enable padding to common lengths to benefit more from graph replay - DONE
 - Step by step notebook example (Google Colab)?
+- GIFT-eval pre-train added to the clustering analysis
+- Timestral approach: if history has never been negative, we clip any prediction at 0

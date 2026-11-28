@@ -300,7 +300,7 @@
     "holt_winters_workers": 10
   },
   "operational_benchmarks": {
-    "models": ["basin", "naive", "chronos2", "timestral", "timeh2o"],
+    "models": ["basin", "naive", "holtwinters", "chronos2", "timestral", "timeh2o"],
     "horizon": 112,
     "context_lengths": [128, 512, 2048],
     "forecast": {

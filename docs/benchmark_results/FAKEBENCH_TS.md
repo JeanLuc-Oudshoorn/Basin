@@ -11,7 +11,7 @@ cycle, a return to an earlier level) is invented, and costs accuracy.
 | Basin weights | best weights after epoch 3 (step 4,526,436), 221.5 million parameters |
 | Series | 10,000 random walks (dataset `v3`): 5,000 with symmetric steps, 5,000 with skewed steps |
 | Forecast | 112 points from 32, 128, 512 or 2,048 points of history (a quarter of the series each) |
-| Run | `results/model/fakebench/20261127T183412Z_epoch3_step4526436` |
+| Run | `results/model/fakebench/20261127T201702Z_epoch3_step4526436` |
 
 ## Accuracy
 
@@ -58,18 +58,19 @@ too narrow.
 
 7,298 of the series come with covariates that say nothing about the target.
 Each was forecast twice by the same model, with and without them. The right
-response is no change at all.
+response is no change at all. Every model is given the history of the
+covariates only, never their values over the forecast horizon.
 
 | Model | Forecast moved by (typical steps) | Departure without | Departure with | RMSE with vs without (95% interval) |
 |---|---|---|---|---|
 | **Basin** | **0.74** | 2.71 | 2.71 | 0.996 (0.993 to 0.999) |
-| Timestral | 1.09 | 1.73 | 2.00 | 1.007 (1.001 to 1.012) |
-| TimeH2O-v1 | 1.56 | 2.45 | 2.54 | 0.967 (0.950 to 0.983) |
-| Chronos-2 | 2.18 | 2.44 | 2.43 | 0.998 (0.991 to 1.006) |
+| Timestral | 0.77 | 1.73 | 1.80 | 1.002 (0.998 to 1.006) |
+| Chronos-2 | 1.55 | 2.44 | 2.03 | 0.982 (0.976 to 0.988) |
 
-Basin is disturbed the least by covariates without information. Basin has no
-input for future values, so of a covariate that is known into the future it
-reads the history only; the other models are given the future values too.
+Basin and Timestral are disturbed the least by covariates without
+information, and equally little. Chronos-2 moves its forecast about twice as
+far. TimeH2O-v1 is not in this table: it does not use the history of a
+covariate, only values known into the future, which no model is given here.
 
 ## Speed
 
@@ -79,10 +80,13 @@ column is the rate when the whole benchmark is forecast in batches of 16.
 
 | Model | One forecast (median) | 95% within | History 32 | History 128 | History 512 | History 2,048 | Forecasts per second, batched |
 |---|---|---|---|---|---|---|---|
-| **Basin** | **5.9 ms** | 24.0 ms | 5.9 ms | 5.7 ms | 5.3 ms | 20.4 ms | 382 |
-| Chronos-2 | 15.5 ms | 16.7 ms | 15.9 ms | 16.1 ms | 15.3 ms | 14.9 ms | **559** |
-| Timestral | 42.9 ms | 60.7 ms | 49.3 ms | 46.4 ms | 41.1 ms | 41.3 ms | 201 |
-| TimeH2O-v1 | 157.7 ms | 172.4 ms | 152.6 ms | 159.4 ms | 155.9 ms | 164.6 ms | 36 |
+| **Basin** | to be measured again | | | | | | 407 |
+| Chronos-2 | 17.2 ms | 18.5 ms | 17.6 ms | 17.2 ms | 17.2 ms | 16.8 ms | **561** |
+| Timestral | 45.5 ms | 50.5 ms | 48.9 ms | 44.9 ms | 45.3 ms | 45.4 ms | 208 |
+| TimeH2O-v1 | 159.4 ms | 171.4 ms | 156.9 ms | 159.7 ms | 158.7 ms | 161.0 ms | 46 |
 
-Basin is the fastest for a single forecast up to 512 points of history. At
-2,048 points it takes 20.4 ms, and Chronos-2 is faster there.
+Chronos-2 is the fastest for forecasts in batches. Basin's time for a single
+forecast is left out: in this run it was measured after the batched run, when
+Basin's memory budget for prepared computations was used up, so the single
+forecasts ran on a slower path than they do in normal use. On the holdout
+set, where single forecasts are timed first, Basin takes 6.1 ms.

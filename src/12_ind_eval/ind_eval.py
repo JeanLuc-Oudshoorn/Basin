@@ -12,10 +12,7 @@ history; every model gets at most 2,048 points of it and forecasts at most
 
 import argparse
 import json
-import multiprocessing
-import os
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from time import perf_counter
 
@@ -29,7 +26,7 @@ HOLDOUT = ROOT / "src" / "06_holdout_test"
 for folder in (ROOT / "src" / "09_fakebench", Path(__file__).resolve().parent):
     sys.path.insert(0, str(folder))
 import fakebench
-from holt_winters import holt_winters_forecast
+from holt_winters import HoltWintersPool
 from ind_eval_data import (
     RECORD,
     data_directory,
@@ -81,35 +78,17 @@ def seasonal_naive(contexts, horizon, seasonalities):
     )
 
 
-def _holt_winters(request):
-    return holt_winters_forecast(*request)
-
-
 class HoltWinters:
     """Holt-Winters fitted to every context, by several processes at once."""
 
     def __init__(self, workers):
-        self.workers, self.pool = max(1, int(workers)), None
+        self.pool = HoltWintersPool(workers)
 
     def __call__(self, contexts, horizon, seasonalities):
-        requests = [(np.asarray(c, dtype=float), horizon) for c in contexts]
-        if self.workers == 1:
-            return as_quantiles([_holt_winters(r) for r in requests])
-        if self.pool is None:
-            # The processes find the model's module through this path, and
-            # use one thread each: they are the parallelism.
-            paths = [str(HOLDOUT), os.environ.get("PYTHONPATH", "")]
-            os.environ["PYTHONPATH"] = os.pathsep.join(p for p in paths if p)
-            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
-                os.environ[name] = "1"
-            self.pool = ProcessPoolExecutor(
-                self.workers, mp_context=multiprocessing.get_context("spawn")
-            )
-        return as_quantiles(list(self.pool.map(_holt_winters, requests, chunksize=2)))
+        return as_quantiles(self.pool(contexts, horizon)[0])
 
     def close(self):
-        if self.pool is not None:
-            self.pool.shutdown()
+        self.pool.close()
 
 
 def build(name, config, options):

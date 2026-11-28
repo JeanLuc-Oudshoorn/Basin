@@ -5,8 +5,8 @@ al., 2026, [arXiv 2610.16652](https://arxiv.org/abs/2610.16652)) is a
 forecasting benchmark on real industrial time series. This stage runs Basin,
 the naive forecast, Holt-Winters, Chronos-2, Timestral and TimeH2O on it.
 
-**Status: written and unit-tested, not yet run on the real data or on the
-GPU.** See "Before the first full run" below.
+The results of the first full run are in
+[docs/benchmark_results/IND_EVAL.md](../../docs/benchmark_results/IND_EVAL.md).
 
 ## What the benchmark is
 
@@ -96,7 +96,8 @@ The cycle length is the task's `seasonality` column (1 for most industrial
 sources, so seasonal naive is the naive forecast there). Electricity and
 solar do not state one; `ind_eval.seasonality_by_freq` sets it from the
 sampling rate (96 for 15 minutes, 144 for 10 minutes, 24 for hourly, 7 for
-daily, 1 for weekly). That table is our reading, not the paper's.
+daily, 1 for weekly). That table is our reading, not the paper's. A task
+with a sampling rate that is not in the table is refused.
 
 For the three point-forecast models the CRPS scores the point as if it were
 every quantile, which favours the models that give quantiles. Compare them on
@@ -137,23 +138,6 @@ source. Those are neither forecast nor scored, and a task that holds nothing
 else is dropped. `run.json` and `leaderboard.md` record how many. The list
 is kept next to the data (`duplicates_<settings>.json`), so it is made once
 for a given history length, forecast length and subset.
-
-## Before the first full run
-
-None of this has been run on the real data. Start with a trial:
-
-```powershell
-uv run python src/12_ind_eval/ind_eval.py --limit 20
-```
-
-Things the trial will show that could not be checked without running:
-
-- how long a full run takes for each model.
-- whether every model accepts the short horizons (8 and 30 points) and the
-  short histories of the daily and weekly tasks.
-- whether the files match the layout the reader expects (taken from the
-  dataset viewer for two sources and from the dataset's own notes for the
-  others).
 
 The data is licensed per source (see `raw/<source>/LICENSE` in the dataset);
 the collection itself is Apache-2.0.

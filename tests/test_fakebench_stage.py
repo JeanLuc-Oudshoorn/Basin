@@ -87,12 +87,9 @@ class FakebenchStageTests(unittest.TestCase):
             self.assertTrue(forecast.uses_covariates)
             self.assertEqual(forecast.details["epoch"], 3)
             contexts = [np.arange(40.0), np.arange(40.0) + 100]
-            past = np.ones((2, 1, 40), dtype=np.float32)
-            known = np.full((2, 2, 60), 7.0, dtype=np.float32)
-            known[:, :, 40:] = np.nan  # future values never reach Basin
-            output = forecast(
-                contexts, 20, past_covariates=past, known_covariates=known
-            )
+            past = np.ones((2, 3, 40), dtype=np.float32)
+            past[:, 1:] = 7.0
+            output = forecast(contexts, 20, past_covariates=past)
             self.assertEqual(output.shape, (2, 9, 20))
             np.testing.assert_allclose(output[1, :, 0], 139 + np.arange(9))
             requests, batch_size, patches = seen[-1]
@@ -102,9 +99,7 @@ class FakebenchStageTests(unittest.TestCase):
             self.assertEqual(covariates.shape, (1, 3, 40))
             self.assertTrue(torch.isfinite(covariates).all())
             self.assertEqual(covariates[0, :, 0].tolist(), [1.0, 7.0, 7.0])
-            # Only covariates known into the future, and none at all.
-            forecast(contexts, 20, known_covariates=known)
-            self.assertEqual(seen[-1][0][1]["past_covariates"].shape, (1, 2, 40))
+            # Without covariates.
             forecast(contexts, 20)
             self.assertIsNone(seen[-1][0][0]["past_covariates"])
             # Without quantiles the median comes back.

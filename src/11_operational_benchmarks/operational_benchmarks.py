@@ -1,6 +1,6 @@
 """Stage 11: forecasting and anomaly detection on public operational datasets.
 
-Runs Basin, Naive and the holdout stage's foundation models on the cases
+Runs Basin, Naive, Holt-Winters and the holdout stage's foundation models on the cases
 `prepare_cases.py` cut from CATS and from the operational series of the UCR anomaly
 archive, and scores two tasks on each dataset: forecasting normal data, and
 detecting anomalies the model has not seen the start of. Nothing here touches
@@ -24,6 +24,7 @@ import fakebench
 from anomaly_examples import write_examples
 from fakebench_ts import models as fakebench_models
 from fakebench_ts.dataset import QUANTILE_LEVELS
+from holt_winters import HoltWintersPool
 from operational_scoring import leaderboard, score_model, summarise
 from performance import configure_cuda_memory
 from prepare_cases import (
@@ -33,10 +34,13 @@ from prepare_cases import (
     load_cases,
     settings,
 )
+from scipy.special import ndtri
 from train import launch_wsl
 from transform import load_config, run_context, timed, write_json
 
 COMPLETED = "results.json"  # written last, so it marks a finished run
+# Models that need no GPU; a run of only these stays where it was started.
+CPU_MODELS = (*fakebench_models.BASELINES, "holtwinters")
 
 
 def results_root(config):
@@ -45,8 +49,28 @@ def results_root(config):
     )
 
 
+def holt_winters(workers):
+    """Holt-Winters with the quantiles of a normal forecast error.
+
+    The model gives a point forecast and the standard deviation of its error
+    at every step; the quantiles are those of the normal distribution with
+    that mean and spread.
+    """
+    pool = HoltWintersPool(workers)
+    normal = ndtri(np.array(QUANTILE_LEVELS))[None, :, None]
+
+    def forecast(contexts, horizon):
+        points, spreads = pool(contexts, horizon)
+        return points[:, None, :] + normal * spreads[:, None, :]
+
+    forecast.close = pool.close
+    return forecast
+
+
 def build(name, config, batch_size):
     """A forecaster that returns quantiles: stage 9's models, Basin with its quantiles."""
+    if name == "holtwinters":
+        return holt_winters(settings(config)["holt_winters_workers"])
     if name == "basin":
         return fakebench.basin(
             config, batch_size=batch_size, quantiles=True, covariates=True
@@ -82,9 +106,7 @@ def forecast_cases(forecaster, cases, horizon, batch_size, progress=None):
                         for i in members
                     ]
                 )
-                result = forecaster(
-                    contexts, horizon, past_covariates=past, known_covariates=None
-                )
+                result = forecaster(contexts, horizon, past_covariates=past)
             else:
                 result = forecaster(contexts, horizon)
             result = np.asarray(result, dtype=np.float32)
@@ -201,10 +223,13 @@ def run(config, args):
             with timed(f"load {name}", cuda=cuda):
                 loaded[name] = build(name, config, batch_size)
         forecaster = loaded.pop(name)
-        with timed(f"forecast {name}", cuda=cuda):
-            quantiles = forecast_cases(
-                forecaster, cases, options["horizon"], batch_size
-            )
+        # Holt-Winters is fitted by several processes: give each call enough work.
+        size = batch_size
+        if name == "holtwinters":
+            size = max(batch_size, 8 * options["holt_winters_workers"])
+        with timed(f"forecast {name}", cuda=cuda and name not in CPU_MODELS):
+            quantiles = forecast_cases(forecaster, cases, options["horizon"], size)
+        getattr(forecaster, "close", lambda: None)()
         np.savez_compressed(
             output / "forecasts" / f"{name}.npz",
             case=cases["case"].to_numpy(),
@@ -212,9 +237,8 @@ def run(config, args):
             quantiles=quantiles,
         )
         record["models"][name] = (
-            # TimeH2O's adapter accepts past covariates and does not use them.
             "target history and the case's past covariates"
-            if getattr(forecaster, "uses_covariates", False) and name != "timeh2o"
+            if getattr(forecaster, "uses_covariates", False)
             else "target history only"
         )
         del forecaster
@@ -233,7 +257,7 @@ def main():
         "--models",
         nargs="+",
         help="default: operational_benchmarks.models; FakeBench-TS baselines "
-        "that give quantiles (naive, mean, median) also work",
+        "that give quantiles (naive, mean, median) and holtwinters also work",
     )
     parser.add_argument("--batch-size", type=int, help="contexts per model call")
     parser.add_argument("--limit", type=int, help="run an even subset of cases (trial)")
@@ -252,8 +276,8 @@ def main():
     extra += ["--batch-size", str(args.batch_size)] if args.batch_size else []
     extra += ["--limit", str(args.limit)] if args.limit else []
     with run_context(config, "operational_benchmarks"):
-        if set(names) <= set(fakebench_models.BASELINES):
-            # Baselines need no GPU: run where the command was given.
+        if set(names) <= set(CPU_MODELS):
+            # These need no GPU: run where the command was given.
             with timed("OPERATIONAL BENCHMARKS stage"):
                 run(config, args)
             return

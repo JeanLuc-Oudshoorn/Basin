@@ -37,7 +37,10 @@ In 30% of the series with symmetric steps the size of the steps changes over
 time (never their direction), and most series come with covariates that say
 nothing about the target. Neither changes the best forecast. The headline
 numbers use the forecasts made without covariates; `leaderboard.md` reports
-what the covariates did to each model.
+what the covariates did to each model. Every model is given the history of
+the covariates only, never their values over the forecast horizon. TimeH2O
+takes covariates only together with their future values, so it is not part
+of that comparison.
 
 The `v3` data file is not kept in git. Create it once (a few minutes, 130 MB):
 
@@ -55,9 +58,7 @@ covariates, point forecasts only.
   (`holdout.checkpoint`, otherwise the newer of `model.pt` and the best
   weights in `latest_checkpoint.pt` under `paths.training`), with the same
   inference set-up. Its point forecast is the median. On `v3` it also gives
-  its quantiles and is given the covariates. Basin has no input for future
-  values, so of a covariate that is known into the future it reads the
-  history only.
+  its quantiles and is given the covariates.
 - **Chronos-2, Timestral and TimeH2O** use the model IDs, pinned revisions,
   device and cache folder under `holdout` in the configuration. TimeH2O's
   weights are gated: see the [holdout README](../06_holdout_test/README.md).
@@ -74,8 +75,8 @@ folder holds:
   skewed half, with uncertainty bands, states of randomness, covariates, and
   history against horizon length
 - `results.json`: all numbers, also by family, context length and forecast step,
-  and each model's speed: after its forecasts every model forecasts 200
-  series again one at a time, and `leaderboard.md` reports the median time
+  and each model's speed: before its forecasts every model forecasts 200
+  series one at a time, and `leaderboard.md` reports the median time
   of one forecast, by history length, next to the forecasts per second of
   the batched run
 - `per_series.parquet`: every model's scores on every series
@@ -89,7 +90,10 @@ so their forecasts are copied from the most recent earlier complete run on
 the same data instead of being computed again.
 
 Runs made before 2026-11-27 used earlier datasets and absolute error against
-the median as the headline; their folders are kept as they were.
+the median as the headline; their folders are kept as they were. Runs made
+with FakeBench-TS before 0.4.0 also gave Chronos-2, Timestral and TimeH2O the
+future values of half of the covariates; their forecasts are not copied into
+new runs.
 
 ### Copy in Azure Blob Storage
 

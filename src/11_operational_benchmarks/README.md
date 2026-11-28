@@ -1,7 +1,7 @@
 # Operational benchmarks stage
 
 Four public datasets and two tasks, with the same models as the holdout test
-(Basin, Naive, Chronos-2, Timestral, TimeH2O):
+(Basin, Naive, Chronos-2, Timestral, TimeH2O) and Holt-Winters:
 
 | | Forecasting normal data | Detecting anomalies |
 |---|---|---|
@@ -143,7 +143,7 @@ holdout test would use; the published models use the IDs and revisions under
 
 | Option | Effect |
 |---|---|
-| `--models basin naive` | which models to run; the baselines `naive`, `mean` and `median` need no GPU and run where the command is given |
+| `--models basin naive` | which models to run; `holtwinters` and the baselines `naive`, `mean` and `median` need no GPU, and a run of only those runs where the command is given |
 | `--limit 200` | an even subset of the cases, for a quick trial |
 | `--batch-size 16` | contexts per model call |
 | `--rescore RUN` | score the saved forecasts of a run folder again, without running a model |
@@ -152,7 +152,8 @@ Each run writes a new folder under `results/model/operational_benchmarks`
 (`paths.operational_benchmarks`), named by its start time and Basin's epoch
 and step:
 
-- `leaderboard.md`: the four tables, then the same by context length, by
+- `leaderboard.md`: for each task one table per dataset with every model,
+  so each dataset is reported on its own; then the same by context length, by
   category, and for CATS by role of the channel, anomaly type and whether the
   context holds an earlier anomaly
 - `results.json`: all numbers, also per series
@@ -160,6 +161,15 @@ and step:
 - `examples.html`: four anomaly cases per dataset, with every model's median
   and interval against the actual values
 - `forecasts/`: the nine quantiles of every model for every case
+
+**Holt-Winters** (`holtwinters`) is the classical model of the holdout test:
+triple exponential smoothing fitted anew to the context of every case, on the
+processor (`holt_winters_workers` processes at a time). It gives a point
+forecast and the standard deviation of its forecast error at every step,
+which follows from its one-step errors within the context and its fitted
+smoothing parameters. Its quantiles are those of a normal distribution with
+that mean and spread. On simulated random walks, noise and seasonal series
+this interval holds 80% of the outcomes, as it should.
 
 ## How the tasks are scored
 
