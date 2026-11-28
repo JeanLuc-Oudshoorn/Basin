@@ -49,7 +49,7 @@ NOISE_FREE_COVARIATE_PROBABILITY = (
     0.35  # Per process covariate; deterministic given its parents.
 )
 TREND_FREE_FRACTION = (
-    0.5  # Proposal share; incidental moderate trends are accepted as trending.
+    0.7  # Proposal share; incidental moderate trends are accepted as trending.
 )
 # Trending proposals qualify by linear or trend-shape R-squared > 0.15.
 # They include rising/falling, accelerating/decelerating, and permanent shock breaks.

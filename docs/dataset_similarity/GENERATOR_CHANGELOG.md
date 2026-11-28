@@ -60,6 +60,7 @@ unrelated, where the generator's series are either smoother or noisier.
 |---|---|---|---|---|---|---|---|
 | 0 | Baseline | 0.9646 | 0.9903 | 0.9455 | 0.9688 | 0.9539 | |
 | 1 | Stored resolution on 60% of the columns | 0.9597 | 0.9895 | 0.9426 | 0.9578 | 0.9489 | Kept (-0.0049) |
+| 2 | Trend in 30% of the tables instead of 50% | 0.9584 | 0.9906 | 0.9402 | 0.9585 | 0.9444 | Kept (-0.0013) |
 
 ### 1. Stored resolution
 
@@ -70,3 +71,7 @@ three quarters of the series had a distinct value at every point. Now 60% of
 the continuous columns (target and covariates) are stored at a resolution of
 6 to 20,000 levels over the range of the signal, drawn evenly on a
 logarithmic scale. Setting: `RESOLUTION_PROBABILITY`.
+
+### 2. Fewer trending tables
+
+In a window of 512 points most real series have no trend: a straight line explains 2% to 6% of the variance of the median real series, against 13% for the generated ones. Tables drawn without a trend already match the real series on this (1%), tables drawn with one do not (49%). The share of tables proposed without a trend goes from 50% to 70%. Setting: `TREND_FREE_FRACTION`. FakeBench-TS gets slightly worse (random walks do wander off), the three real groups better.
