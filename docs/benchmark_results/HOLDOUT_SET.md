@@ -1,8 +1,7 @@
-# Benchmark results
+# Benchmark results: holdout set
 
-Results of Basin against published time-series foundation models. Each
-section names the run it comes from, so the numbers can be traced to the
-result files.
+Results of Basin against published time-series foundation models on the
+holdout set. The other benchmarks are listed in the [index](README.md).
 
 ## Holdout set (epoch 3)
 
@@ -12,7 +11,7 @@ result files.
 | Tables | 49,475 scored tables (the full holdout set), 27.1 million scored points |
 | Forecast | 112 points from up to 5 origins per table, up to 2,048 points of history |
 | Metric | MASE per table: mean absolute error divided by the mean absolute one-step change in the history. Lower is better. |
-| Run | `results/model/holdout_test/20261126T081803Z_epoch3_step4526436`, also in Azure under the same path |
+| Run | `../../results/model/holdout_test/20261126T081803Z_epoch3_step4526436`, also in Azure under the same path |
 
 ### How to read these results
 
@@ -69,6 +68,17 @@ seasonal model does not fit better.
 The comparison of speed is between different hardware: one processor core
 (Holt-Winters needs no GPU) against an RTX 5070.
 
+**Basin is faster than the classical methods.** A common argument for
+classical models is that they are quick, and foundation models slow. With
+its optimised kernels and CUDA graph replay, Basin turns that around: at
+6.1 ms per forecast it is about five times faster than Holt-Winters (29.6 ms)
+and, unlike Holt-Winters, its time does not grow with the length of the
+history. Prophet is slower still, because it fits a new model for every
+request: in an earlier check on the CPU, a single Prophet forecast on a short
+series of 64 points took about 2 seconds, some 300 times Basin's latency.
+That was one measurement on one small example, not a benchmark, and Prophet
+is not part of this run.
+
 The mean of the per-table scores is not reported. A handful of tables whose
 history is almost constant have a scale near zero and a MASE in the trillions
 for every model, so the mean says nothing about the models.
@@ -106,7 +116,7 @@ Table by table, Basin has a lower MASE than Timestral on 64.7% of the tables,
 than TimeH2O on 64.1%, than Chronos-2 on 73.3% and than the naive forecast on
 85.3%.
 
-![Basin's lead over every other model by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty_all_models.png)
+![Basin's lead over every other model by table difficulty](holdout_epoch3_lead_by_difficulty_all_models.png)
 
 The first figure shows Basin's average lead over each of the other models as
 the tables get harder. For every table Basin's MASE is divided by the other
@@ -126,13 +136,6 @@ wide), written as a lead in percent.
 - On the hardest 5% the lead over every model peaks and then falls, the
   pattern discussed below.
 
-![Basin's lead over Timestral by table difficulty](benchmark_results/holdout_epoch3_lead_by_difficulty.png)
-
-The second figure compares Basin with Timestral, the runner-up overall, on
-every single table. The horizontal position is the difficulty of the table, the vertical position how much lower
-Basin's MASE is than Timestral's on it. The shading shows where the tables
-lie, the solid blue line the median table, the dashed lines the middle half
-of the tables, and the orange line the average.
 
 ### What we think explains the pattern
 
