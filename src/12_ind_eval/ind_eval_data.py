@@ -48,8 +48,20 @@ DEFAULTS = {
     # the same for every model (for a quicker, less precise run).
     "max_series_per_task": None,
     # The cycle length of the seasonal-naive reference where a task does not
-    # state one (electricity and solar), by sampling rate.
-    "seasonality_by_freq": {"10T": 144, "15T": 96, "H": 24, "D": 7, "W": 1},
+    # state one (electricity and solar), by sampling rate as the files
+    # name it (and as older releases of pandas named it): a day of 10 or 15
+    # minute or hourly points, a week of daily points, none for weekly ones.
+    "seasonality_by_freq": {
+        "10min": 144,
+        "15min": 96,
+        "h": 24,
+        "D": 7,
+        "W-FRI": 1,
+        "10T": 144,
+        "15T": 96,
+        "H": 24,
+        "W": 1,
+    },
     # Processes that fit Holt-Winters at the same time.
     "holt_winters_workers": 10,
 }
@@ -57,6 +69,8 @@ RECORD = "download.json"
 # Columns read from a task file, where it has them.
 COLUMNS = (
     "instance_id",
+    "source_instance",
+    "item_id",
     "channel",
     "window",
     "role",
@@ -66,6 +80,10 @@ COLUMNS = (
     "prediction_length",
     "seasonality",
 )
+
+
+# The column that names what a window was cut from, in order of preference.
+INSTANCE_COLUMNS = ("instance_id", "source_instance", "item_id")
 
 
 def settings(config):
@@ -213,9 +231,15 @@ def read_task(task, options, rows_per_read=512, skip=None):
     """
     file = pq.ParquetFile(task.path)
     names = [name for name in COLUMNS if name in file.schema_arrow.names]
-    for needed in ("instance_id", "channel", "context", "target"):
+    for needed in ("channel", "context", "target"):
         if needed not in names:
             raise ValueError(f"{task.path} has no column {needed!r}")
+    # What a window was cut from is named differently by the sources.
+    instance = next((name for name in INSTANCE_COLUMNS if name in names), None)
+    if instance is None:
+        raise ValueError(f"{task.path} has none of the columns {INSTANCE_COLUMNS}")
+    if "seasonality" not in names and "freq" not in names:
+        raise ValueError(f"{task.path} states neither a seasonality nor a freq")
     keep = chosen_rows(file.metadata.num_rows, options["max_series_per_task"])
     cap, horizon = options["context_points"], options["horizon"]
     first = position = 0
@@ -242,12 +266,17 @@ def read_task(task, options, rows_per_read=512, skip=None):
                 )
             seasonality = plain.get("seasonality", [None] * batch.num_rows)[i]
             if seasonality is None:
-                freq = plain.get("freq", [None] * batch.num_rows)[i]
-                seasonality = options["seasonality_by_freq"].get(freq, 1)
+                freq = plain["freq"][i]
+                if freq not in options["seasonality_by_freq"]:
+                    raise ValueError(
+                        f"{task.path} states no seasonality and its sampling "
+                        f"rate {freq!r} is not in ind_eval.seasonality_by_freq"
+                    )
+                seasonality = options["seasonality_by_freq"][freq]
             window = plain.get("window", [0] * batch.num_rows)[i]
             series.append(
                 Series(
-                    key=f"{plain['instance_id'][i]}|{window}|{plain['channel'][i]}",
+                    key=f"{plain[instance][i]}|{window}|{plain['channel'][i]}",
                     context=contexts[i][-cap:],
                     target=target[:horizon],
                     seasonality=max(1, int(seasonality)),

@@ -47,7 +47,7 @@ from operational_datasets import (
 SECTION = "operational_benchmarks"
 DEFAULTS = {
     # The names of FakeBench-TS (stage 9), whose model adapters this stage uses.
-    "models": ["basin", "naive", "chronos2", "timestral", "timeh2o"],
+    "models": ["basin", "naive", "holtwinters", "chronos2", "timestral", "timeh2o"],
     "horizon": 112,
     "context_lengths": [128, 512, 2048],
     "forecast": {
@@ -98,6 +98,8 @@ DEFAULTS = {
     # gives forecast cases only. A point is the mean of samples_per_point samples.
     "caster": {"path": "benchmarks/micromill-caster", "samples_per_point": 1},
     "batch_size": 16,
+    # Processes that fit Holt-Winters at the same time.
+    "holt_winters_workers": 10,
 }
 CASES = "cases.parquet"
 RECORD = "prepared.json"
@@ -148,9 +150,13 @@ def settings(config):
 SCORING_ONLY = ("interval", "quantiles", "interval_sigmas", "min_share_outside")
 
 
+# Settings that change a run of the models, not the prepared cases.
+RUN_ONLY = ("models", "batch_size", "holt_winters_workers")
+
+
 def case_settings(options):
     """The settings the prepared cases depend on."""
-    kept = {k: v for k, v in options.items() if k not in ("models", "batch_size")}
+    kept = {k: v for k, v in options.items() if k not in RUN_ONLY}
     kept["anomaly"] = {
         k: v for k, v in options["anomaly"].items() if k not in SCORING_ONLY
     }

@@ -611,7 +611,7 @@ class StageTests(unittest.TestCase):
         cases = pd.DataFrame(cases)
         seen = []
 
-        def forecaster(contexts, horizon, past_covariates=None, known_covariates=None):
+        def forecaster(contexts, horizon, past_covariates=None):
             seen.append((len(contexts[0]), past_covariates))
             return np.zeros((len(contexts), 9, horizon))
 
@@ -677,6 +677,52 @@ class StageTests(unittest.TestCase):
             config["operational_benchmarks"]["anomaly"]["lead_points"] = [3]
             with self.assertRaisesRegex(ValueError, "Prepare again"):
                 self.stage.run(config, arguments)
+
+    def test_holt_winters_gives_an_interval_that_holds_most_of_a_random_walk(self):
+        rng = np.random.default_rng(0)
+        walks = np.cumsum(rng.normal(size=(40, 312)), axis=1)
+        forecaster = self.stage.holt_winters(workers=1)
+        quantiles = forecaster([walk[:200] for walk in walks], 112)
+        self.assertEqual(quantiles.shape, (40, 9, 112))
+        self.assertTrue((np.diff(quantiles, axis=1) > 0).all())
+        # The interval widens with the step, as the uncertainty of a walk does.
+        width = quantiles[:, 8] - quantiles[:, 0]
+        self.assertTrue((width[:, -1] > 3 * width[:, 0]).all())
+        future = walks[:, 200:]
+        inside = (future >= quantiles[:, 0]) & (future <= quantiles[:, 8])
+        self.assertGreater(inside.mean(), 0.65)
+        self.assertLess(inside.mean(), 0.92)
+
+    def test_holt_winters_runs_without_a_gpu_and_is_scored_per_dataset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = {
+                "paths": {
+                    "operational_benchmark_data": str(Path(folder) / "cases"),
+                    "operational_benchmarks": str(Path(folder) / "results"),
+                },
+                "training": {"cpu_threads": 4},
+                "operational_benchmarks": {
+                    "horizon": 8,
+                    "context_lengths": [16, 32],
+                    "forecast": {"origins": {"cats": 3, "ucr": 3}, "anomaly_margin": 5},
+                    "anomaly": {"lead_points": [2, 5]},
+                    "holt_winters_workers": 1,
+                },
+            }
+            with mock.patch.object(prepare_cases, "ucr_listing", return_value=[]):
+                with mock.patch.object(
+                    prepare_cases, "build_cases", lambda *_: prepare_cases_build()
+                ):
+                    prepare_cases.prepare(config, datasets=("ucr",), log=str)
+            arguments = mock.Mock(
+                models=["naive", "holtwinters"], batch_size=None, limit=None
+            )
+            output = self.stage.run(config, arguments)
+            results = json.loads((output / "results.json").read_text())
+            for task in ("forecast", "anomaly"):
+                self.assertEqual(sorted(results[task]["ucr"]), ["holtwinters", "naive"])
+            self.assertIn("holtwinters", self.stage.CPU_MODELS)
+            self.assertIn("| holtwinters |", (output / "leaderboard.md").read_text())
 
 
 if __name__ == "__main__":

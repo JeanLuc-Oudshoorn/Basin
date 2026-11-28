@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Series map</title>
+<script src="plotly.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 16px 20px 8px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--ink-2); max-width: 980px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 8px 20px; }
+  .controls label { color: var(--ink-2); }
+  select { font: inherit; color: var(--ink); background: var(--surface);
+           border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; padding: 0 20px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #plot { height: 76vh; min-height: 420px; background: var(--surface);
+          border: 1px solid var(--border); border-radius: 8px; }
+  aside { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+          padding: 14px; overflow: auto; max-height: 76vh; }
+  aside h2 { font-size: 14px; margin: 0 0 6px; }
+  aside .hint { color: var(--ink-2); }
+  canvas { width: 100%; height: 110px; display: block; margin: 4px 0 12px;
+           border-bottom: 1px solid var(--grid); }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
+  td { padding: 2px 0; vertical-align: top; }
+  td:first-child { color: var(--ink-2); padding-right: 10px; }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Map of the series: synthetic against the benchmarks</h1>
+  <p id="lead"></p>
+</header>
+<div class="controls">
+  <label>Map <select id="view"></select></label>
+  <label>Colour <select id="mode">
+    <option value="group">by group</option>
+    <option value="coverage">highlight series without neighbours from the other side</option>
+  </select></label>
+  <span class="hint" style="color:var(--ink-2)">Drag to turn, scroll to zoom, click a point to see its series. Click a legend entry to hide a group.</span>
+</div>
+<main>
+  <div id="plot"></div>
+  <aside id="panel"><h2>No series selected</h2>
+    <p class="hint">Click a point. Its series is drawn here, standardised, together with the nearest synthetic series when the point is a benchmark series.</p>
+    <p class="hint">On the t-SNE maps, points that lie together are similar series, but the size of an island and the space between islands mean nothing. On the principal-component map distances are real, but only the three main directions are shown.</p>
+  </aside>
+</main>
+<script>
+const D = /*DATA*/;
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const sparks = Uint8Array.from(atob(D.sparks), c => c.charCodeAt(0));
+const N = D.group.length, SPARK = 128;
+const dark = window.matchMedia("(prefers-color-scheme: dark)");
+const colours = () => dark.matches ? D.coloursDark : D.colours;
+document.getElementById("lead").textContent =
+  `Each point is one series of ${D.points} points, described by its statistical descriptors ` +
+  `(or by a Chronos-2 embedding). ${N.toLocaleString()} series are drawn, a random part of each group.`;
+const viewSelect = document.getElementById("view"), modeSelect = document.getElementById("mode");
+Object.keys(D.views).forEach(name => viewSelect.add(new Option(name, name)));
+
+function traces() {
+  const view = D.views[viewSelect.value], has = D.has[viewSelect.value];
+  const mode = modeSelect.value, list = [];
+  D.groups.forEach((name, g) => {
+    const parts = mode === "group" ? [[null, name, g === 0 ? 0.35 : 0.75]] :
+      g === 0 ? [[1, name + ", benchmark series nearby", 0.12], [0, name + ", no benchmark series nearby", 0.85]]
+              : [[1, name + ", covered", 0.12], [0, name + ", not covered", 0.9]];
+    parts.forEach(([flag, label, opacity]) => {
+      const idx = [];
+      for (let i = 0; i < N; i++) {
+        if (D.group[i] !== g || !has[i]) continue;
+        const state = g === 0 ? D.resembles[i] : D.covered[i];
+        if (flag === null || state === flag) idx.push(i);
+      }
+      list.push({
+        type: "scatter3d", mode: "markers", name: label,
+        x: idx.map(i => view[0][i]), y: idx.map(i => view[1][i]), z: idx.map(i => view[2][i]),
+        customdata: idx, text: idx.map(i => D.dataset[i]),
+        hovertemplate: "%{text}<extra>" + name + "</extra>",
+        marker: { size: 2.2, color: colours()[g], opacity: opacity, line: { width: 0 } },
+      });
+    });
+  });
+  return list;
+}
+
+function layout() {
+  const axis = { showticklabels: false, title: "", gridcolor: css("--grid"), zerolinecolor: css("--grid"),
+                 showbackground: false };
+  return {
+    paper_bgcolor: css("--surface"), font: { color: css("--ink"), family: "system-ui, Segoe UI, sans-serif" },
+    margin: { l: 0, r: 0, t: 0, b: 0 }, uirevision: viewSelect.value,
+    legend: { x: 0.01, y: 0.99, bgcolor: "rgba(0,0,0,0)", itemsizing: "constant" },
+    scene: { xaxis: axis, yaxis: axis, zaxis: axis },
+  };
+}
+
+function draw() {
+  Plotly.react("plot", traces(), layout(), { responsive: true, displaylogo: false });
+}
+
+function sparkline(canvas, position, colour) {
+  const ratio = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * ratio; canvas.height = h * ratio;
+  const c = canvas.getContext("2d");
+  c.scale(ratio, ratio); c.strokeStyle = colour; c.lineWidth = 1.2; c.beginPath();
+  let low = 255, high = 0;
+  for (let i = 0; i < SPARK; i++) { const v = sparks[position * SPARK + i]; low = Math.min(low, v); high = Math.max(high, v); }
+  const span = Math.max(1, high - low);
+  for (let i = 0; i < SPARK; i++) {
+    const v = sparks[position * SPARK + i];
+    const x = 2 + i * (w - 4) / (SPARK - 1), y = h - 4 - (v - low) * (h - 8) / span;
+    i ? c.lineTo(x, y) : c.moveTo(x, y);
+  }
+  c.stroke();
+}
+
+function show(i) {
+  const g = D.group[i], panel = document.getElementById("panel");
+  const state = g === 0
+    ? (D.resembles[i] ? "benchmark series nearby" : "no benchmark series nearby")
+    : (D.covered[i] ? "covered: synthetic series nearby" : "not covered: no synthetic series nearby");
+  const rows = [["Group", D.groups[g]], ["Dataset", D.dataset[i]], ["Series", D.series[i]],
+                ["Verdict", state], ["Distance to synthetic (1 = typical)", D.ratio[i].toFixed(2)]]
+    .concat(D.shown.map(name => [name, D.features[name][i]]));
+  panel.innerHTML = `<h2><span class="dot" style="background:${colours()[g]}"></span>${D.dataset[i]}</h2>` +
+    `<canvas id="own"></canvas>` +
+    (D.neighbour[i] >= 0 ? `<h2><span class="dot" style="background:${colours()[0]}"></span>Nearest synthetic series</h2><canvas id="near"></canvas>` : "") +
+    "<table>" + rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("") + "</table>";
+  sparkline(document.getElementById("own"), i, colours()[g]);
+  if (D.neighbour[i] >= 0) sparkline(document.getElementById("near"), D.neighbour[i], colours()[0]);
+}
+
+draw();
+viewSelect.onchange = draw; modeSelect.onchange = draw;
+document.getElementById("plot").on("plotly_click", event => show(event.points[0].customdata));
+dark.addEventListener("change", draw);
+</script>
+</body>
+</html>

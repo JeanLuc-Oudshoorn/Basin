@@ -76,7 +76,8 @@ class IndEvalTests(unittest.TestCase):
         rows[1]["context"] = [float("nan")] * 3 + list(range(5000))
         write_task(self.root / "data/pronto/event_short.parquet", rows)
         write_task(
-            self.root / "data/electricity/electricity-H_short.parquet", rows_of(1, 16)
+            self.root / "data/electricity/electricity-H_short.parquet",
+            rows_of(1, 16, freq="h"),
         )
         options = self.options()
         tasks = self.data.list_tasks(options)
@@ -94,8 +95,32 @@ class IndEvalTests(unittest.TestCase):
         self.assertEqual(len({s.key for s in series}), 7)
         # Without a stated cycle it follows from the sampling rate.
         hourly = [s for group in self.data.read_task(tasks[0], options) for s in group]
-        self.assertEqual({s.seasonality for s in hourly}, {1})
-        self.assertEqual(self.data.settings({})["seasonality_by_freq"]["H"], 24)
+        self.assertEqual({s.seasonality for s in hourly}, {24})
+        by_freq = self.data.settings({})["seasonality_by_freq"]
+        self.assertEqual(
+            [by_freq[f] for f in ("10min", "15min", "h", "D", "W-FRI")],
+            [144, 96, 24, 7, 1],
+        )
+        # A sampling rate without a known cycle is refused, not read as 1.
+        write_task(
+            self.root / "data/solar/solar-M_short.parquet", rows_of(1, 16, freq="M")
+        )
+        monthly = self.data.list_tasks(self.options(sources=["solar"]))[0]
+        with self.assertRaisesRegex(ValueError, "seasonality_by_freq"):
+            list(self.data.read_task(monthly, options))
+        # MetroPT-3 names what a window was cut from `source_instance`.
+        renamed = [
+            {
+                ("source_instance" if k == "instance_id" else k): v
+                for k, v in row.items()
+            }
+            for row in rows_of(2, 16, seasonality=1)
+        ]
+        write_task(self.root / "data/metropt3/metropt3_short.parquet", renamed)
+        metro = self.data.list_tasks(self.options(sources=["metropt3"]))[0]
+        keys = [s.key for g in self.data.read_task(metro, options) for s in g]
+        self.assertEqual(len(set(keys)), 8)
+        self.assertEqual(keys[0], "run-0|0|pressure")
         # A target longer than the forecast length is cut to its first points.
         short = self.options(horizon=10, context_points=32)
         cut = [s for g in self.data.read_task(tasks[0], short) for s in g]
@@ -198,7 +223,7 @@ class IndEvalTests(unittest.TestCase):
                 self.root / f"data/tablet/{name}.parquet",
                 rows_of(2, horizon, seasonality=1),
             )
-        write_task(self.root / "data/other/long.parquet", rows_of(1, 40))
+        write_task(self.root / "data/other/long.parquet", rows_of(1, 40, freq="h"))
         options = self.options(horizon=10)
         tasks = self.data.list_tasks(options)
         index = self.data.duplicate_index(tasks, options, log=lambda text: None)
@@ -251,7 +276,9 @@ class IndEvalTests(unittest.TestCase):
         write_task(
             self.root / "data/metropt3/long.parquet", rows_of(2, 40, seasonality=8)
         )
-        write_task(self.root / "data/neats/a_short.parquet", rows_of(1, 16))
+        write_task(
+            self.root / "data/neats/a_short.parquet", rows_of(1, 16, seasonality=1)
+        )
         results = self.root / "results"
         config = {
             "paths": {"ind_eval": str(results)},
