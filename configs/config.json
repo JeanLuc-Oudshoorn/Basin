@@ -279,5 +279,13 @@
     "checkpoint_every_records": 100000,
     "checkpoint_interval_seconds": null,
     "progress_every": 10000
+  },
+  "fakebench": {
+    "result_upload": {
+      "container": "checkpoints",
+      "prefix": null,
+      "block_mib": 16,
+      "concurrency": 8
+    }
   }
 }
