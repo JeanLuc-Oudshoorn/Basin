@@ -75,6 +75,8 @@ unrelated, where the generator's series are either smoother or noisier.
 | 4 | 3, plus cycle lengths of a day at common sampling rates (24, 48, 96, 144, 288) and 50% seasonal tables | 0.9586* | 0.9920 | 0.9397 | 0.9596 | 0.9431 | Discarded (+0.0002) |
 | 5 | 4, plus noise sized to the cycle in 60% of the dominant cycles | 0.9595* | 0.9919 | 0.9451 | 0.9592 | 0.9420 | Discarded (+0.0011) |
 | 6 | Nine operational patterns as new kinds of series, in a third of the tables | 0.9476 | 0.9836 | 0.9420 | 0.9444 | 0.9207 | Kept (-0.0123) |
+| 7 | Smoother and more regular patterns (noise with memory, clearer days, steadier cycles), daily load 6% to 9% | 0.9479 | 0.9835 | 0.9430 | 0.9453 | 0.9197 | Discarded (+0.0003) |
+| 8 | 7, plus a unit or pattern in 85% of the tables without a trend (was 60%) | 0.9453 | 0.9817 | 0.9454 | 0.9432 | 0.9108 | Kept (-0.0023) |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -126,3 +128,11 @@ The first five changes showed that the generator's existing mechanisms, however 
 | Oscillation | A repeating waveform whose length and size vary from cycle to cycle | 3% |
 
 A pattern takes the place of a closed-loop unit: the table's causal model still runs and supplies the pattern's demand, so the covariates can carry information about the target (except for the random walk, which nothing drives). Cycle lengths come mostly from the calendar (a day of 24, 48, 96, 144 or 288 points). All earlier unit families and the plain causal model remain; the share of tables with a unit of any kind goes from about a fifth to about four in ten. Breadth stays at 0.95: nothing the generator made before has become rare. Settings: `PLANT_PROBABILITY`, `PLANT_WEIGHTS`; code in `operational_patterns.py`.
+
+### 7. Smoother patterns
+
+Compared with the datasets nearest to them, the patterns were too jagged: 30% of the generated series are smooth from point to point, against 35% to 58% of the real ones. The ranges were moved (noise that remembers its last value, slower clouds, steadier oscillations, staircases that are seldom perfectly clean). On its own this did not move the score (+0.0003). It is kept as part of change 8, because the ranges stay wide and each move follows from a measured difference, not because the score asked for it.
+
+### 8. More tables with a pattern
+
+The patterns are taken for real series two to three times as often as the plain causal model, so they get more room: a unit or pattern in 85% of the tables that have no trend. About half of all tables now hold a pattern, a tenth one of the earlier closed-loop units, and four in ten the plain causal model (all tables with a trend among them). Breadth 0.945. The operational benchmarks did not improve (0.9420 to 0.9454); the public datasets, IND-Eval and FakeBench-TS did. Setting: `PLANT_PROBABILITY`.

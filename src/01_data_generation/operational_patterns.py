@@ -93,7 +93,7 @@ def _profile(rng):
     return {
         "positions": positions.tolist(),
         "values": values.tolist(),
-        "hold": bool(rng.random() < 0.35),  # Plateaus instead of slopes.
+        "hold": bool(rng.random() < 0.55),  # Plateaus instead of slopes.
         "smoothing": float(rng.uniform(0.01, 0.2)),
     }
 
@@ -141,9 +141,9 @@ def sample_pattern(rng, rows, family):
         return {
             # White, sluggish, or alternating around the setpoint.
             "memory": 0.0
-            if colour < 0.45
-            else float(rng.uniform(0.2, 0.97))
-            if colour < 0.9
+            if colour < 0.3
+            else float(1 - _log_uniform(rng, 0.004, 0.8))
+            if colour < 0.92
             else float(-rng.uniform(0.2, 0.7)),
             "tail": 0.0 if rng.random() < 0.6 else float(rng.uniform(2.5, 8.0)),
             # Setpoint changes per 500 points, and their size in noise spreads.
@@ -157,7 +157,7 @@ def sample_pattern(rng, rows, family):
             "spike_size": float(rng.choice([-1, 1]) * rng.uniform(4, 15)),
             "load_gain": float(rng.uniform(0, 4)),
             # Levels the reading can take within six noise spreads.
-            "levels": 0 if rng.random() < 0.4 else int(_log_uniform(rng, 3, 200)),
+            "levels": 0 if rng.random() < 0.3 else int(_log_uniform(rng, 3, 200)),
         }
     if family == "daily_load":
         return {
@@ -172,8 +172,11 @@ def sample_pattern(rng, rows, family):
             "week_shift": int(rng.integers(14)),
             "level_wander": 0.0 if rng.random() < 0.4 else _log_uniform(rng, 0.03, 0.5),
             "level_tau": _log_uniform(rng, 100, 2000),
-            "noise": _log_uniform(rng, 0.005, 0.5),
-            "noise_memory": 0.0 if rng.random() < 0.5 else float(rng.uniform(0.2, 0.9)),
+            "noise": _log_uniform(rng, 0.003, 0.4),
+            # One user is jagged from point to point; the sum of many is smooth.
+            "noise_memory": 0.0
+            if rng.random() < 0.3
+            else float(1 - _log_uniform(rng, 0.01, 0.6)),
             # Noise that grows with the load, as in the sum of many users.
             "noise_with_load": bool(rng.random() < 0.5),
         }
@@ -185,11 +188,11 @@ def sample_pattern(rng, rows, family):
             "power": float(rng.uniform(0.6, 2.5)),
             "skew": float(rng.uniform(-0.25, 0.25)),
             # Size of a day: a beta law, from mostly clear to mostly overcast.
-            "clear": [float(rng.uniform(0.8, 6)), float(rng.uniform(0.4, 3))],
-            "cloud_depth": float(rng.uniform(0, 0.95)),
-            "cloud_tau": _log_uniform(rng, 1, 40),
+            "clear": [float(rng.uniform(1, 12)), float(rng.uniform(0.3, 2.5))],
+            "cloud_depth": 0.0 if rng.random() < 0.3 else float(rng.uniform(0, 0.95)),
+            "cloud_tau": _log_uniform(rng, 2, 80),
             "season": float(rng.uniform(-0.6, 0.6)),
-            "noise": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 0.002, 0.05),
+            "noise": 0.0 if rng.random() < 0.75 else _log_uniform(rng, 0.002, 0.05),
         }
     if family == "duty_cycle":
         on = _log_uniform(rng, 3, 200)
@@ -229,17 +232,17 @@ def sample_pattern(rng, rows, family):
     if family == "smooth_drift":
         count = int(rng.integers(1, 4))
         return {
-            "taus": [_log_uniform(rng, 15, 800) for _ in range(count)],
+            "taus": [_log_uniform(rng, 20, 1500) for _ in range(count)],
             "scales": rng.uniform(0.3, 1.0, count).tolist(),
-            "smooth": bool(rng.random() < 0.7),
+            "smooth": bool(rng.random() < 0.85),
             # A program of ramps and holds on top of, or instead of, the wander.
             "program": bool(rng.random() < 0.4),
             "segment": _log_uniform(rng, 20, 500),
             "hold_share": float(rng.uniform(0.2, 0.8)),
             "program_scale": _log_uniform(rng, 0.5, 4),
             # Logged every so many points and joined by straight lines.
-            "sparse": 0 if rng.random() < 0.65 else int(_log_uniform(rng, 4, 100)),
-            "noise": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 0.001, 0.06),
+            "sparse": 0 if rng.random() < 0.55 else int(_log_uniform(rng, 4, 150)),
+            "noise": 0.0 if rng.random() < 0.65 else _log_uniform(rng, 0.0005, 0.04),
         }
     if family == "counts":
         return {
@@ -265,11 +268,11 @@ def sample_pattern(rng, rows, family):
             "dwell_spread": _log_uniform(rng, 0.05, 1.0),
             "step_spread": _log_uniform(rng, 0.05, 1.0),
             "recipe": int(rng.integers(2, 7)) if rng.random() < 0.5 else 0,
-            "ramp": 0.0 if rng.random() < 0.7 else float(rng.uniform(0.05, 0.6)),
-            "noise": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 0.003, 0.3),
+            "ramp": 0.0 if rng.random() < 0.5 else float(rng.uniform(0.05, 0.9)),
+            "noise": 0.0 if rng.random() < 0.3 else _log_uniform(rng, 0.003, 0.4),
             "noise_memory": 0.0
-            if rng.random() < 0.6
-            else float(rng.uniform(0.3, 0.95)),
+            if rng.random() < 0.4
+            else float(rng.uniform(0.3, 0.99)),
         }
     if family == "oscillation":
         kind = str(rng.choice(["harmonics", "pulse", "skewed"]))
@@ -277,7 +280,7 @@ def sample_pattern(rng, rows, family):
         bumps = int(rng.integers(1, 4))
         return {
             "period": _log_uniform(rng, 6, 160),
-            "wobble": _log_uniform(rng, 0.003, 0.15),
+            "wobble": _log_uniform(rng, 0.002, 0.08),
             "wobble_tau": float(rng.uniform(2, 12)),
             "kind": kind,
             "harmonics": (
@@ -292,8 +295,8 @@ def sample_pattern(rng, rows, family):
             "skew": float(rng.uniform(0.05, 0.45)),
             "size_spread": 0.0 if rng.random() < 0.3 else _log_uniform(rng, 0.02, 0.4),
             "size_wander": 0.0 if rng.random() < 0.5 else float(rng.uniform(0.1, 0.6)),
-            "baseline": 0.0 if rng.random() < 0.4 else _log_uniform(rng, 0.1, 1.5),
-            "noise": _log_uniform(rng, 0.003, 0.3),
+            "baseline": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 0.05, 1.0),
+            "noise": _log_uniform(rng, 0.002, 0.15),
         }
     raise ValueError(f"Unknown operational pattern: {family}")
 

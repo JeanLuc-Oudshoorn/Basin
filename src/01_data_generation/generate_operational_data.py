@@ -195,7 +195,7 @@ LIFECYCLE_TREND_PROBABILITY = 0.35
 MAX_DOMINANT_DRIVERS = 2  # None disables the excitation budget.
 PERSISTENT_HIDDEN_PROBABILITY = 0.8
 SHARED_STATE_PROBABILITY = 0.2  # One categorical mode drives multiple channels.
-PLANT_PROBABILITY = 0.6
+PLANT_PROBABILITY = 0.85
 # A totalizer (running total of a flow) only counts up, so it is drawn for
 # TRENDING tables instead, with probability PLANT_PROBABILITY x its weight share.
 PLANT_WEIGHTS = {
@@ -211,7 +211,7 @@ PLANT_WEIGHTS = {
     # Patterns of recorded operational data (operational_patterns.py). They
     # take the place of a unit: the SCM outcome is their demand.
     "held_value": 0.8,
-    "daily_load": 0.8,
+    "daily_load": 1.2,
     "daylight": 0.3,
     "duty_cycle": 0.4,
     "random_walk": 0.4,
