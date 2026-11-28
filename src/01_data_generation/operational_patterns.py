@@ -39,6 +39,16 @@ PATTERNS = (
     "staircase",
     "oscillation",
 )
+# Patterns that can ride on a trend (a growing load, a drifting setpoint),
+# with the usual spread of their signal: a trend is sized against it.
+TREND_SPREAD = {
+    "held_value": 1.3,
+    "daily_load": 0.4,
+    "duty_cycle": 0.3,
+    "smooth_drift": 0.8,
+    "staircase": 2.0,
+    "oscillation": 1.0,
+}
 # Patterns whose direction has a meaning: a count or a generation is not negative.
 UPRIGHT = ("daylight", "counts")
 # Laws of the independent changes of a random walk, all centred on zero.

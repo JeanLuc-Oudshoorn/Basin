@@ -254,6 +254,8 @@ def sample_observation(rng, columns, settings):
             spec["artifacts"][column["name"]] = [
                 _sample_artifact(rng, str(kind)) for kind in kinds
             ]
+        if column.get("exact"):
+            continue  # Recorded as it is: neither damped nor rounded.
         chance = settings.get("damping_probability", 0)
         if chance and rng.random() < chance:
             drawn = spec["artifacts"].setdefault(column["name"], [])

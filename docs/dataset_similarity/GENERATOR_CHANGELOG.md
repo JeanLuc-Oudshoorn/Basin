@@ -79,6 +79,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 8 | 7, plus a unit or pattern in 85% of the tables without a trend (was 60%) | 0.9453 | 0.9817 | 0.9454 | 0.9432 | 0.9108 | Kept (-0.0023) |
 | 9 | Damped readings in 30% of the columns | 0.9432 | 0.9854 | 0.9357 | 0.9432 | 0.9086 | Kept (-0.0033); unseen sources 0.685, breadth 0.95 |
 | 10 | Calm and busy stretches in the noise | 0.9441 | 0.9846 | 0.9396 | 0.9433 | 0.9088 | Kept on the second score (+0.0009); unseen sources 0.677, breadth 0.94 |
+| 11 | Patterns that ride on a trend in half of the trending tables; random walks recorded exactly | 0.9417 | 0.9810 | 0.9391 | 0.9422 | 0.9044 | Kept (-0.0024); unseen sources 0.678, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -192,3 +193,7 @@ Asked which real sources a classifier can still tell from generated series witho
 ### 10. Calm and busy stretches
 
 In real series large changes follow large changes far more than in generated ones (0.29 to 0.39 against 0.15 at the start), and a classifier that has not seen a source takes exactly that as the sign of a real series. The size of the noise can now wander: in half of the patterns, and as a fourth way for the noise of the causal model to change size (next to growing, cycling and changing once), with the share of nodes whose noise changes size raised from 20% to 35%. The first score did not move (+0.0009, within chance); the score on unseen sources fell from 0.685 to 0.678, which is why it is kept. Settings: `VOLATILITY_BURST_SHARE`, `VARIANCE_DYNAMICS_PROBABILITY`.
+
+### 11. Patterns on a trend, exact random walks
+
+Two additions. (1) The tables with a trend all came from the plain causal model, the kind of series the classifier tells from real ones most surely. In half of them a pattern now rides on the trend: a load that grows, a setpoint that drifts, an oscillation on a slope. The trend's whole change is 0.5 to 6 times the pattern's usual spread. Setting: `TRENDING_PATTERN_PROBABILITY`. (2) The target of a random-walk table is no longer passed through a response time or rounded to a stored resolution: both make the next change predictable from the last, and the point of these tables is that nothing is. The classifier told the generator's walks from the FakeBench-TS walks mainly by those two recording effects.

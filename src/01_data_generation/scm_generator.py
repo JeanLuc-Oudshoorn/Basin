@@ -94,6 +94,7 @@ try:
         sample_observation,
         sample_row_gaps,
     )
+    from .operational_patterns import TREND_SPREAD
     from .plant_mechanisms import (
         DEFAULT_PLANT_WEIGHTS,
         LIFECYCLE_KINDS,
@@ -112,6 +113,7 @@ except ImportError:
         sample_observation,
         sample_row_gaps,
     )
+    from operational_patterns import TREND_SPREAD
     from plant_mechanisms import (
         DEFAULT_PLANT_WEIGHTS,
         LIFECYCLE_KINDS,
@@ -474,6 +476,7 @@ class OperationalSCMGenerator:
         resolution_probability=0.0,
         damping_probability=0.0,
         volatility_burst_share=0.0,
+        trending_pattern_probability=0.0,
         reject_constant_outcome=False,
     ):
         settings = locals().copy()
@@ -575,6 +578,7 @@ class OperationalSCMGenerator:
             "resolution_probability",
             "damping_probability",
             "volatility_burst_share",
+            "trending_pattern_probability",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -2266,7 +2270,31 @@ class OperationalSCMGenerator:
             if share > 0 and (model["trend_free"] or r.random() < share):
                 model["plant"] = sample_plant(r, model["rows"], weights, next_index)
                 next_index += len(model["plant"]["exports"])
-        columns = [{"name": "outcome", "discrete": False}]
+        if (
+            not model["trend_free"]
+            and "plant" not in model
+            and self.trending_pattern_probability
+            and r.random() < self.trending_pattern_probability
+        ):
+            # A pattern that rides on the table's trend: a load that grows, a
+            # setpoint that drifts. The trend's whole change is sized against
+            # the pattern's usual spread.
+            weights = {
+                family: self.plant_weights[family]
+                for family in TREND_SPREAD
+                if self.plant_weights.get(family, 0) > 0
+            }
+            if weights:
+                plant = sample_plant(r, model["rows"], weights, next_index)
+                plant["trend_gain"] = TREND_SPREAD[plant["family"]] * self._log_uniform(
+                    0.5, 6
+                )
+                model["plant"] = plant
+                next_index += len(plant["exports"])
+        # A random walk stays one in the record: a response time would make
+        # its next change predictable from its last.
+        walk = model.get("plant", {}).get("family") == "random_walk"
+        columns = [{"name": "outcome", "discrete": False, "exact": walk}]
         columns += [
             {"name": n["name"], "discrete": n["kind"] not in ("process", "formula")}
             for n in nodes
@@ -3120,6 +3148,15 @@ class OperationalSCMGenerator:
                 * plant["output_gain"]
                 * channels[plant["outcome_channel"]]
             )
+            peak = float(np.abs(trend_values).max())
+            if plant.get("trend_gain") and peak > 0:
+                physical = physical + (
+                    outcome["scale"]
+                    * abs(plant["output_gain"])
+                    * plant["trend_gain"]
+                    * trend_values
+                    / peak
+                )
         data = {"time_index": np.arange(rows), "outcome": physical[warmup:]}
         for node in model["nodes"]:
             if node["visible"]:

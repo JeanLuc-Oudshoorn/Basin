@@ -236,6 +236,8 @@ RESOLUTION_PROBABILITY = 0.6
 DAMPING_PROBABILITY = 0.3
 # Among the nodes whose noise changes size: the share in which calm and busy stretches come and go (the others grow, cycle or change once).
 VOLATILITY_BURST_SHARE = 0.5
+# Among the tables with a trend: the share in which an operational pattern rides on the trend (a growing load, a drifting setpoint).
+TRENDING_PATTERN_PROBABILITY = 0.5
 # Resample tables whose outcome never moves (or moves by less than float32 can
 # hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
 REJECT_CONSTANT_OUTCOME = True
@@ -361,6 +363,7 @@ def generator_settings():
         resolution_probability=RESOLUTION_PROBABILITY,
         damping_probability=DAMPING_PROBABILITY,
         volatility_burst_share=VOLATILITY_BURST_SHARE,
+        trending_pattern_probability=TRENDING_PATTERN_PROBABILITY,
         reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
 
