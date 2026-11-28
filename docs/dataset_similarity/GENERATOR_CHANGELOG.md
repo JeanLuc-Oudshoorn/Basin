@@ -251,3 +251,55 @@ processes (two runs of 3,000 tables each).
 ### 16. Sums of two patterns
 
 Recorded signals are often sums: a daily load on a drifting level, a held value with a ripple. A second pattern, 0.15 to 1 times the size of the first, was added in a quarter of the pattern tables. Against the mean of two runs of the current generator (0.9362; unseen sources 0.658) it scored 0.9353 and 0.661: no difference. Discarded. After changes 13 to 16 the picture is that further kinds and shares no longer move either score beyond chance.
+
+### Check after change 12: does Basin, as trained, forecast the new kinds well?
+
+The scores above say the new series look more like real ones. They do not say
+that training on them will help. A cheaper question can be answered without
+training: how does the Basin that exists, trained on the old generator,
+forecast the new kinds, compared with Chronos-2 and Timestral? If Basin is as
+good on them as on its own tables, they add little; if it falls behind, they
+are what its training lacked.
+
+13,053 tables of the generator after change 12 and 4,885 of the generator as
+it was, each with a history of 512 points and the 112 points after it, target
+only, no covariates. MASE of the median forecast, median over the tables of a
+kind; lower is better. "Against the others" is Basin's error over the
+geometric mean of the other two, per table (below 1: Basin ahead).
+
+| Kind of table | Tables | Basin | Chronos-2 | Timestral | Naive | Basin against the others | Basin best of the three |
+|---|---|---|---|---|---|---|---|
+| **Generator as it was, all tables** | 4,885 | **2.97** | 3.36 | 3.19 | 5.14 | 0.96 | 47% |
+| **Generator after change 12, all tables** | 13,053 | 3.31 | 3.51 | **3.26** | 5.57 | 1.00 | 35% |
+| Plain causal model | 3,450 | **3.40** | 3.79 | 3.70 | 5.50 | 0.97 | 46% |
+| Earlier closed-loop units (nine families) | 1,539 | | | | | 0.81 to 0.98 | 32% to 57% |
+| Duty cycle | 400 | 3.19 | 3.76 | **3.14** | 6.92 | 0.99 | 31% |
+| Resource use | 586 | 1.72 | 1.73 | **1.62** | 2.49 | 1.00 | 30% |
+| Held value | 1,097 | 2.24 | 2.29 | **2.24** | 2.60 | 1.00 | 31% |
+| Staircase | 456 | 7.85 | 8.44 | **7.46** | 11.99 | 1.00 | 33% |
+| Random walk | 490 | 6.24 | 6.31 | 6.28 | **6.01** | 1.01 | 33% |
+| Oscillation | 213 | 1.64 | 1.81 | **1.60** | 4.11 | 1.01 | 32% |
+| Counts | 587 | 0.91 | 0.88 | **0.85** | 1.11 | 1.01 | 20% |
+| Smooth drift | 827 | 13.41 | 13.51 | **12.91** | 14.59 | 1.01 | 35% |
+| Daily load | 1,377 | 2.09 | 1.95 | **1.83** | 4.90 | 1.07 | 21% |
+| Daylight | 329 | 1.48 | 1.39 | **1.29** | 5.47 | 1.12 | 16% |
+
+- **On tables of the old generator Basin leads**, as on the holdout set: its
+  error is 4% below the other two, and it is the best of the three on 47% of
+  the tables.
+- **On the new generator it has lost that lead.** On the plain causal model
+  and the earlier units it is still ahead; on the new patterns it is level
+  at best.
+- **It is behind on exactly the kinds where it is behind on real data.** Daily
+  load (7% behind) and daylight (12% behind) are the generated counterparts of
+  electricity and solar, where Basin trailed most on IND-Eval (24% and 14%
+  behind the best model). The generator can now make the series that expose
+  the weakness, which it could not before.
+- **Random walks:** no model beats the naive forecast, as it should be, and
+  Basin is no worse than the other two.
+
+This is the strongest indication so far that training on the new generator
+should narrow the gap on real data, and that daily cycles are where most is
+to be gained. It is still an indication: only a training run can show it.
+The comparison used no covariates, and Basin's lead on its own tables is
+larger with them.
