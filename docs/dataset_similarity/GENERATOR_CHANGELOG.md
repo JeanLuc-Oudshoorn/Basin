@@ -148,3 +148,34 @@ neighbouring distinct values. Under this final measure the baseline is
 0.9666 (two runs: 0.9663, 0.9668) and the state after change 8 is 0.9465.
 Rows 9 and later use it; the table at the end of this document gives every
 kept change under the final measure.
+
+### Note after change 8: a second score, on sources the classifier has not seen
+
+Per pattern and per mechanism, the share of real series that score above a
+generated series was tabulated. Even the kinds that look most real are told
+from about nine in ten real series. The reason is that the real groups are
+few sources, each a narrow cluster (one cycle length, one resolution, one
+kind of noise), and a classifier that sees windows of a source in training
+recognises that source in the test fold. A generator can only win that
+contest by making series of exactly those sources, which is what should not
+happen: the 40 or so sources at hand do not describe all operational data.
+
+So every trial now also reports the AUC when **whole datasets are held
+out**: the classifier is trained on some real sources and has to tell real
+series of *other* sources from generated ones. It can no longer recognise a
+source; it has to rely on what real sources have in common. On this score
+the baseline is 0.801 and the state after change 8 is 0.693:
+
+| Group | Baseline | After change 8 |
+|---|---|---|
+| FakeBench-TS (19 kinds of steps) | 0.987 | 0.977 |
+| Operational benchmarks (4 datasets) | 0.561 | 0.510 |
+| IND-Eval (8 sources) | 0.790 | 0.554 |
+| Public datasets (21 datasets) | 0.865 | 0.730 |
+| **Mean** | **0.801** | **0.693** |
+
+Against real sources it has not seen, the classifier now hardly tells
+IND-Eval and the operational benchmarks from the generator's series. The
+first score is still the one a change is judged by, as agreed; the second
+one is the check that a gain on the first is not specialisation. A change
+that lowers the first score while raising the second is not kept.
