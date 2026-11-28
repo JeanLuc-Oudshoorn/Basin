@@ -12,6 +12,7 @@ from uuid import uuid4
 import numpy as np
 import torch
 from loguru import logger
+from startup_index import light
 from training_log import emit_training_event
 from transform import ROOT, location, signature
 
@@ -178,8 +179,7 @@ def checkpoint_identity(model, records, validation_records, config, optimizer):
             )
         )
         for record in ordered:
-            if hasattr(record, "materialize"):
-                record = record.materialize()
+            record = light(record)  # a corpus handle: from the start-up index
             digest.update(
                 json.dumps(
                     {
@@ -217,8 +217,7 @@ def ordered_record_digest(records, *, include_storage=False):
     first = True
     for record in records:
         storage_key = getattr(record, "storage_key", None) if include_storage else None
-        if hasattr(record, "materialize"):
-            record = record.materialize()
+        record = light(record)
         if not first:
             digest.update(b"\n")
         digest.update(str(record.get("id", record["source"])).encode())
