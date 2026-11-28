@@ -88,8 +88,13 @@ def _log_uniform(rng, low, high):
 
 
 def _cycle(rng, rows, cycles=CALENDAR_CYCLES, free=0.15):
-    """A cycle length: mostly from the calendar, sometimes any length."""
-    longest = max(8.0, rows / 3)
+    """A cycle length: mostly from the calendar, sometimes any length.
+
+    A table may hold as little as one and a half repetitions: a day of
+    5-minute readings is 288 points, and a history is often shorter than
+    three days. A model has to learn a cycle from that little.
+    """
+    longest = max(8.0, rows / 1.5)
     if rng.random() < free:
         return _log_uniform(rng, 6, min(400.0, longest))
     lengths = [p for p in cycles if p <= longest] or [min(cycles)]

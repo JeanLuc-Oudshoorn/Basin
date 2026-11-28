@@ -85,6 +85,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 14 | An eleventh pattern (a variable that is knocked off its level and recovers) and a pattern on 70% of the trends | 0.9351 | 0.9819 | 0.9267 | 0.9376 | 0.8943 | Discarded (-0.0014); unseen sources 0.655, breadth 0.93 |
 | 15 | More daily cycles: daily load in 20% of the tables (was 13%), a daily profile more often in counts and resource use | 0.9387 | 0.9838 | 0.9351 | 0.9412 | 0.8948 | Discarded (+0.0022); unseen sources 0.660, breadth 0.94 |
 | 16 | A second pattern added to the first in a quarter of the pattern tables | 0.9353 | 0.9806 | 0.9305 | 0.9393 | 0.8909 | Discarded (-0.0009); unseen sources 0.661, breadth 0.94 |
+| 17 | Cycles of which a table shows as little as one and a half repetitions (was three) | 0.9365 | 0.9809 | 0.9313 | 0.9378 | 0.8958 | Kept for the forecasting check, not the score (+0.0003); unseen sources 0.658, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -272,7 +273,7 @@ geometric mean of the other two, per table (below 1: Basin ahead).
 | **Generator as it was, all tables** | 4,885 | **2.97** | 3.36 | 3.19 | 5.14 | 0.96 | 47% |
 | **Generator after change 12, all tables** | 13,053 | 3.31 | 3.51 | **3.26** | 5.57 | 1.00 | 35% |
 | Plain causal model | 3,450 | **3.40** | 3.79 | 3.70 | 5.50 | 0.97 | 46% |
-| Earlier closed-loop units (nine families) | 1,539 | | | | | 0.81 to 0.98 | 32% to 57% |
+| Earlier closed-loop units (nine families) | 1,539 | | | | | 0.81 to 1.00 | 32% to 57% |
 | Duty cycle | 400 | 3.19 | 3.76 | **3.14** | 6.92 | 0.99 | 31% |
 | Resource use | 586 | 1.72 | 1.73 | **1.62** | 2.49 | 1.00 | 30% |
 | Held value | 1,097 | 2.24 | 2.29 | **2.24** | 2.60 | 1.00 | 31% |
@@ -303,3 +304,28 @@ should narrow the gap on real data, and that daily cycles are where most is
 to be gained. It is still an indication: only a training run can show it.
 The comparison used no covariates, and Basin's lead on its own tables is
 larger with them.
+
+**What about daily cycles Basin misses: long ones.** A second sample of 13,069
+tables kept what the generator drew. Basin's error against the other two, by
+the length of the cycle:
+
+| Cycle length (points) | Daily load | Daylight | Any table whose history shows a strong cycle |
+|---|---|---|---|
+| Up to 30 | 1.04 to 1.07 | 1.08 | 1.01 |
+| 30 to 110 | 1.04 to 1.06 | 1.08 | 1.00 to 1.02 |
+| 110 to 170 | 1.17 | 1.28 | 1.10 |
+| Over 170 | 1.21 | 1.80 | (too few repetitions to detect) |
+
+With a history of 512 points, a cycle of 144 points repeats three and a half
+times and one of 288 points less than twice. Chronos-2 and Timestral continue
+such a cycle from that little; Basin does not. That fits stage 11, where
+Basin's gap was largest on periodic series with a short history. In the old
+generator a cycle always repeated at least three times within a table, and
+strong cycles were rare, so Basin has hardly seen a cycle of which only two
+repetitions are visible. On the other new patterns the cycle length, the
+resolution, the noise and the other drawn parameters make no difference to
+Basin's standing: it is level with the other two throughout.
+
+### 17. Few repetitions of a long cycle
+
+This change follows from the forecasting check above, not from the score. The cyclic patterns drew their cycle length so that a table held at least three repetitions; now one and a half suffice. A table of 500 rows can hold a day of 5-minute readings (288 points), as real histories do. The score is unchanged (0.9365 against 0.9362; unseen sources 0.658 against 0.658), as expected: it concerns tables shorter than 900 rows, few of which are long enough to be scored. It is kept because it is an addition, costs nothing on either score, and the forecasting check points at exactly this as what Basin has not learned.
