@@ -51,3 +51,9 @@ wandb/
 /docs/**/*.csv
 /docs/**/*.log
 /docs/time_benchmark/**/*.png
+
+# Public benchmark datasets are downloaded, not versioned.
+/benchmarks/CATS Dataset/
+/benchmarks/UCR_TimeSeriesAnomalyDatasets2021/
+/benchmarks/cloud-monitoring-dataset/
+/benchmarks/micromill-caster/
