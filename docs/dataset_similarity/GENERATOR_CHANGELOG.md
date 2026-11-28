@@ -84,6 +84,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 13 | Calendar cycle lengths and a size of its own for every cycle, in the seasons of the causal model | 0.9366 | 0.9815 | 0.9297 | 0.9386 | 0.8966 | Discarded (+0.0001); unseen sources 0.656, breadth 0.94 |
 | 14 | An eleventh pattern (a variable that is knocked off its level and recovers) and a pattern on 70% of the trends | 0.9351 | 0.9819 | 0.9267 | 0.9376 | 0.8943 | Discarded (-0.0014); unseen sources 0.655, breadth 0.93 |
 | 15 | More daily cycles: daily load in 20% of the tables (was 13%), a daily profile more often in counts and resource use | 0.9387 | 0.9838 | 0.9351 | 0.9412 | 0.8948 | Discarded (+0.0022); unseen sources 0.660, breadth 0.94 |
+| 16 | A second pattern added to the first in a quarter of the pattern tables | 0.9353 | 0.9806 | 0.9305 | 0.9393 | 0.8909 | Discarded (-0.0009); unseen sources 0.661, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -246,3 +247,7 @@ are easier to tell apart in general: more of a series shows.
 
 Generation is as fast as before: 94 tables per second against 96 with ten
 processes (two runs of 3,000 tables each).
+
+### 16. Sums of two patterns
+
+Recorded signals are often sums: a daily load on a drifting level, a held value with a ripple. A second pattern, 0.15 to 1 times the size of the first, was added in a quarter of the pattern tables. Against the mean of two runs of the current generator (0.9362; unseen sources 0.658) it scored 0.9353 and 0.661: no difference. Discarded. After changes 13 to 16 the picture is that further kinds and shares no longer move either score beyond chance.
