@@ -471,6 +471,7 @@ class OperationalSCMGenerator:
         missingness_weights=None,
         nonseasonal_wander_probability=0.0,
         seasonal_wander_probability=0.0,
+        resolution_probability=0.0,
         reject_constant_outcome=False,
     ):
         settings = locals().copy()
@@ -569,6 +570,7 @@ class OperationalSCMGenerator:
             "missingness_probability",
             "nonseasonal_wander_probability",
             "seasonal_wander_probability",
+            "resolution_probability",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -2274,6 +2276,7 @@ class OperationalSCMGenerator:
             self.redundant_sensor_probability
             or self.measurement_probability
             or self.missingness_probability
+            or self.resolution_probability
         ):
             observation = sample_observation(
                 r,
@@ -2282,6 +2285,7 @@ class OperationalSCMGenerator:
                     "next_index": next_index,
                     "redundant_sensor_probability": self.redundant_sensor_probability,
                     "measurement_probability": self.measurement_probability,
+                    "resolution_probability": self.resolution_probability,
                     "artifact_weights": self.artifact_weights,
                     "missingness_probability": self.missingness_probability,
                     "missingness_weights": self.missingness_weights,

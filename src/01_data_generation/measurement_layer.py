@@ -50,6 +50,9 @@ _ORDER = (
 )
 _STRUCTURAL = ("periodic", "multirate", "late_start", "early_end", "outage", "censor")
 PROTECTED_TAIL = 80  # Final outcome rows always observed: evaluation labels.
+# Stored resolution: distinct levels over a signal's range, log-uniform. From a
+# status-like reading with a handful of levels to one with five digits.
+RESOLUTION_LEVELS = (6, 20000)
 
 
 def _log_uniform(rng, low, high):
@@ -244,6 +247,15 @@ def sample_observation(rng, columns, settings):
             spec["artifacts"][column["name"]] = [
                 _sample_artifact(rng, str(kind)) for kind in kinds
             ]
+        chance = settings.get("resolution_probability", 0)
+        if chance and rng.random() < chance:
+            # A historian stores a reading with a fixed number of digits. This
+            # is the normal state of recorded data, not a fault of the sensor.
+            drawn = spec["artifacts"].setdefault(column["name"], [])
+            low, high = RESOLUTION_LEVELS
+            levels, phase = _log_uniform(rng, low, high), float(rng.uniform(0, 1))
+            if not any(a["kind"] == "quantize" for a in drawn):
+                drawn.append({"kind": "quantize", "levels": levels, "phase": phase})
     chance = settings["missingness_probability"]
     if chance and rng.random() < chance:
         spec["missing"].append(
