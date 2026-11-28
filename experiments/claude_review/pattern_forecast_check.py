@@ -48,7 +48,13 @@ def draw(jobs):
         kind = plant.get("family", "plain causal model")
         if kind != "plain causal model" and plant.get("trend_gain"):
             kind += " on a trend"
-        rows.append((kind, history, values[CONTEXT:]))
+        drawn = {
+            key: value
+            for key, value in plant.items()
+            if isinstance(value, (int, float, str, bool))
+        }
+        drawn.update(profile_hold=(plant.get("profile") or {}).get("hold"))
+        rows.append((kind, history, values[CONTEXT:], json.dumps(drawn)))
     return rows
 
 
@@ -68,7 +74,9 @@ def sample(folder, tables, seed):
     folder.mkdir(parents=True, exist_ok=True)
     np.save(folder / "contexts.npy", np.stack([r[1] for r in rows]).astype(np.float32))
     np.save(folder / "futures.npy", np.stack([r[2] for r in rows]).astype(np.float32))
-    pd.DataFrame({"kind": [r[0] for r in rows]}).to_parquet(folder / "kinds.parquet")
+    pd.DataFrame(
+        {"kind": [r[0] for r in rows], "drawn": [r[3] for r in rows]}
+    ).to_parquet(folder / "kinds.parquet")
     print(f"{len(rows):,} of {tables:,} tables kept in {folder}")
 
 
