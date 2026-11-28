@@ -79,7 +79,7 @@ class HoldoutProtocolTests(unittest.TestCase):
                     return_value={"prophet": np.zeros(64), "naive": np.zeros(64)},
                 ),
                 patch("holdout.write_json"),
-                patch.object(pd.DataFrame, "to_parquet"),
+                patch("holdout.write_table_points"),
             ):
                 evaluate_holdout(model, [record] * 201, config)
             updates = [

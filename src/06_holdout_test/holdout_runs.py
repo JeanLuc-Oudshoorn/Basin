@@ -39,6 +39,22 @@ def new_holdout_run(config, *, epoch=None, step=None):
     return directory, dict(config, paths=paths)
 
 
+def resume_holdout_run(config, name):
+    """The folder of an interrupted run, and a config that continues it.
+
+    The stage then reads the tables that run saved and forecasts only the
+    others. A finished run is never reopened.
+    """
+    directory = holdout_directory(config) / name
+    if not directory.is_dir():
+        raise FileNotFoundError(f"No holdout run to resume at {directory}")
+    if (directory / COMPLETED).is_file():
+        raise ValueError(f"{directory} is a finished run; there is nothing to resume")
+    paths = dict(config["paths"], holdout_test=str(directory))
+    holdout = dict(config.get("holdout", {}), resume=True)
+    return directory, dict(config, paths=paths, holdout=holdout)
+
+
 def holdout_runs(config):
     """Folders of completed runs, oldest first.
 

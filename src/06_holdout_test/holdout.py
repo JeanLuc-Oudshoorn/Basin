@@ -9,6 +9,7 @@ from time import perf_counter
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from benchmarks import (
@@ -18,7 +19,11 @@ from benchmarks import (
     select_latency_tables,
     select_plot_tables,
 )
-from error_distribution import write_error_distribution, write_latency_distribution
+from error_distribution import (
+    table_mase_tails,
+    write_error_distribution,
+    write_latency_distribution,
+)
 from fast_inference import inference_execution_summary
 from graph_profiles import configure_holdout_graph_profiles
 from holdout_runs import holdout_directory
@@ -183,11 +188,108 @@ def mase_scale(history, lag=1):
     return scale if scale > 0 else np.nan
 
 
+class PredictionPoints:
+    """Every forecast point of a run, without keeping them as Python objects.
+
+    A full holdout has tens of millions of points; held as one dict each they
+    need more memory than the machine has. Each table's points are appended to
+    `test_predictions.parquet` as the table finishes, and only the numeric
+    columns the pooled scores need stay in memory, as arrays.
+    """
+
+    def __init__(self, path, methods, tables_per_write=200):
+        self.path, self.rows, self.tables_per_write = path, 0, tables_per_write
+        names = ["actual", "metric_weight", "mase_scale", "context_scale"]
+        names += ["normalized_pinball", "forecast_token", *methods]
+        self.kept = {name: [] for name in names}
+        self.pending, self.writer, self.schema = [], None, None
+
+    def add(self, frame):
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        if self.writer is None:
+            self.schema = table.schema
+            self.writer = pq.ParquetWriter(self.path, self.schema)
+        self.pending.append(table.select(self.schema.names).cast(self.schema))
+        if len(self.pending) >= self.tables_per_write:
+            self.write_pending()
+        for name, arrays in self.kept.items():
+            kind = np.int16 if name == "forecast_token" else np.float64
+            # A copy: a view would keep the whole table frame alive.
+            arrays.append(np.array(frame[name], dtype=kind))
+        self.rows += len(frame)
+
+    def write_pending(self):
+        if self.pending:
+            self.writer.write_table(pa.concat_tables(self.pending))
+            self.pending.clear()
+
+    def close(self):
+        """Finish the file (also after a failure, so it is not left open)."""
+        if self.writer is not None:
+            self.write_pending()
+            self.writer.close()
+            self.writer = None
+
+    def columns(self):
+        """The kept columns of all points, one array each; empties the store."""
+        return {name: np.concatenate(self.kept.pop(name)) for name in list(self.kept)}
+
+
+def write_table_points(frame, path):
+    """Whole or not at all: a resumed run trusts every table file it finds."""
+    partial = path.with_name(path.name + ".partial")
+    frame.to_parquet(partial, index=False)
+    partial.replace(path)
+
+
+def saved_table_points(path, record, horizon, methods):
+    """The points an interrupted run saved for this table; None if unusable."""
+    try:
+        frame = pd.read_parquet(path)
+    except (OSError, ValueError):
+        return None  # missing, or cut off while it was written
+    if (
+        frame.empty
+        or len(frame) % horizon
+        or set(methods) - set(frame.columns)
+        or set(frame.source) != {record["source"]}
+        or set(frame.forecast_horizon) != {horizon}
+    ):
+        raise ValueError(
+            f"{path} does not belong to this holdout run: it holds another "
+            "table, horizon or set of models. Resume with the settings the "
+            "run was started with."
+        )
+    return frame
+
+
+def by_forecast_token(columns):
+    """Scores of every forecast token that has an observed value."""
+    result = {}
+    for token in np.unique(columns["forecast_token"]):
+        chosen = columns["forecast_token"] == token
+        group = {name: values[chosen] for name, values in columns.items()}
+        if np.isfinite(group["actual"]).any():
+            result[str(int(token))] = summarize(group)
+    return result
+
+
 def summarize(frame):
-    """Lead-weighted scores; unobserved future values never enter metrics."""
-    frame = frame[np.isfinite(frame.actual)].copy()
-    result = {"observations": len(frame)}
-    weights = frame.get("metric_weight", pd.Series(1.0, index=frame.index)).to_numpy()
+    """Lead-weighted scores; unobserved future values never enter metrics.
+
+    `frame` is a DataFrame or a dict of equally long arrays. Columns are taken
+    one at a time, so no second copy of all points is ever made.
+    """
+    observed = np.isfinite(np.asarray(frame["actual"]))
+
+    def column(name, missing):
+        if name not in frame:
+            return np.full(int(observed.sum()), missing)
+        return np.asarray(frame[name])[observed]
+
+    result = {"observations": int(observed.sum())}
+    weights = column("metric_weight", 1.0)
+    actual = column("actual", np.nan)
 
     def mean(values, mask=None):
         if mask is None:
@@ -198,12 +300,13 @@ def summarize(frame):
             else None
         )
 
-    scales = frame.get("mase_scale", pd.Series(np.nan, index=frame.index)).to_numpy()
+    scales = column("mase_scale", np.nan)
     valid = np.isfinite(scales) & (scales > 0)
+    context_scale = column("context_scale", np.nan)
     for method in ("rwkv", *BENCHMARK_MODELS):
         if method not in frame:
             continue
-        error = frame[method].to_numpy() - frame.actual.to_numpy()
+        error = column(method, np.nan) - actual
         result[method] = {
             "mase": mean(np.abs(error) / np.where(valid, scales, 1), valid)
             if valid.any()
@@ -212,7 +315,7 @@ def summarize(frame):
             "mase_undefined_observations": int((~valid).sum()),
             "rmse": float(np.sqrt(mean(error**2))),
             "mae": mean(np.abs(error)),
-            "normalized_rmse": float(np.sqrt(mean((error / frame.context_scale) ** 2))),
+            "normalized_rmse": float(np.sqrt(mean((error / context_scale) ** 2))),
         }
         values = np.abs(error[valid]) / scales[valid]
         for label, q in (
@@ -221,7 +324,7 @@ def summarize(frame):
             ("absolute_scaled_error_p90", 0.9),
         ):
             result[method][label] = weighted_quantile(values, weights[valid], q)
-    result["rwkv"]["normalized_pinball"] = mean(frame.normalized_pinball)
+    result["rwkv"]["normalized_pinball"] = mean(column("normalized_pinball", np.nan))
     return result
 
 
@@ -258,8 +361,14 @@ def classical_request(method, history, targets, covariates, horizon, config):
 
 @torch.inference_mode()
 def evaluate_holdout(model, records, config):
-    """Never fit the neural model on these sources, including their initial context."""
+    """Never fit the neural model on these sources, including their initial context.
+
+    With `holdout.resume` set (see `resume_holdout_run`) the run folder is that
+    of an interrupted run: tables it saved are read back and scored again, and
+    only the others are forecast.
+    """
     settings = config.get("holdout", {})
+    resume = bool(settings.get("resume", False))
     probabilities = evaluation_weights(config)
     percentiles = settings.get("percentiles", [1, 25, 50, 75, 99])
     lag = settings.get("mase_seasonality", 1)
@@ -305,6 +414,13 @@ def evaluate_holdout(model, records, config):
     # Latency is measured on a sample of the tables, one request at a time.
     # Every other table is forecast in one call per model for all its origins.
     timed_tables, latency_selection = select_latency_tables(records, config)
+    if resume:
+        earlier = json.loads((directory / "latency_selection.json").read_text("utf-8"))
+        if earlier != latency_selection:
+            raise ValueError(
+                f"{directory} was started with other tables or latency settings; "
+                "it cannot be resumed with these"
+            )
     write_json(directory / "latency_selection.json", latency_selection, level="DEBUG")
     table_order = sorted(range(len(records)), key=lambda i: (i not in timed_tables, i))
     cap = min(model.config.context_length, config["data"]["context_length"])
@@ -320,18 +436,70 @@ def evaluate_holdout(model, records, config):
     graph_plan = configure_holdout_graph_profiles(model, records, config, timed_tables)
     if graph_plan is not None:
         logger.info("Holdout graph profile admission: {}", graph_plan)
-    rows, origin_metrics, table_metrics = [], [], []
+    points = PredictionPoints(directory / "test_predictions.parquet", methods)
+    origin_metrics, table_metrics = [], []
     origins_without_history = origins_without_labels = unscored_tables = 0
     was_training = model.training
     model.eval()
     started = perf_counter()
     completed_origins = 0
-    latency_cursor = 0
     latency_summary = {}
     latency_journal = directory / "request_latencies.jsonl"
-    latency_journal.write_text("", encoding="utf-8")
     forecast_tokens = len(probabilities)
     horizon = forecast_tokens * patch
+    # Tables an interrupted run finished: their points are on disk. A timed
+    # table also needs its timings and a plotted table its plots; a table
+    # missing either is forecast again.
+    saved_tables, restored_tables, seconds_before_resume = set(), 0, 0.0
+    if resume:
+        if "prophet" in benchmarks.names:
+            raise ValueError(
+                "A holdout run with Prophet cannot be resumed: the saved tables "
+                "do not record which covariates Prophet used"
+            )
+        saved_tables = {
+            int(path.stem.rsplit("_", 1)[1])
+            for path in directory.glob("test_table_*.parquet")
+        }
+        journal_rows = (
+            [
+                json.loads(line)
+                for line in latency_journal.read_text("utf-8").splitlines()
+                if line.strip()
+            ]
+            if latency_journal.is_file()
+            else []
+        )
+        with_timings = {row["table_index"] for row in journal_rows}
+        saved_tables -= {i for i in timed_tables if i not in with_timings}
+        saved_tables -= {
+            i
+            for i in plot_indices & saved_tables
+            if not all(
+                (directory / f"test_table_{i:03d}_target_{j}.html").is_file()
+                for j in range(len(records[i]["targets"]))
+            )
+        }
+        # The models are warmed again when a timed table follows: the first
+        # request of a new process is as cold as that of the first one.
+        timer.rows = [row for row in journal_rows if row["table_index"] in saved_tables]
+        progress_path = directory / "test_metrics_progress.json"
+        if progress_path.is_file():
+            seconds_before_resume = float(
+                json.loads(progress_path.read_text("utf-8")).get("elapsed_seconds", 0.0)
+            )
+        logger.info(
+            "HOLDOUT resume: {:,} of {:,} tables are saved in {} and are not "
+            "forecast again ({} of earlier work)",
+            len(saved_tables),
+            len(records),
+            directory,
+            duration(seconds_before_resume),
+        )
+    latency_journal.write_text(
+        "".join(json.dumps(row) + "\n" for row in timer.rows), encoding="utf-8"
+    )
+    latency_cursor = len(timer.rows)
     block = {"prediction_patches": forecast_tokens} if forecast_tokens > 1 else {}
 
     def timed_forecasts(context, history, request, targets, covariates, shift):
@@ -402,11 +570,77 @@ def evaluate_holdout(model, records, config):
         len(records) - len(timed_tables),
     )
     batched_started, tables_done, batched_done = None, 0, 0
+    timed_started, timed_done = None, 0
     try:
         for table_index in table_order:
             record = records[table_index]
             tables_done += 1
-            if table_index not in timed_tables:
+            table_path = directory / f"test_table_{table_index:03d}.parquet"
+            table_frame = (
+                saved_table_points(table_path, record, horizon, methods)
+                if table_index in saved_tables
+                else None
+            )
+            if table_frame is not None:
+                # Score the saved points exactly as when they were made.
+                source_rows = (
+                    record["source_rows"]
+                    if "source_rows" in record
+                    else pq.ParquetFile(ROOT / record["source"]).metadata.num_rows
+                )
+                origins_without_history += (
+                    len(
+                        sampled_origins(
+                            source_rows,
+                            patch,
+                            percentiles,
+                            prediction_patches=len(probabilities),
+                        )
+                    )
+                    - table_frame.origin.nunique()
+                )
+                completed_origins += table_frame.origin.nunique()
+                # One request of `horizon` points per origin and target.
+                for first in range(0, len(table_frame), horizon):
+                    request = table_frame.iloc[first : first + horizon]
+                    if not np.isfinite(request.actual).any():
+                        origins_without_labels += 1
+                        continue
+                    origin_metrics.append(
+                        {
+                            "source": record["source"],
+                            "target": str(request.target.iloc[0]),
+                            "origin": int(request.origin.iloc[0]),
+                            "forecast_tokens": forecast_tokens,
+                            "forecast_horizon": horizon,
+                            **summarize(request),
+                        }
+                    )
+                points.add(table_frame)
+                restored_tables += 1
+                if np.isfinite(table_frame.actual).any():
+                    table_metrics.append(
+                        {
+                            "source": record["source"],
+                            "origins": int(table_frame.origin.nunique()),
+                            **summarize(table_frame),
+                        }
+                    )
+                else:
+                    unscored_tables += 1
+                if restored_tables % 2000 == 0 or restored_tables == len(saved_tables):
+                    logger.info(
+                        "HOLDOUT resume: read {:,}/{:,} saved tables | elapsed {}",
+                        restored_tables,
+                        len(saved_tables),
+                        duration(perf_counter() - started),
+                    )
+                continue
+            if table_index in timed_tables:
+                if timed_started is None:
+                    timed_started = perf_counter()
+                timed_done += 1
+            else:
                 if batched_started is None:
                     batched_started = perf_counter()
                 batched_done += 1
@@ -570,14 +804,13 @@ def evaluate_holdout(model, records, config):
                     )
                 completed_origins += 1
             table_frame = pd.DataFrame(table_rows)
-            rows.extend(table_rows)
+            del table_rows
+            points.add(table_frame)
             if not np.isfinite(table_frame.actual).any():
                 # Forecast everywhere, observed nowhere: predictions are saved,
                 # but the table has no score.
                 unscored_tables += 1
-                table_frame.to_parquet(
-                    directory / f"test_table_{table_index:03d}.parquet", index=False
-                )
+                write_table_points(table_frame, table_path)
                 continue
             metric = {
                 "source": record["source"],
@@ -585,9 +818,6 @@ def evaluate_holdout(model, records, config):
                 **summarize(table_frame),
             }
             table_metrics.append(metric)
-            table_frame.to_parquet(
-                directory / f"test_table_{table_index:03d}.parquet", index=False
-            )
             if table_index in plot_indices:
                 for target in targets:
                     target_index = targets.index(target)
@@ -601,13 +831,15 @@ def evaluate_holdout(model, records, config):
                         config,
                         table_index,
                     )
-            elapsed = perf_counter() - started
+            # After the plots: a saved table is a finished table.
+            write_table_points(table_frame, table_path)
+            elapsed = seconds_before_resume + perf_counter() - started
             completed = len(table_metrics)
             # The timed tables come first and are slower: until they are done
             # the estimate assumes their pace for every table (an upper bound).
             timing = batched_started is None
             pace = (
-                elapsed / tables_done
+                (perf_counter() - timed_started) / timed_done
                 if timing
                 else (perf_counter() - batched_started) / batched_done
             )
@@ -654,10 +886,10 @@ def evaluate_holdout(model, records, config):
                 progress,
                 level="DEBUG",
             )
-        if not rows:
+        if not points.rows:
             raise ValueError("No holdout observations")
-        all_predictions = pd.DataFrame(rows)
-        all_predictions.to_parquet(directory / "test_predictions.parquet", index=False)
+        points.close()
+        all_points = points.columns()
         pd.DataFrame(timer.rows).to_parquet(
             directory / "request_latencies.parquet", index=False
         )
@@ -721,9 +953,16 @@ def evaluate_holdout(model, records, config):
             "baseline_covariates": "Naive uses historical targets; foundation models use past covariates directly; Prophet uses configured historical regressors with forecast-derived future values, no observed future covariates",
             "table_count": len(table_metrics),
             "origin_target_count": len(origin_metrics),
-            "seconds": perf_counter() - started,
-            "pooled": summarize(all_predictions),
+            "seconds": seconds_before_resume + perf_counter() - started,
+            "pooled": summarize(all_points),
         }
+        if resume:
+            result["resumed"] = {
+                "tables_read_from_the_interrupted_run": restored_tables,
+                "seconds_before_the_interruption": seconds_before_resume,
+                "note": "seconds counts the work before the interruption and "
+                "this run, including reading the saved tables",
+            }
         write_json(directory / "table_metrics.json", table_metrics, level="DEBUG")
         write_json(directory / "origin_metrics.json", origin_metrics, level="DEBUG")
         result["detail_files"] = {
@@ -771,16 +1010,14 @@ def evaluate_holdout(model, records, config):
                 item["table_mase_median"] or 0,
             ),
         )
+        table_mase_tails(result)
         result["paired_latency"] = timer.paired_comparison()
         result["rwkv_inference"] = inference_execution_summary(model)
-        result["by_forecast_token"] = {
-            str(token): summarize(group)
-            for token, group in all_predictions.groupby("forecast_token")
-            if np.isfinite(group.actual).any()
-        }
+        result["by_forecast_token"] = by_forecast_token(all_points)
         write_json(directory / "test_metrics.json", result)
         logger.success("MASE / request latency leaderboard: {}", result["leaderboard"])
         logger.success("Final out-of-sample comparison: {}", result["pooled"])
         return result
     finally:
+        points.close()
         model.train(was_training)

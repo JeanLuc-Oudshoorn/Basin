@@ -69,6 +69,8 @@ class HoldoutResultStore(AzureCheckpointStore):
         "The holdout test has not started. Fix the storage settings, or remove "
         "holdout.result_upload to keep the results on this disk only."
     )
+    # The file a stage writes last: a run folder that has it is complete.
+    completed = COMPLETED
 
     def base(self, name):
         """Blob prefix of a run folder; `name` is empty for the results root."""
@@ -129,7 +131,7 @@ class HoldoutResultStore(AzureCheckpointStore):
         if not paths:
             raise FileNotFoundError(f"No files to upload in {folder}")
         stored = self.stored(base)
-        marker = folder / COMPLETED
+        marker = folder / self.completed
         sizes = {path: path.stat().st_size for path in paths}
         small = [p for p in paths if p != marker and sizes[p] <= self.block_bytes]
         large = [p for p in paths if p != marker and sizes[p] > self.block_bytes]
@@ -224,7 +226,7 @@ class HoldoutResultStore(AzureCheckpointStore):
             entry = found.setdefault(run, {"files": 0, "bytes": 0, "complete": False})
             entry["files"] += 1
             entry["bytes"] += blob.size
-            entry["complete"] |= file == COMPLETED
+            entry["complete"] |= file == self.completed
         return dict(sorted(found.items()))
 
     def fetch(self, name, folder):
@@ -243,7 +245,7 @@ class HoldoutResultStore(AzureCheckpointStore):
             raise FileNotFoundError(
                 f"No blobs under {self.describe_container()}/{base}/"
             )
-        marker = f"{base}/{COMPLETED}"
+        marker = f"{base}/{self.completed}"
 
         def restore(blob):
             relative = Path(blob[len(base) + 1 :])

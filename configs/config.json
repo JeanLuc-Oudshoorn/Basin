@@ -162,7 +162,7 @@
       "timestral",
       "timeh2o"
     ],
-    "sample_percent": 15.0,
+    "sample_percent": 100.0,
     "sample_seed": 7,
     "model_cache_dir": ".cache/huggingface",
     "foundation_device": "cuda",

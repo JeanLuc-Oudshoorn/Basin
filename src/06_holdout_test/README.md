@@ -101,6 +101,34 @@ its folder without `test_metrics.json`; tools that look for "the latest run"
 skip it. Old run folders are removed by hand when no longer needed (one run
 of 7,500 tables is about 0.6 GB).
 
+### Continuing a run that stopped early
+
+```powershell
+uv run python src/06_holdout_test/holdout_test.py --resume 20261126T081803Z_epoch3_step4526436
+```
+
+`--resume` takes the name of the run folder. The stage starts up as usual,
+then reads back every `test_table_NNN.parquet` the stopped run saved, scores
+those tables again from the saved points, and forecasts only the others. The
+results are those of an uninterrupted run. `test_metrics.json` notes under
+`resumed` how many tables were read back.
+
+- The model, the selected tables and the latency settings must be the ones the
+  run was started with; anything else is refused.
+- A table file that cannot be read (cut off while it was written) is forecast
+  again. From now on table files are written whole or not at all.
+- A timed table is read back only with its timings, a plotted table only with
+  its plots.
+- A finished run is never reopened, and a run with Prophet cannot be resumed.
+
+### Memory
+
+The stage does not keep the forecast points in memory. Every table's points
+are appended to `test_predictions.parquet` as the table finishes, and only the
+numeric columns the pooled scores need are kept, as arrays (about 45 MB per
+1,000 tables). Before 2026-11-26 every point was kept as a Python dict, about
+0.4 GB per 1,000 tables, which ran a full run of 50,000 tables out of memory.
+
 ### Copy of the results in Azure Blob Storage
 
 With `holdout.result_upload` set, the stage copies every finished run folder
@@ -202,14 +230,19 @@ one-step naive MAE used for scaling; it does not necessarily beat the naive
 baseline's out-of-sample, 16-step patch forecast.
 
 The additional `table_summary.models.<model>.<metric>` reports `mean`, `median`,
-`p10` and `p90` across **per-table** scores, with each table weighted equally.
+`p5`, `p10`, `p90` and `p95` across **per-table** scores, with each table weighted equally.
 This covers MASE, RMSE, MAE, normalized RMSE and RWKV normalized pinball.
 Undefined/nonfinite scores are omitted and explicitly counted as
 `undefined_tables`, alongside `valid_tables`. Percentiles use linear
 interpolation. A mean of table RMSEs is a different statistic from pooled RMSE;
 pooled RMSE takes the square root after weighted squared-error aggregation.
-The leaderboard exposes the table MASE mean, median, p10 and p90 directly,
+The leaderboard exposes the table MASE mean, median, p5, p10, p90 and p95 directly,
 alongside pooled weighted MASE and `median_absolute_scaled_error` across points.
+The ranking and `table_mase_profile` use the median, p10 and p90 only. A run made
+before p5 and p95 were reported gets them with
+`python src/06_holdout_test/error_distribution.py --run <run folder>`, which
+recomputes the table summary from `table_metrics.json` and sends the changed
+files to the container.
 
 Every completed run also writes `error_distributions.html`: interactive,
 overlaid Gaussian kernel densities with distinct colors and transparent fills

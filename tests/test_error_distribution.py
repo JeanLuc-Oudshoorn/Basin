@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src/06_holdout_test"))
 from error_distribution import (
     reflected_density,
     summarize_tables,
+    table_mase_tails,
     write_error_distribution,
     write_latency_distribution,
 )
@@ -51,8 +52,27 @@ class ErrorDistributionTests(unittest.TestCase):
         mase = result["models"]["rwkv"]["mase"]
         self.assertEqual(mase["mean"], 35.0)
         self.assertEqual(mase["median"], 3.0)
+        self.assertAlmostEqual(mase["p5"], 1.2)
         self.assertAlmostEqual(mase["p10"], 1.4)
         self.assertAlmostEqual(mase["p90"], 81.4)
+        self.assertAlmostEqual(mase["p95"], 91.2)
+        # The leaderboard rows get both ends and keep what they had.
+        metrics = {
+            "table_summary": result,
+            "leaderboard": [{"model": "rwkv", "table_mase_median": 3.0}],
+        }
+        table_mase_tails(metrics)
+        self.assertEqual(
+            metrics["leaderboard"],
+            [
+                {
+                    "model": "rwkv",
+                    "table_mase_median": 3.0,
+                    "table_mase_p5": mase["p5"],
+                    "table_mase_p95": mase["p95"],
+                }
+            ],
+        )
         self.assertEqual((mase["valid_tables"], mase["undefined_tables"]), (3, 1))
         self.assertEqual(result["models"]["rwkv"]["rmse"]["mean"], 5.0)
         json.dumps(result, allow_nan=False)

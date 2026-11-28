@@ -15,7 +15,12 @@ for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_tes
     sys.path.insert(0, str(ROOT / "src" / stage))
 from holdout import holdout_directory
 from holdout_runs import holdout_runs, latest_holdout_run, new_holdout_run
-from holdout_test import evaluation_records, run, select_test_records
+from holdout_test import (
+    check_resumable,
+    evaluation_records,
+    run,
+    select_test_records,
+)
 from transform import load_config
 
 
@@ -219,6 +224,78 @@ class HoldoutStageTests(unittest.TestCase):
             self.assertEqual(holdout_runs(config), sorted(folders))
             self.assertEqual(latest_holdout_run(config), max(folders))
             self.assertEqual(latest_holdout_run(config, folders[0].name), folders[0])
+
+    def test_an_interrupted_run_is_resumed_in_its_own_folder(self):
+        metadata, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            config["paths"].update(
+                training=str(base / "training"),
+                holdout_test=str(base / "holdout_test"),
+                logs=str(base / "logs"),
+            )
+            (base / "training").mkdir()
+            (base / "training/model.pt").touch()
+            model = Mock()
+            model.eval.return_value = model
+            seen = []
+
+            def evaluate(model, records, run_config):
+                seen.append(
+                    (
+                        Path(run_config["paths"]["holdout_test"]),
+                        run_config["holdout"].get("resume", False),
+                    )
+                )
+                if len(seen) == 1:
+                    raise KeyboardInterrupt("stopped")
+                return {"table_count": 1, "pooled": {}}
+
+            def patched(digest="digest"):
+                return (
+                    patch("holdout_test.torch.load", return_value=metadata),
+                    patch("holdout_test.populate_test_schema"),
+                    patch("holdout_test.artifact_digest", return_value=digest),
+                    patch("holdout_test.RWKVForecaster.load", return_value=model),
+                    patch("holdout_test.configure_cuda_memory"),
+                    patch("holdout_test.configure_variate_execution"),
+                    patch("holdout_test.evaluate_holdout", side_effect=evaluate),
+                )
+
+            with ExitStack() as stack:
+                for item in patched():
+                    stack.enter_context(item)
+                with self.assertRaises(KeyboardInterrupt):
+                    run(config)
+                ((folder, resumed),) = seen
+                self.assertFalse(resumed)
+                used = (folder / "model_used.json").read_bytes()
+                with self.assertRaisesRegex(FileNotFoundError, "No holdout run"):
+                    run(config, resume="missing")
+            # Another model cannot continue the run.
+            with ExitStack() as stack:
+                for item in patched("other weights"):
+                    stack.enter_context(item)
+                with self.assertRaisesRegex(ValueError, "another model"):
+                    run(config, resume=folder.name)
+            self.assertEqual(len(seen), 1)
+            with ExitStack() as stack:
+                for item in patched():
+                    stack.enter_context(item)
+                run(config, resume=folder.name)
+                self.assertEqual(seen[1], (folder, True))
+                # The provenance of the run stays as it was written.
+                self.assertEqual((folder / "model_used.json").read_bytes(), used)
+                self.assertTrue((folder / "test_metrics.json").is_file())
+                with self.assertRaisesRegex(ValueError, "finished run"):
+                    run(config, resume=folder.name)
+            self.assertEqual(holdout_runs(config), [folder])
+            selection = json.loads((folder / "sample_selection.json").read_text())
+            identity = json.loads(used)
+            check_resumable(folder, identity, selection)
+            with self.assertRaisesRegex(ValueError, "other holdout tables"):
+                check_resumable(folder, identity, {"selected_sources": ["another"]})
 
     def test_a_store_receives_the_finished_run_folder_and_only_when_given(self):
         metadata, _ = self.fixture()

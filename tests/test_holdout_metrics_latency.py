@@ -15,7 +15,14 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_test"):
     sys.path.insert(0, str(ROOT / "src" / stage))
-from holdout import evaluate_holdout, mase_scale, summarize
+from holdout import (
+    PredictionPoints,
+    by_forecast_token,
+    evaluate_holdout,
+    mase_scale,
+    summarize,
+)
+from holdout_runs import resume_holdout_run
 from latency import RequestTimer
 from transform import file_digest, load_config
 
@@ -231,6 +238,189 @@ class MaseTests(unittest.TestCase):
                 )
                 np.testing.assert_array_equal(points[column], expected)
             json.dumps(result, allow_nan=False)
+
+
+class ResumeTests(unittest.TestCase):
+    """An interrupted run is continued from the tables it saved."""
+
+    def test_points_go_to_the_file_and_only_score_columns_stay_in_memory(self):
+        rng = np.random.default_rng(0)
+
+        def table(name, rows):
+            return pd.DataFrame(
+                {
+                    "source": name,
+                    "target": "outcome",
+                    "origin": 32,
+                    "forecast_token": np.arange(rows) % 3 + 1,
+                    "metric_weight": 1 / rows,
+                    "actual": rng.normal(size=rows),
+                    "rwkv": rng.normal(size=rows),
+                    "naive": rng.normal(size=rows),
+                    "context_scale": 2.0,
+                    "mase_scale": 0.5,
+                    "normalized_pinball": rng.random(rows),
+                }
+            )
+
+        tables = [table(f"table {i}", 6 + i) for i in range(5)]
+        tables[1].loc[2:, "actual"] = np.nan  # unobserved futures
+        tables[3]["actual"] = np.nan  # a token... and a table without any
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "test_predictions.parquet"
+            points = PredictionPoints(path, ["rwkv", "naive"], tables_per_write=2)
+            for frame in tables:
+                points.add(frame)
+            points.close()
+            points.close()  # closing twice is harmless
+            everything = pd.concat(tables, ignore_index=True)
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(path), everything, check_dtype=False
+            )
+            self.assertEqual(points.rows, len(everything))
+            columns = points.columns()
+        self.assertNotIn("source", columns)
+        # Scores from the kept arrays equal those from the whole frame.
+        self.assertEqual(summarize(columns), summarize(everything))
+        self.assertEqual(
+            by_forecast_token(columns),
+            {
+                str(token): summarize(group)
+                for token, group in everything.groupby("forecast_token")
+            },
+        )
+
+    def test_a_resumed_run_gives_the_results_of_an_uninterrupted_one(self):
+        config = load_config("configs/legacy_500m.json")
+        config["plot"]["max_plots"] = 1
+        config["holdout"].update(
+            benchmark_models=["naive", "chronos"],
+            latency={"warmup_requests": 0, "repeats": 1, "tables": 1},
+        )
+        model = torch.nn.Linear(1, 1)
+        model.config = SimpleNamespace(
+            patch_size=16, context_length=2048, quantiles=(0.1, 0.5, 0.9)
+        )
+        suite = Mock()
+        suite.names = config["holdout"]["benchmark_models"]
+        suite.metadata = {name: {"device": "cpu"} for name in suite.names}
+        calls = []
+        state = {"fail_at_batched_call": None}
+
+        def last(context):
+            return float(context["context"][0, 0, -1])
+
+        def neural(actual_model, contexts, batch_size, prediction_patches=1):
+            calls.append(len(contexts))
+            if calls.count(3) == state["fail_at_batched_call"]:
+                raise KeyboardInterrupt("the run is stopped here")
+            return [
+                torch.full((1, prediction_patches * 16, 3), last(c) + 0.25)
+                for c in contexts
+            ]
+
+        def foundation(contexts, horizon, *, model_names=None):
+            return [{"chronos": np.full((1, horizon), last(c) - 0.5)} for c in contexts]
+
+        suite.predict.side_effect = foundation
+        rng = np.random.default_rng(3)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            records = []
+            for index in range(5):
+                source = base / f"table{index}.parquet"
+                values = rng.normal(size=131).cumsum()
+                if index == 2:
+                    values[100:] = np.nan  # the last origins have no labels
+                pd.DataFrame({"outcome": values}).to_parquet(source)
+                records.append(
+                    {
+                        "source": str(source),
+                        "source_sha256": file_digest(source),
+                        "targets": ["outcome"],
+                        "roles": {"past": []},
+                    }
+                )
+
+            def evaluate(folder, resume=False):
+                run = dict(config, paths=dict(config["paths"], holdout_test=folder))
+                (base / folder).mkdir(exist_ok=True)
+                if resume:
+                    _, run = resume_holdout_run(run, ".")
+                with (
+                    patch("holdout.FoundationBenchmarks", return_value=suite),
+                    patch("holdout.forecast_contexts", side_effect=neural),
+                ):
+                    return evaluate_holdout(model, records, run)
+
+            whole = evaluate(str(base / "whole"))
+            self.assertEqual(calls, [1, 1, 1, 3, 3, 3, 3])
+            self.assertNotIn("resumed", whole)
+            # The same run, stopped while it forecasts its third batched table.
+            calls.clear()
+            state["fail_at_batched_call"] = 3
+            with self.assertRaises(KeyboardInterrupt):
+                evaluate(str(base / "stopped"))
+            state["fail_at_batched_call"] = None
+            stopped = base / "stopped"
+            saved = sorted(stopped.glob("test_table_*.parquet"))
+            self.assertEqual(len(saved), 3)
+            self.assertFalse((stopped / "test_metrics.json").exists())
+            # One saved table was cut off while it was written.
+            timed = json.loads((stopped / "latency_selection.json").read_text())
+            damaged = next(
+                path
+                for path in saved
+                if records[int(path.stem.rsplit("_", 1)[1])]["source"]
+                not in timed["sources"]
+            )
+            damaged.write_bytes(damaged.read_bytes()[:100])
+            calls.clear()
+            resumed = evaluate(str(stopped), resume=True)
+            # Only the damaged table and the two never reached are forecast.
+            self.assertEqual(calls, [3, 3, 3])
+            self.assertEqual(
+                resumed["resumed"]["tables_read_from_the_interrupted_run"], 2
+            )
+            for key in (
+                "pooled",
+                "by_forecast_token",
+                "table_summary",
+                "table_count",
+                "origin_target_count",
+                "horizon_policy",
+                "skipped_origins_without_observed_history",
+                "unscored_origin_targets_without_observed_labels",
+                "unscored_tables",
+            ):
+                self.assertEqual(resumed[key], whole[key], key)
+            self.assertEqual(
+                [row["model"] for row in resumed["leaderboard"]],
+                [row["model"] for row in whole["leaderboard"]],
+            )
+            self.assertEqual(resumed["latency"]["rwkv"]["forecast_origins"], 3)
+            for name in ("table_metrics.json", "origin_metrics.json"):
+                self.assertEqual(
+                    json.loads((stopped / name).read_text()),
+                    json.loads((base / "whole" / name).read_text()),
+                    name,
+                )
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(stopped / "test_predictions.parquet"),
+                pd.read_parquet(base / "whole/test_predictions.parquet"),
+            )
+            self.assertEqual(
+                len(pd.read_parquet(stopped / "request_latencies.parquet")), 3 * 3
+            )
+            self.assertEqual(list(stopped.glob("*.partial")), [])
+            json.dumps(resumed, allow_nan=False)
+            # A finished run is not reopened, and other settings are refused.
+            with self.assertRaisesRegex(ValueError, "finished run"):
+                evaluate(str(stopped), resume=True)
+            (stopped / "test_metrics.json").unlink()
+            config["holdout"]["latency"]["tables"] = 2
+            with self.assertRaisesRegex(ValueError, "other tables or latency"):
+                evaluate(str(stopped), resume=True)
 
 
 class LatencyTests(unittest.TestCase):
