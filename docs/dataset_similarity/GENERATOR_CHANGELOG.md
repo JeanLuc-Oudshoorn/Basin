@@ -81,6 +81,8 @@ unrelated, where the generator's series are either smoother or noisier.
 | 10 | Calm and busy stretches in the noise | 0.9441 | 0.9846 | 0.9396 | 0.9433 | 0.9088 | Kept on the second score (+0.0009); unseen sources 0.677, breadth 0.94 |
 | 11 | Patterns that ride on a trend in half of the trending tables; random walks recorded exactly | 0.9417 | 0.9810 | 0.9391 | 0.9422 | 0.9044 | Kept (-0.0024); unseen sources 0.678, breadth 0.94 |
 | 12 | A tenth pattern (resource use) and shifted shares among the patterns | 0.9382 | 0.9820 | 0.9354 | 0.9385 | 0.8971 | Kept (-0.0035); unseen sources 0.668, breadth 0.94 |
+| 13 | Calendar cycle lengths and a size of its own for every cycle, in the seasons of the causal model | 0.9366 | 0.9815 | 0.9297 | 0.9386 | 0.8966 | Discarded (+0.0001); unseen sources 0.656, breadth 0.94 |
+| 14 | An eleventh pattern (a variable that is knocked off its level and recovers) and a pattern on 70% of the trends | 0.9351 | 0.9819 | 0.9267 | 0.9376 | 0.8943 | Discarded (-0.0014); unseen sources 0.655, breadth 0.93 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -212,3 +214,11 @@ walks (which start at zero). A grid finer than 50,000 steps over the range of
 the series no longer counts. Under this measure the baseline is 0.9659 (unseen
 sources 0.798) and the state after change 12 is 0.9365 (unseen sources 0.660).
 Rows 13 and later use it.
+
+### 13. Cycles of the causal model
+
+The two parts of changes 3 and 4 that add something to the causal model's own seasons, tested again now that the score is more precise: cycle lengths that follow the calendar (7, 144 and 288 added, a day most likely) and a random size for every repetition. No effect on the first score (+0.0001) and a small one on the second (0.660 to 0.656, below what counts). Discarded; the daily-load pattern already brings both.
+
+### 14. Disturbance and recovery
+
+A pattern for transients: knocks at fixed intervals or at random, answered by a jump that creeps back, a swell, ringing, or a stay away from the level. First run -0.0014, a second run on other tables +0.0000 (0.9351 and 0.9365 against 0.9365); the second score 0.655 and 0.657 against 0.660. The new pattern is taken for real about as often as the plain causal model, not more. Discarded. The two runs also show that two samples of the same generator can differ by 0.0014 on the first score, so from here a single run has to gain more than 0.002 to count.
