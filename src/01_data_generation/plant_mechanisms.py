@@ -21,16 +21,22 @@ import numpy as np
 try:
     from .effect_mechanisms import second_order_coefficients
     from .operational_patterns import (
+        DRIVER_SPREAD,
         PATTERNS,
         UPRIGHT,
+        companion_signal,
+        sample_companion,
         sample_pattern,
         simulate_pattern,
     )
 except ImportError:
     from effect_mechanisms import second_order_coefficients
     from operational_patterns import (
+        DRIVER_SPREAD,
         PATTERNS,
         UPRIGHT,
+        companion_signal,
+        sample_companion,
         sample_pattern,
         simulate_pattern,
     )
@@ -98,7 +104,12 @@ _EXPORTS = {
     "totalizer": {"rate": 0.4, "status": 0.3},
     "stick_slip": {"position": 0.5, "drive": 0.5, "status": 0.4},
     "interlock": {"pv": 0.5, "actuator": 0.5, "status": 0.5, "reset": 0.5},
+    # What drives the pattern (a setpoint, a schedule, a rate) and a second
+    # sensor on it; a random walk has neither. A duty cycle's driver is its
+    # running state, a binary channel.
     **{pattern: {} for pattern in PATTERNS},
+    **{pattern: {"driver": 0.35, "companion": 0.5} for pattern in DRIVER_SPREAD},
+    "duty_cycle": {"status": 0.4, "companion": 0.5},
 }
 
 
@@ -279,6 +290,8 @@ def sample_plant(rng, rows, weights, first_export_index):
             spec["output_gain"] = abs(spec["output_gain"])
         if family == "random_walk":
             spec["load_coupling"] = 0.0  # Nothing drives a random walk.
+        else:
+            spec["companion"] = sample_companion(rng, spec)
     else:
         raise ValueError(f"Unknown plant family: {family}")
     channels, probability = _OUTCOME_CHANNELS[family]
@@ -371,7 +384,13 @@ def simulate_plant(spec, demand, time):
             pv=np.cumsum(rate) / spec["duration"], rate=rate, status=running
         )
     elif family in PATTERNS:
-        channels.update(pv=simulate_pattern(spec, drive, rng))
+        pv, driver = simulate_pattern(spec, drive, rng)
+        channels.update(pv=pv)
+        if driver is not None:
+            # Its own random stream: the target is the same with or without.
+            other = np.random.default_rng([spec["seed"], 1])
+            channels["status" if family == "duty_cycle" else "driver"] = driver
+            channels["companion"] = companion_signal(spec["companion"], driver, other)
     elif family == "stick_slip":
         channels.update(_stick_slip(spec, drive, noise))
     elif family == "interlock":

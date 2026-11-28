@@ -519,6 +519,19 @@ recorded exactly: neither damped nor rounded (see the recording layer), so
 that its next change stays unpredictable from its last. `counts`, `daylight`
 and `resource_use` keep their direction (a count is not negative).
 
+A pattern can export two channels of its own as covariates: what drives it
+before noise and recording (the setpoint of a held value, the schedule of a
+daily load, the clear-sky curve of daylight, the binary running state of a
+duty cycle, the rate behind counts; chance 35%, 40% for the running state) and
+a second sensor on that driver with its own gain, delay, response time and
+noise (chance 50%). Random walks export neither. With these, the strongest
+rank correlation between the target and a covariate has a median of 0.54 over
+all tables (0.30 before the patterns existed; 0.77 in real multi-channel
+recordings).
+
+A cyclic pattern may show as little as one and a half repetitions of its
+cycle within a table.
+
 With `TRENDING_PATTERN_PROBABILITY=0.5`, half of the trending proposals carry a
 pattern that rides on the table's trend (`held_value`, `daily_load`,
 `duty_cycle`, `smooth_drift`, `staircase`, `oscillation` or `resource_use`). The

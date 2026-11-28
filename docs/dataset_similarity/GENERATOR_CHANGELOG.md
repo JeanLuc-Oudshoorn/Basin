@@ -86,6 +86,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 15 | More daily cycles: daily load in 20% of the tables (was 13%), a daily profile more often in counts and resource use | 0.9387 | 0.9838 | 0.9351 | 0.9412 | 0.8948 | Discarded (+0.0022); unseen sources 0.660, breadth 0.94 |
 | 16 | A second pattern added to the first in a quarter of the pattern tables | 0.9353 | 0.9806 | 0.9305 | 0.9393 | 0.8909 | Discarded (-0.0009); unseen sources 0.661, breadth 0.94 |
 | 17 | Cycles of which a table shows as little as one and a half repetitions (was three) | 0.9365 | 0.9809 | 0.9313 | 0.9378 | 0.8958 | Kept for the forecasting check, not the score (+0.0003); unseen sources 0.658, breadth 0.94 |
+| 18 | Companion channels of the patterns: what drives the pattern, and a second sensor on it | 0.9366 | 0.9815 | 0.9316 | 0.9375 | 0.8956 | Kept on its own measure, covariates (+0.0004); unseen sources 0.662, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -356,3 +357,18 @@ giving cyclic tables more room than the realism score asks for: the score
 was indifferent to a larger share of daily load (change 15), the forecasting
 check is not. That is a choice for whoever starts the next training run; the
 setting is the weight of `daily_load` and `daylight` in `PLANT_WEIGHTS`.
+
+### 18. Covariates that tell about the target
+
+The realism score looks at the target only. A table also has covariates, and Basin uses them. How much they tell about the target was measured as the strongest rank correlation between the target and any covariate, at a delay of 0 to 8 points:
+
+| | Median | Share of tables above 0.5 |
+|---|---|---|
+| Real recordings (11 public datasets with several channels, up to six other channels) | 0.77 | 72% |
+| Generator as it was | 0.30 | 38% |
+| After change 12 | 0.19 | 29% |
+| After this change | 0.54 | 53% |
+
+In a real system the other channels tell a lot about any one channel; in the generator they told little, and the new patterns had made it worse: their covariates came from the causal model, which reaches the pattern only as its demand. A pattern now offers two channels of its own: what drives it before noise and recording (the setpoint of a held value, the schedule of a daily load, the clear-sky curve of daylight, the running state of a duty cycle, the rate behind counts) with a chance of 35%, and with a chance of 50% a second sensor on that driver with its own gain, delay of up to 8 points, response time and noise. The second sensor shares the cause of the target, not its noise, as two instruments of one unit do. Random walks get neither: nothing tells about them, and their covariates stay uninformative, as in FakeBench-TS. The plain causal model and the earlier units are unchanged (0.28 and 0.5 to 0.8).
+
+The target is not touched, so the score does not move (0.9366 against 0.9362; unseen sources 0.662 against 0.658). The change is kept on its own measure, the table above.

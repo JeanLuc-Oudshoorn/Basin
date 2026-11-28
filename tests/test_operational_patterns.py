@@ -29,7 +29,7 @@ def drawn(family, seed, **changes):
 
 def signal(spec, seed=3, drive=None):
     drive = np.ones(LENGTH) if drive is None else drive
-    return simulate_pattern(spec, drive, np.random.default_rng(seed))
+    return simulate_pattern(spec, drive, np.random.default_rng(seed))[0]
 
 
 class PatternTests(unittest.TestCase):
@@ -120,6 +120,45 @@ class PatternTests(unittest.TestCase):
         # Successive changes of plain noise share a point, which alone relates
         # their sizes a little; busy stretches add clearly to that.
         self.assertGreater(clustering(1.2), clustering(0.0) + 0.15)
+
+
+class CompanionTests(unittest.TestCase):
+    def test_patterns_offer_what_drives_them_and_a_second_sensor(self):
+        clock = np.arange(-100, LENGTH)
+        demand = np.sin(clock / 50)
+        for family in PATTERNS:
+            spec = sample_plant(np.random.default_rng(4), LENGTH, {family: 1.0}, 5)
+            channels = simulate_plant(spec, demand, clock)
+            if family == "random_walk":
+                # Nothing tells about a random walk, so nothing is offered.
+                self.assertNotIn("companion", channels)
+                self.assertEqual(spec["exports"], [])
+                continue
+            driver = channels["status" if family == "duty_cycle" else "driver"]
+            self.assertEqual(driver.shape, channels["pv"].shape)
+            self.assertTrue(np.isfinite(channels["companion"]).all(), family)
+        states = simulate_plant(
+            sample_plant(np.random.default_rng(4), LENGTH, {"duty_cycle": 1.0}, 5),
+            demand,
+            clock,
+        )["status"]
+        self.assertEqual(set(np.unique(states)), {0.0, 1.0})
+
+    def test_second_sensor_follows_the_driver_and_not_the_future(self):
+        clock = np.arange(-100, LENGTH)
+        rng = np.random.default_rng(6)
+        demand = np.sin(clock / 50) + 0.2 * rng.normal(size=len(clock))
+        spec = sample_plant(np.random.default_rng(2), LENGTH, {"daily_load": 1.0}, 5)
+        spec["companion"].update(noise=0.01, lag=2, tau=0.0)
+        channels = simulate_plant(spec, demand, clock)
+        related = np.corrcoef(channels["driver"][:-2], channels["companion"][2:])[0, 1]
+        self.assertGreater(abs(related), 0.95)
+        changed = demand.copy()
+        changed[1200:] += 3
+        again = simulate_plant(spec, changed, clock)
+        np.testing.assert_array_equal(
+            again["companion"][:1200], channels["companion"][:1200]
+        )
 
 
 class RecordingTests(unittest.TestCase):

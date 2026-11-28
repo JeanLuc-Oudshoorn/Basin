@@ -53,6 +53,21 @@ TREND_SPREAD = {
     "oscillation": 1.0,
     "resource_use": 0.5,
 }
+# What lies behind a pattern's signal before noise and recording: a setpoint,
+# a schedule, a rate, a running state. It can be recorded as a channel of its
+# own, and a second sensor can follow it. The usual spread of that driver
+# sizes the second sensor's own noise.
+DRIVER_SPREAD = {
+    "held_value": 1.3,
+    "daily_load": 0.4,
+    "daylight": 0.25,
+    "duty_cycle": 0.45,
+    "smooth_drift": 0.8,
+    "counts": 1.0,  # Times the rate: see sample_companion.
+    "staircase": 2.0,
+    "oscillation": 1.0,
+    "resource_use": 0.5,
+}
 # Patterns whose direction has a meaning: a count or a generation is not negative.
 UPRIGHT = ("daylight", "counts", "resource_use")
 # Laws of the independent changes of a random walk, all centred on zero.
@@ -360,8 +375,45 @@ def _sample_family(rng, rows, family):
     raise ValueError(f"Unknown operational pattern: {family}")
 
 
+def sample_companion(rng, spec):
+    """A second sensor on what drives the pattern: its own gain, delay and noise.
+
+    It shares the cause of the target, not the target's noise, as two
+    instruments of one unit do.
+    """
+    spread = DRIVER_SPREAD[spec["family"]]
+    if spec["family"] == "counts":
+        spread = spec["rate"] ** 0.5 + 0.3 * spec["rate"]
+    return {
+        "gain": float(rng.choice([-1, 1], p=[0.25, 0.75]) * _log_uniform(rng, 0.3, 3)),
+        "lag": int(rng.choice([0, 0, 0, 1, 2, 4, 8])),
+        "tau": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 1, 30),
+        "noise": spread * _log_uniform(rng, 0.03, 1.0),
+        "noise_memory": 0.0
+        if rng.random() < 0.4
+        else float(1 - _log_uniform(rng, 0.01, 0.6)),
+    }
+
+
+def companion_signal(companion, driver, rng):
+    """The second sensor's reading of the driver; causal, like the driver."""
+    length = len(driver)
+    value = driver
+    if companion["lag"]:
+        lag = companion["lag"]
+        value = np.concatenate([np.full(lag, value[0]), value[:-lag]])
+    if companion["tau"]:
+        alpha = 1 - math.exp(-1 / companion["tau"])
+        value = lfilter([alpha], [1.0, alpha - 1], value - value[0]) + value[0]
+    noise = rng.normal(size=length)
+    if companion["noise_memory"]:
+        memory = companion["noise_memory"]
+        noise = lfilter([math.sqrt(1 - memory**2)], [1.0, -memory], noise)
+    return companion["gain"] * (value + companion["noise"] * noise)
+
+
 def simulate_pattern(spec, drive, rng):
-    """The pattern's signal over the full simulated clock."""
+    """(signal, driver) over the full simulated clock; the driver may be None."""
     family = spec["family"]
     simulate = {
         "held_value": _held_value,
@@ -377,7 +429,9 @@ def simulate_pattern(spec, drive, rng):
     }
     if family not in simulate:
         raise ValueError(f"Unknown operational pattern: {family}")
-    return simulate[family](spec, np.asarray(drive, dtype=float), rng)
+    parts = {}
+    value = simulate[family](spec, np.asarray(drive, dtype=float), rng, parts)
+    return value, parts.get("driver")
 
 
 def _dwell_path(rng, length, mean, spread, levels):
@@ -393,7 +447,7 @@ def _dwell_path(rng, length, mean, spread, levels):
     return levels(len(starts))[index], starts
 
 
-def _held_value(spec, drive, rng):
+def _held_value(spec, drive, rng, parts):
     length = len(drive)
     noise = (
         rng.standard_t(spec["tail"], length)
@@ -423,7 +477,8 @@ def _held_value(spec, drive, rng):
             level = lfilter([alpha], [1.0, alpha - 1], level - level[0]) + level[0]
     if spec["drift"]:
         level = level + _wander(rng, length, spec["drift_tau"], spec["drift"])
-    value = level + noise + spec["load_gain"] * (drive - 1)
+    parts["driver"] = level + spec["load_gain"] * (drive - 1)
+    value = parts["driver"] + noise
     if spec["spikes"]:
         hits = rng.random(length) < spec["spikes"]
         value = value + hits * spec["spike_size"] * rng.uniform(0.5, 1.0, length)
@@ -438,7 +493,7 @@ def _cycle_position(spec, length):
     return position % 1.0, np.floor(position).astype(int)
 
 
-def _daily_load(spec, drive, rng):
+def _daily_load(spec, drive, rng, parts):
     length = len(drive)
     within, day = _cycle_position(spec, length)
     shape = _profile_values(spec["profile"])
@@ -452,6 +507,7 @@ def _daily_load(spec, drive, rng):
         value = value * np.exp(
             _wander(rng, length, spec["level_tau"], spec["level_wander"])
         )
+    parts["driver"] = value
     noise = _noise(spec, rng, length)
     if spec["noise_memory"]:
         memory = spec["noise_memory"]
@@ -460,7 +516,7 @@ def _daily_load(spec, drive, rng):
     return value + scale * noise
 
 
-def _daylight(spec, drive, rng):
+def _daylight(spec, drive, rng, parts):
     length = len(drive)
     within, day = _cycle_position(spec, length)
     light = within < spec["day_fraction"]
@@ -470,6 +526,7 @@ def _daylight(spec, drive, rng):
     clear = rng.beta(spec["clear"][0], spec["clear"][1], int(day.max()) + 1)[day]
     cloud = 1 / (1 + np.exp(-2 * _wander(rng, length, spec["cloud_tau"], 1.0)))
     season = 1 + spec["season"] * np.arange(length) / max(1, length - 1)
+    parts["driver"] = arc * clear * season
     value = arc * clear * (1 - spec["cloud_depth"] * cloud) * season * drive
     if spec["noise"]:
         value = value + spec["noise"] * rng.normal(size=length)
@@ -477,7 +534,7 @@ def _daylight(spec, drive, rng):
     return np.where(light, np.maximum(value, 0.0), 0.0)
 
 
-def _duty_cycle(spec, drive, rng):
+def _duty_cycle(spec, drive, rng, parts):
     length = len(drive)
     value = np.zeros(length)
     # Drawn before the cycles: their number depends on the demand, and a later
@@ -485,6 +542,7 @@ def _duty_cycle(spec, drive, rng):
     ripple = spec["ripple"] * _noise(spec, rng, length)
     idle = spec["idle_noise"] * rng.normal(size=length)
     position, on, current = 0, bool(rng.random() < 0.5), 0.0
+    running = np.zeros(length)
     while position < length:
         # More demand, shorter rests; read when the rest begins.
         demand = float(np.clip(drive[position], 0.3, 3.0))
@@ -505,7 +563,9 @@ def _duty_cycle(spec, drive, rng):
                 edge = np.minimum(1.0, steps / (spec["rise"] + 1))
                 part = current + (part - current) * edge
         value[position:stop] = part
+        running[position:stop] = float(on)
         current, position, on = float(part[-1]), stop, not on
+    parts["driver"] = running
     return value + (value > 0.05) * ripple + idle
 
 
@@ -544,7 +604,7 @@ def walk_steps(law, shape, rng, length):
     raise ValueError(f"Unknown random-walk law: {law}")
 
 
-def _random_walk(spec, drive, rng):
+def _random_walk(spec, drive, rng, parts):
     length = len(drive)
     steps = spec["sign"] * walk_steps(spec["law"], spec["shape"], rng, length)
     if spec["volatility"] == "regime":
@@ -556,7 +616,7 @@ def _random_walk(spec, drive, rng):
     return np.cumsum(steps) / math.sqrt(length)
 
 
-def _smooth_drift(spec, drive, rng):
+def _smooth_drift(spec, drive, rng, parts):
     length = len(drive)
     value = np.zeros(length)
     for tau, scale in zip(spec["taus"], spec["scales"]):
@@ -585,12 +645,13 @@ def _smooth_drift(spec, drive, rng):
         # point depends on a demand that comes after it.
         load = np.interp(clock - spec["sparse"], kept, load[kept])
     value = value + load
+    parts["driver"] = value
     if spec["noise"]:
         value = value + spec["noise"] * _noise(spec, rng, length)
     return value
 
 
-def _counts(spec, drive, rng):
+def _counts(spec, drive, rng, parts):
     length = len(drive)
     rate = np.full(length, spec["rate"])
     if spec["profile"]:
@@ -609,6 +670,7 @@ def _counts(spec, drive, rng):
     if spec["idle"]:
         rate = rate * (rng.random(length) >= spec["idle"])
     rate = np.minimum(rate, 1e6)
+    parts["driver"] = rate
     if spec["clumping"]:
         clumping = spec["clumping"]
         return rng.negative_binomial(clumping, clumping / (clumping + rate)).astype(
@@ -617,7 +679,7 @@ def _counts(spec, drive, rng):
     return rng.poisson(rate).astype(float)
 
 
-def _staircase(spec, drive, rng):
+def _staircase(spec, drive, rng, parts):
     length = len(drive)
     spread = spec["step_spread"]
     if spec["counter"]:
@@ -647,16 +709,18 @@ def _staircase(spec, drive, rng):
         value = np.interp(
             np.arange(length), knots, value[np.minimum(knots, length - 1)]
         )
+    value = value + 0.3 * (drive - 1)
+    parts["driver"] = value
     if spec["noise"]:
         noise = _noise(spec, rng, length)
         if spec["noise_memory"]:
             memory = spec["noise_memory"]
             noise = lfilter([math.sqrt(1 - memory**2)], [1.0, -memory], noise)
         value = value + spec["noise"] * noise
-    return value + 0.3 * (drive - 1)
+    return value
 
 
-def _oscillation(spec, drive, rng):
+def _oscillation(spec, drive, rng, parts):
     length = len(drive)
     speed = np.exp(
         _wander(rng, length, spec["wobble_tau"] * spec["period"], spec["wobble"])
@@ -695,12 +759,14 @@ def _oscillation(spec, drive, rng):
         value = value * sizes[np.clip(cycle - cycle[0], 0, length - 1)]
     if spec["size_wander"]:
         value = value * np.exp(size_wander)
+    # The motion itself, as a second pickup on the same machine would see it.
+    parts["driver"] = value
     if spec["baseline"]:
         value = value + baseline
     return value + noise
 
 
-def _resource_use(spec, drive, rng):
+def _resource_use(spec, drive, rng, parts):
     length = len(drive)
     noise = _noise(spec, rng, length)
     if spec["noise_memory"]:
@@ -719,6 +785,7 @@ def _resource_use(spec, drive, rng):
             return np.exp(np.cumsum(rng.normal(0, spec["shift_size"], count)) * 0.5)
 
         level = level * _dwell_path(rng, length, 500 / spec["shifts"], 0.8, levels)[0]
+    parts["driver"] = level
     value = level * np.exp(spec["noise"] * noise - spec["noise"] ** 2 / 2)
     hits = rng.random(length) < spec["bursts"]
     sizes = spec["burst_size"] * (rng.pareto(spec["burst_tail"], length) + 0.3)
