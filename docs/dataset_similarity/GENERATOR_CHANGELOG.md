@@ -136,3 +136,15 @@ Compared with the datasets nearest to them, the patterns were too jagged: 30% of
 ### 8. More tables with a pattern
 
 The patterns are taken for real series two to three times as often as the plain causal model, so they get more room: a unit or pattern in 85% of the tables that have no trend. About half of all tables now hold a pattern, a tenth one of the earlier closed-loop units, and four in ten the plain causal model (all tables with a trend among them). Breadth 0.945. The operational benchmarks did not improve (0.9420 to 0.9454); the public datasets, IND-Eval and FakeBench-TS did. Setting: `PLANT_PROBABILITY`.
+
+### Note after change 8: one descriptor redefined
+
+The descriptor that says whether values lie on a regular grid was computed
+from the smallest change between two points. That fails when the smallest
+change happens to span several grid steps, which made coarse real readings
+(the caster) look unlike coarse generated ones for a reason that has nothing
+to do with the generator. It is now computed from the gaps between
+neighbouring distinct values. Under this final measure the baseline is
+0.9666 (two runs: 0.9663, 0.9668) and the state after change 8 is 0.9465.
+Rows 9 and later use it; the table at the end of this document gives every
+kept change under the final measure.

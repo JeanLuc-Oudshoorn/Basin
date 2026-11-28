@@ -134,7 +134,7 @@ DESCRIPTIONS = {
     "floor_rest_share": "Share of points within 2% of the range from the lowest value",
     "ceiling_rest_share": "Share of points within 2% of the range from the highest value",
     "longest_flat_run": "Longest run of unchanged points, as a share of the window",
-    "quantum_fit": "Share of the changes that are a whole number of the smallest change",
+    "quantum_fit": "Whether the values lie on a regular grid (gaps between values as multiples of the smallest gap)",
     "sample_entropy": "Sample entropy (low: repeats itself, high: unpredictable)",
     "crossing_rate": "How often the series crosses its median",
     "forecast_error": "Error of forecasting a point by the mean of the three before it",
@@ -442,7 +442,7 @@ def describe(values):
         float(squared[-top:].sum() / squared.sum()) if squared[-1] > 0 else 0.0
     )
     steps = np.diff(raw)
-    _, counts = np.unique(raw, return_counts=True)
+    levels, counts = np.unique(raw, return_counts=True)
     result["flat_share"] = float((steps == 0).mean())
     result["distinct_share"] = float(len(counts) / n)
     result["mode_share"] = float(counts.max() / n)
@@ -468,10 +468,14 @@ def describe(values):
     result["floor_rest_share"] = float((raw <= low + 0.02 * height).mean())
     result["ceiling_rest_share"] = float((raw >= low + 0.98 * height).mean())
     result["longest_flat_run"] = run_length(steps == 0) / n
+    # Whether the values lie on a regular grid: the gaps between neighbouring
+    # distinct values as multiples of the smallest gap. The smallest change
+    # from one point to the next would not do, because it can span several
+    # grid steps; and stored as 32-bit numbers a gap is not an exact multiple.
     fit = 0.0
-    if len(moving):
-        ratio = np.abs(moving) / np.abs(moving).min()
-        # Stored as 32-bit numbers, a change is not an exact multiple.
+    if len(levels) > 2:
+        gaps = np.diff(levels)
+        ratio = gaps / gaps.min()
         fit = float((np.abs(ratio - np.round(ratio)) < 0.05).mean())
     result["quantum_fit"] = fit
     result["sample_entropy"] = sample_entropy(x)
