@@ -210,15 +210,16 @@ PLANT_WEIGHTS = {
     "rotating_machine": 0.10,
     # Patterns of recorded operational data (operational_patterns.py). They
     # take the place of a unit: the SCM outcome is their demand.
-    "held_value": 0.8,
+    "held_value": 1.0,
     "daily_load": 1.2,
     "daylight": 0.3,
     "duty_cycle": 0.4,
     "random_walk": 0.4,
-    "smooth_drift": 0.5,
-    "counts": 0.4,
-    "staircase": 0.3,
-    "oscillation": 0.4,
+    "smooth_drift": 0.7,
+    "counts": 0.5,
+    "staircase": 0.4,
+    "oscillation": 0.2,
+    "resource_use": 0.5,
 }
 # Recording layer, applied after simulation (see measurement_layer.py).
 REDUNDANT_SENSOR_PROBABILITY = 0.12  # Per table: 1-2 extra sensors on a signal.

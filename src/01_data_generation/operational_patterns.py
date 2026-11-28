@@ -21,6 +21,8 @@ fitted to, or copied from, a recorded series.
   staircase      a value that moves in steps and holds: a counter, a recipe level
   oscillation    a repeating waveform whose length and size vary from cycle to
                  cycle: rotation, breathing, pulsation
+  resource_use   how busy a shared resource is: a noisy level that cannot go below
+                 zero, with bursts, sometimes idle, sometimes at its limit
 """
 
 import math
@@ -38,6 +40,7 @@ PATTERNS = (
     "counts",
     "staircase",
     "oscillation",
+    "resource_use",
 )
 # Patterns that can ride on a trend (a growing load, a drifting setpoint),
 # with the usual spread of their signal: a trend is sized against it.
@@ -48,9 +51,10 @@ TREND_SPREAD = {
     "smooth_drift": 0.8,
     "staircase": 2.0,
     "oscillation": 1.0,
+    "resource_use": 0.5,
 }
 # Patterns whose direction has a meaning: a count or a generation is not negative.
-UPRIGHT = ("daylight", "counts")
+UPRIGHT = ("daylight", "counts", "resource_use")
 # Laws of the independent changes of a random walk, all centred on zero.
 WALK_LAWS = (
     "normal",
@@ -326,6 +330,28 @@ def _sample_family(rng, rows, family):
             "baseline": 0.0 if rng.random() < 0.5 else _log_uniform(rng, 0.05, 1.0),
             "noise": _log_uniform(rng, 0.002, 0.15),
         }
+    if family == "resource_use":
+        return {
+            "noise": _log_uniform(rng, 0.03, 0.7),
+            "noise_memory": 0.0
+            if rng.random() < 0.4
+            else float(1 - _log_uniform(rng, 0.02, 0.7)),
+            # Bursts per point, their size in units of the usual level (with a
+            # heavy tail), and how many points one takes to die away.
+            "bursts": 0.0 if rng.random() < 0.25 else _log_uniform(rng, 0.002, 0.08),
+            "burst_size": _log_uniform(rng, 0.5, 20),
+            "burst_tail": float(rng.uniform(1.3, 4.0)),
+            "burst_decay": 0.0 if rng.random() < 0.4 else _log_uniform(rng, 1, 40),
+            "period": _cycle(rng, rows),
+            "offset": float(rng.uniform(0, 1)),
+            "profile": _profile(rng) if rng.random() < 0.5 else None,
+            "depth": float(rng.uniform(0.2, 0.95)),
+            # Changes of the usual level that stay: a new release, a new user.
+            "shifts": 0.0 if rng.random() < 0.65 else _log_uniform(rng, 0.5, 6),
+            "shift_size": float(rng.uniform(0.2, 1.0)),
+            "idle_below": 0.0 if rng.random() < 0.7 else float(rng.uniform(0.3, 1.2)),
+            "limit": 0.0 if rng.random() < 0.75 else float(rng.uniform(1.5, 6)),
+        }
     raise ValueError(f"Unknown operational pattern: {family}")
 
 
@@ -342,6 +368,7 @@ def simulate_pattern(spec, drive, rng):
         "counts": _counts,
         "staircase": _staircase,
         "oscillation": _oscillation,
+        "resource_use": _resource_use,
     }
     if family not in simulate:
         raise ValueError(f"Unknown operational pattern: {family}")
@@ -666,3 +693,36 @@ def _oscillation(spec, drive, rng):
     if spec["baseline"]:
         value = value + baseline
     return value + noise
+
+
+def _resource_use(spec, drive, rng):
+    length = len(drive)
+    noise = _noise(spec, rng, length)
+    if spec["noise_memory"]:
+        memory = spec["noise_memory"]
+        noise = lfilter([math.sqrt(1 - memory**2)], [1.0, -memory], noise)
+    level = np.clip(drive, 0.05, None)
+    if spec["profile"]:
+        within, _ = _cycle_position(spec, length)
+        shape = _profile_values(spec["profile"])
+        level = level * (
+            1 - spec["depth"] + spec["depth"] * shape[(within * len(shape)).astype(int)]
+        )
+    if spec["shifts"]:
+
+        def levels(count):
+            return np.exp(np.cumsum(rng.normal(0, spec["shift_size"], count)) * 0.5)
+
+        level = level * _dwell_path(rng, length, 500 / spec["shifts"], 0.8, levels)[0]
+    value = level * np.exp(spec["noise"] * noise - spec["noise"] ** 2 / 2)
+    hits = rng.random(length) < spec["bursts"]
+    sizes = spec["burst_size"] * (rng.pareto(spec["burst_tail"], length) + 0.3)
+    burst = hits * sizes
+    if spec["burst_decay"]:
+        burst = lfilter([1.0], [1.0, -math.exp(-1 / spec["burst_decay"])], burst)
+    value = value + burst
+    if spec["idle_below"]:
+        value = np.maximum(value - spec["idle_below"], 0.0)
+    if spec["limit"]:
+        value = np.minimum(value, spec["limit"])
+    return value

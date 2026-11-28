@@ -80,6 +80,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 9 | Damped readings in 30% of the columns | 0.9432 | 0.9854 | 0.9357 | 0.9432 | 0.9086 | Kept (-0.0033); unseen sources 0.685, breadth 0.95 |
 | 10 | Calm and busy stretches in the noise | 0.9441 | 0.9846 | 0.9396 | 0.9433 | 0.9088 | Kept on the second score (+0.0009); unseen sources 0.677, breadth 0.94 |
 | 11 | Patterns that ride on a trend in half of the trending tables; random walks recorded exactly | 0.9417 | 0.9810 | 0.9391 | 0.9422 | 0.9044 | Kept (-0.0024); unseen sources 0.678, breadth 0.94 |
+| 12 | A tenth pattern (resource use) and shifted shares among the patterns | 0.9382 | 0.9820 | 0.9354 | 0.9385 | 0.8971 | Kept (-0.0035); unseen sources 0.668, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -197,3 +198,7 @@ In real series large changes follow large changes far more than in generated one
 ### 11. Patterns on a trend, exact random walks
 
 Two additions. (1) The tables with a trend all came from the plain causal model, the kind of series the classifier tells from real ones most surely. In half of them a pattern now rides on the trend: a load that grows, a setpoint that drifts, an oscillation on a slope. The trend's whole change is 0.5 to 6 times the pattern's usual spread. Setting: `TRENDING_PATTERN_PROBABILITY`. (2) The target of a random-walk table is no longer passed through a response time or rounded to a stored resolution: both make the next change predictable from the last, and the point of these tables is that nothing is. The classifier told the generator's walks from the FakeBench-TS walks mainly by those two recording effects.
+
+### 12. Resource use
+
+The real sources that a classifier could still tell from generated series without having seen them were the noisy, non-negative ones with bursts: the load of a server, the volume of messages. A tenth pattern covers that kind: a noisy level that cannot go below zero, with heavy-tailed bursts that die away, sometimes a daily profile, lasting shifts of the usual level, idle stretches, or a limit it runs into. The shares among the patterns were shifted towards the kinds taken for real most often (held value, smooth drift, staircase, counts) and away from the one taken for real least (oscillation, 5% to 2.5% of the tables). Setting: `PLANT_WEIGHTS`.
