@@ -113,7 +113,8 @@ data/
 results/
   model/
     training/                     # model.pt, resumable timed checkpoint and metrics
-    holdout_test/                 # Out-of-sample metrics, predictions and plots
+    holdout_test/                 # One timestamped folder per holdout run:
+                                  # out-of-sample metrics, predictions and plots
     forecasts/                    # Forecast-stage outputs
     annealing/<experiment>/       # One folder per annealing experiment
   500m_model/                     # Archived 500M model, see ARCHIVE_MANIFEST.json
@@ -130,9 +131,13 @@ docs/                             # Architecture, benchmark reports and audit tr
 
 The default exported model is `results/model/training/model.pt`; resumable training
 state is `results/model/training/latest_checkpoint.pt`. Holdout evaluation reads
-the exported model and writes to `results/model/holdout_test`. The general
-forecasting stage writes to `results/model/forecasts`; when it delegates to the
-holdout evaluator, it uses the holdout directory. Paths remain configurable.
+the exported model and writes each run to its own new folder under
+`results/model/holdout_test`, named after the start time and the evaluated
+weights (for example `20261120T172808Z_epoch1_step1457590`). Earlier runs are
+never overwritten or cleared, so results after successive epochs can be compared.
+The general forecasting stage writes to `results/model/forecasts`; when it
+delegates to the holdout evaluator, it also gets a new run folder in the
+holdout directory. Paths remain configurable.
 
 After the main run, a short annealing phase can continue training on a small
 fresh set of tables in which chosen kinds of series are more common. Each such
@@ -270,9 +275,11 @@ disk. Writes are not affected in the same way (59 MiB/s). Resuming from a
 saved validation panel is kept on WSL's disk (`~/.cache/basin/validation_panels`).
 
 The setup script also installs `azure-storage-blob` (optional dependency group
-`cloud`) for checkpoint copies. Their credentials, `AZURE_ENDPOINT` and
-`AZURE_STORAGE_KEY`, are read from the environment or from a git-ignored `.env`
-file in the repository root.
+`cloud`) for checkpoint copies and for the copy of every finished holdout run
+folder (`holdout.result_upload`, see the
+[holdout stage](../src/06_holdout_test/README.md)). Their credentials,
+`AZURE_ENDPOINT` and `AZURE_STORAGE_KEY`, are read from the environment or from
+a git-ignored `.env` file in the repository root.
 
 ## Convert public MATLAB datasets
 
@@ -952,14 +959,15 @@ table, configured by `holdout.percentiles`, with table-level progress and ETA.
 Holdout comparisons are interactive Plotly HTML files with zoom, hover, a range
 slider and model toggles. Regenerate them from existing saved predictions with
 `uv run python src/06_holdout_test/plotting.py`; no model inference is repeated.
-Results go to `results/model/holdout_test` by default
+It works on the most recent completed run, or on the one named with `--run`.
+Results go to a new run folder under `results/model/holdout_test` by default
 (`paths.holdout_test`). The holdout command automatically loads the latest
 exported `paths.training/model.pt` and its saved test split.
 Choose comparison models with `holdout.benchmark_models` (default
-`["prophet", "naive", "chronos"]`; optional `"timestral"`) and evaluate a
+`["prophet", "naive", "chronos"]`; optional `"timestral"`, `"timeh2o"`) and evaluate a
 reproducible portion of the test tables with `holdout.sample_percent` (default
 100, e.g. 1 for a quick 1% run). `configs/config.json` currently compares with
-`["naive", "chronos", "timestral"]` on 15% of the test tables. The percentage
+`["naive", "chronos", "timestral", "timeh2o"]` on 15% of the test tables. The percentage
 applies to the admitted saved holdout split. See the [foundation benchmark audit](audits/2026-10-29/foundation_benchmarks/REPORT.md).
 Fresh training now records full epoch-zero validation before the first update;
 resumed runs retain their recorded baseline, if available. See the

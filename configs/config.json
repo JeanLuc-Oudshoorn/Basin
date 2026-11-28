@@ -159,7 +159,8 @@
     "benchmark_models": [
       "naive",
       "chronos",
-      "timestral"
+      "timestral",
+      "timeh2o"
     ],
     "sample_percent": 15.0,
     "sample_seed": 7,
@@ -174,6 +175,11 @@
       "model_id": "mistralai/Timestral-209M",
       "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365"
     },
+    "timeh2o": {
+      "model_id": "h2oai/timeh2o-v1",
+      "revision": "1310be782553943a4c520d2810a98ce8f56b2709",
+      "batch_size": 32
+    },
     "percentiles": [
       1,
       25,
@@ -184,10 +190,17 @@
     "mase_seasonality": 1,
     "latency": {
       "warmup_requests": 1,
-      "repeats": 1
+      "repeats": 1,
+      "tables": 500
     },
     "progress_every_tables": 100,
-    "graph_min_profile_requests": 8
+    "graph_min_profile_requests": 8,
+    "result_upload": {
+      "container": "checkpoints",
+      "prefix": null,
+      "block_mib": 16,
+      "concurrency": 8
+    }
   },
   "plot": {
     "width": 12,

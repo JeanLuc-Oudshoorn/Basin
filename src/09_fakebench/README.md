@@ -15,8 +15,8 @@ Run from the repository root:
 uv run python src/09_fakebench/fakebench.py
 ```
 
-This forecasts the 2,100 series of the `v1` dataset with Basin, Chronos-2 and
-Timestral and scores them. Like the other GPU stages it routes itself to WSL.
+This forecasts the 2,100 series of the `v1` dataset with Basin, Chronos-2,
+Timestral and TimeH2O and scores them. Like the other GPU stages it routes itself to WSL.
 On an idle RTX 5070 the whole run took 75 seconds and peaked at 3.1 GB of GPU
 memory.
 
@@ -24,8 +24,9 @@ memory.
   (`holdout.checkpoint`, otherwise the newer of `model.pt` and the best
   weights in `latest_checkpoint.pt` under `paths.training`), with the same
   inference set-up. Its point forecast is the median.
-- **Chronos-2 and Timestral** use the model IDs, pinned revisions, device and
-  cache folder under `holdout` in the configuration.
+- **Chronos-2, Timestral and TimeH2O** use the model IDs, pinned revisions,
+  device and cache folder under `holdout` in the configuration. TimeH2O's
+  weights are gated: see the [holdout README](../06_holdout_test/README.md).
 - The series come from the dataset published in the submodule,
   `benchmarks/fakebench-ts/data/fakebench_v1.parquet`.
 
@@ -45,7 +46,7 @@ folder holds:
 - `run.json`: Basin's checkpoint, epoch and step, and where each model's
   forecasts came from
 
-Basin is forecast again in every run. Chronos-2 and Timestral do not change,
+Basin is forecast again in every run. The published models do not change,
 so their forecasts are copied from the most recent earlier run on the same
 data instead of being computed again.
 
@@ -53,7 +54,7 @@ data instead of being computed again.
 
 | Option | Effect |
 |---|---|
-| `--models basin chronos2 timestral` | which models to include; FakeBench-TS baselines such as `seasonal_naive` also work |
+| `--models basin chronos2 timestral timeh2o` | which models to include; FakeBench-TS baselines such as `seasonal_naive` also work |
 | `--limit 100` | forecast an even subset of the series for a quick trial |
 | `--rerun` | forecast the published models again instead of copying their forecasts |
 | `--batch-size 16` | series per forecast call |

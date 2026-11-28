@@ -12,6 +12,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_test"):
     sys.path.insert(0, str(ROOT / "src" / stage))
+from holdout_runs import latest_holdout_run
 from holdout_test import run
 from transform import load_config, run_context, write_json
 
@@ -33,12 +34,14 @@ def main():
     config["paths"]["holdout_test"] = str(output)
     with run_context(config, "inference_cache_paired_holdout"):
         metrics = run(config)
+        # The run wrote into its own timestamped folder under `output`.
+        results = latest_holdout_run(config)
         old_identity = json.loads((original / "model_used.json").read_text())
-        new_identity = json.loads((output / "model_used.json").read_text())
+        new_identity = json.loads((results / "model_used.json").read_text())
         if old_identity["checkpoint_sha256"] != new_identity["checkpoint_sha256"]:
             raise RuntimeError("Trained checkpoint differs from the original holdout")
         before = pd.read_parquet(original / "test_predictions.parquet")
-        after = pd.read_parquet(output / "test_predictions.parquet")
+        after = pd.read_parquet(results / "test_predictions.parquet")
         keys = ["source", "target", "origin", "time_index", "forecast_horizon"]
         joined = before.merge(
             after, on=keys, suffixes=("_before", "_after"), validate="one_to_one"

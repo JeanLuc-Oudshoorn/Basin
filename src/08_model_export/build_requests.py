@@ -28,8 +28,12 @@ def main():
     config = json.loads((ROOT / "configs/config.json").read_text(encoding="utf-8"))
     data = config["data"]
     cap = data["context_length"]
+    # The most recent completed holdout run; runs are timestamped subfolders,
+    # older results lie directly in the holdout folder.
+    holdout = ROOT / config["paths"]["holdout_test"]
+    runs = sorted(p.parent for p in holdout.glob("*/test_metrics.json"))
     predictions = pd.read_parquet(
-        ROOT / config["paths"]["holdout_test"] / "test_predictions.parquet",
+        (runs[-1] if runs else holdout) / "test_predictions.parquet",
         columns=[
             "source",
             "target",

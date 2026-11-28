@@ -92,16 +92,70 @@ model loader without rereading the checkpoint. Startup phase durations are logge
 model construction, GPU transfer and benchmark model initialization still take time.
 See the [startup and screening audit](../../docs/audits/2026-10-30/bolt_screening_startup/REPORT.md).
 
-Each new run clears generated outputs in its configured directory before
-writing the new model identity: old metrics, prediction files, request timings,
-and forecast/error/latency plots are removed. Files from tables/targets not
-selected in the new run cannot remain stale. User notes and subdirectories
-are preserved; no automatic archive is made. Cleanup is logged.
+Each run writes into its own new folder under the holdout directory, named
+after the start time (UTC) and the evaluated weights, for example
+`results/model/holdout_test/20261120T172808Z_epoch1_step1457590`. A run never
+writes into an existing folder and nothing is cleared, so the results after
+epoch 1, epoch 2 and epoch 3 stay side by side. A run that stops early leaves
+its folder without `test_metrics.json`; tools that look for "the latest run"
+skip it. Old run folders are removed by hand when no longer needed (one run
+of 7,500 tables is about 0.6 GB).
 
-The default output is `results/model/holdout_test`, configured
-by `paths.holdout_test`. It contains metrics JSON, prediction parquet files,
+### Copy of the results in Azure Blob Storage
+
+With `holdout.result_upload` set, the stage copies every finished run folder
+to a storage container, as training does with its checkpoints, so that a lost
+disk does not cost the results:
+
+```json
+"result_upload": {"container": "checkpoints", "prefix": null, "block_mib": 16, "concurrency": 8}
+```
+
+A file of a run becomes the blob `<prefix>/<run folder>/<file>`. `prefix`
+defaults to the holdout directory, so the container mirrors the project:
+`results/model/holdout_test/20261123T074856Z_epoch2_step2972000/test_metrics.json`
+next to `results/model/training/latest_checkpoint.pt`. The account is the one
+the checkpoints use (`AZURE_ENDPOINT` and `AZURE_STORAGE_KEY`, in the
+environment or in `.env`). Remove the setting, or add `"enabled": false`, to
+keep results on the local disk only.
+
+- Before the test starts, a small blob is written, read back and deleted.
+  Wrong keys, a missing container or no network stop the stage there, before
+  the model is loaded.
+- The copy is made when the run is complete and `test_metrics.json` is on the
+  local disk. The service checks an MD5 of every request; afterwards the
+  container is listed and the size and MD5 of every file are compared with the
+  local files.
+- `test_metrics.json` is sent last, and only after the other files were found
+  complete. As on the local disk, a run folder in the container that has this
+  file is a complete run.
+- If the copy fails, the stage ends with an error. The error says that the
+  results are complete on the local disk and names the command that sends
+  them again.
+- Sending a folder again sends only files that are missing or different.
+  `plotting.py` and `error_distribution.py` do this after they have rewritten
+  their files. Nothing is ever deleted from the container.
+- Only the stage's command line (`holdout_test.py`) uploads. Tests and
+  verification scripts that call `run(config)` themselves do not.
+
+```powershell
+uv run python src/06_holdout_test/result_upload.py check
+uv run python src/06_holdout_test/result_upload.py list
+uv run python src/06_holdout_test/result_upload.py upload            # most recent completed run
+uv run python src/06_holdout_test/result_upload.py upload --run <name>
+uv run python src/06_holdout_test/result_upload.py upload --all
+uv run python src/06_holdout_test/result_upload.py download --run <name>
+```
+
+`download` brings a run folder back into the holdout directory and checks
+every file against the SHA-256 recorded at upload; files that are already
+there and identical are kept.
+
+The holdout directory is `results/model/holdout_test` by default, configured
+by `paths.holdout_test`. A run folder contains metrics JSON, prediction parquet files,
 interactive Plotly HTML plots, live progress/ETA and `model_used.json` recording the model's
-checksum and selected epoch. Ordinary logs and a timestamped JSONL journal are
+checksum and selected epoch. `plotting.py` and `error_distribution.py` work on
+the most recent completed run, or on the folder given with `--run <name>`. Ordinary logs and a timestamped JSONL journal are
 written under `logs/`, including when Windows routes execution to WSL.
 
 Each test table contributes up to five forecasts at the configured
@@ -119,7 +173,8 @@ for boundary handling, per-horizon metrics and interpretation. This replaces
 the previous sampled-horizon protocol. Legacy `horizon_probabilities` and
 `horizon_seed` settings are ignored by evaluation.
 `holdout.benchmark_models` selects comparisons (RWKV is always included):
-`["prophet", "naive", "chronos"]` by default; add `"timestral"` to include it.
+`["prophet", "naive", "chronos"]` by default; add `"timestral"` or `"timeh2o"`
+to include them.
 `holdout.sample_percent` defaults to 100; set it to e.g. 1 for a seeded 1% sample
 of the saved holdout tables. `sample_selection.json` records the selected sources.
 All models use those same sources, origins and historical context.
@@ -189,6 +244,32 @@ serially with batch size 1, and their model order rotates across origins.
 This replaces the old holdout `inference_batch_size` setting; training and
 validation batching are unaffected.
 
+Only a sample of the tables is timed this way: `holdout.latency.tables=500`
+(about 2,500 requests per model; `null` times every table). The sample is a
+seeded random choice (`holdout.latency.sample_seed`, default the global seed),
+listed in `latency_selection.json`, and is forecast first. Every other table is
+forecast in one call per model for all its origins, which is several times
+faster and is not timed. Forecasts and scores of both kinds of table enter the
+accuracy results in the same way. One-off costs (RWKV's graph captures) weigh
+more in the mean of a few thousand requests than in a fully timed run; compare
+medians.
+
+A forecast made in a shared call should equal the one a request on its own
+gives. It does up to rounding, checked on 197 tables forecast both ways on the
+GPU (2026-11-23): single points differ on average by 0.4% of the history's
+standard deviation for RWKV (BF16) and by less than 0.02% for Chronos-2,
+Timestral and TimeH2O, in neither direction more often; the table MASE
+percentiles of every model agree to three or four digits.
+
+TimesFM 3.0 was part of the comparison for one run (epoch 2, 2026-11-23) and
+was then taken out. It pads the histories of one call to the longest, and that
+padding moved its forecasts by up to 0.3 MASE units, so it could not share
+calls. That run's TimesFM latency (median 332 ms) is mostly not the model's
+own: the `timesfm` package runs Python's garbage collection after every call.
+In the holdout process that took 156 ms per call in a 200-table check, and more
+as a run collects results; the same request in a process of its own takes 47 to
+123 ms.
+
 Timing starts with the historical CPU request payload already constructed,
 includes adapter preprocessing/tokenization, device transfers and forecasting,
 and ends with the forecast available on CPU. GPU requests synchronize their
@@ -197,7 +278,7 @@ target fits needed for the request. Downloads, model loading, parquet reads,
 shared dataframe/tensor payload construction, scoring, plotting and file writes
 are excluded. Model loading is reported separately. These are the existing
 model configurations: RWKV emits its configured quantiles, Chronos requests a
-median and Timestral returns its default forecast distribution. Parameter count,
+median and Timestral and TimeH2O return their default forecast distribution. Parameter count,
 parameter dtype and device are reported rather than assuming equal model sizes
 or precision. No architecture or model precision was changed for this benchmark.
 
@@ -261,7 +342,30 @@ authentication and is an optional dependency:
 uv sync --inexact --extra validation --extra benchmarks
 ```
 
+That command only fills the Windows environment. On Windows the stage itself runs
+in the WSL environment, which is managed with pip, so install the packages there
+too (versions as in the `benchmarks` extra of `pyproject.toml`):
+
+```bash
+source scripts/activate_rwkv7.sh
+python -m pip install timestral h2ofm==0.43.1
+```
+
 Both weights are downloaded anonymously into `.cache/huggingface` on first use.
+
+TimeH2O-v1 (`"timeh2o"`, 108.8M parameters, `h2ofm` package in the same
+`benchmarks` extra) is different in three ways:
+
+- Its weights are gated and under H2O's non-commercial model licence. Accept
+  the conditions once on <https://huggingface.co/h2oai/timeh2o-v1>, then put a
+  Hugging Face access token in the project's `.env` file as `HF_TOKEN=...` (or
+  set `HF_TOKEN`, or run `hf auth login`, where the stage runs).
+- This checkpoint does not use past covariates, so it forecasts from the
+  historical targets alone, each target on its own. The other models also
+  receive the past covariates.
+- It runs with the package defaults, which average the forecasts of up to four
+  patch sizes (one pass each), so its latency covers those passes.
+
 Chronos is a regular project dependency. Model IDs, pinned revisions and runtime
 parameter counts are recorded in the metrics report. See the
 [foundation benchmark audit](../../docs/audits/2026-10-29/foundation_benchmarks/REPORT.md).

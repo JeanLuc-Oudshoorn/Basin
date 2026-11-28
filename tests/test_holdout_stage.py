@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for stage in ("03_transforming_input_data", "05_model_training", "06_holdout_test"):
     sys.path.insert(0, str(ROOT / "src" / stage))
 from holdout import holdout_directory
+from holdout_runs import holdout_runs, latest_holdout_run, new_holdout_run
 from holdout_test import evaluation_records, run, select_test_records
 from transform import load_config
 
@@ -150,12 +152,19 @@ class HoldoutStageTests(unittest.TestCase):
             metrics = {"table_count": 1, "pooled": {"rwkv": {"rmse": 0.2}}}
             output = base / "holdout_test"
             output.mkdir()
-            stale_plot = output / "test_table_999_target_0.html"
-            stale_plot.write_text("previous model")
+            earlier_plot = output / "test_table_999_target_0.html"
+            earlier_plot.write_text("previous model")
+            folders = []
 
-            def evaluate_new_model(*args):
-                self.assertFalse(stale_plot.exists())
-                self.assertTrue((output / "model_used.json").is_file())
+            def evaluate_new_model(model, records, run_config):
+                # The run writes into its own new folder and is told so
+                # through the config; nothing of an earlier run is removed.
+                directory = Path(run_config["paths"]["holdout_test"])
+                folders.append(directory)
+                self.assertEqual(directory.parent, output)
+                self.assertRegex(directory.name, r"^\d{8}T\d{6}Z_epoch7_step85127")
+                self.assertTrue((directory / "model_used.json").is_file())
+                self.assertEqual(earlier_plot.read_text(), "previous model")
                 return metrics
 
             with (
@@ -177,15 +186,126 @@ class HoldoutStageTests(unittest.TestCase):
             self.assertEqual(
                 [r["source"] for r in evaluate.call_args.args[1]], ["test"]
             )
-            provenance = json.loads((base / "holdout_test/model_used.json").read_text())
+            provenance = json.loads((folders[0] / "model_used.json").read_text())
             self.assertEqual(provenance["selected_epoch"], 7)
             self.assertEqual(provenance["checkpoint_path"], str(checkpoint))
+            self.assertTrue((folders[0] / "test_metrics.json").is_file())
             journal = next((base / "logs").glob("rwkv7_holdout_test*.jsonl"))
             events = [
                 json.loads(line)["event"] for line in journal.read_text().splitlines()
             ]
             self.assertEqual(events[-1], "run_complete")
             self.assertIn("out_of_sample_evaluation", events)
+            # A second run, even within the same second, gets another folder
+            # and leaves the first run's files exactly as they were.
+            first = {
+                path.name: path.read_bytes() for path in sorted(folders[0].iterdir())
+            }
+            with (
+                patch("holdout_test.torch.load", return_value=metadata),
+                patch("holdout_test.populate_test_schema"),
+                patch("holdout_test.artifact_digest", return_value="digest"),
+                patch("holdout_test.RWKVForecaster.load", return_value=model),
+                patch("holdout_test.configure_cuda_memory"),
+                patch("holdout_test.configure_variate_execution"),
+                patch("holdout_test.evaluate_holdout", side_effect=evaluate_new_model),
+            ):
+                run(config)
+            self.assertNotEqual(folders[0], folders[1])
+            self.assertEqual(
+                first,
+                {path.name: path.read_bytes() for path in sorted(folders[0].iterdir())},
+            )
+            self.assertEqual(holdout_runs(config), sorted(folders))
+            self.assertEqual(latest_holdout_run(config), max(folders))
+            self.assertEqual(latest_holdout_run(config, folders[0].name), folders[0])
+
+    def test_a_store_receives_the_finished_run_folder_and_only_when_given(self):
+        metadata, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            # The stage's command line makes the store; a bare run() must not.
+            self.assertIn("result_upload", config["holdout"])
+            config["paths"].update(
+                training=str(base / "training"),
+                holdout_test=str(base / "holdout_test"),
+                logs=str(base / "logs"),
+            )
+            (base / "training").mkdir()
+            (base / "training/model.pt").touch()
+            model = Mock()
+            model.eval.return_value = model
+            metrics = {"table_count": 1, "pooled": {"rwkv": {"rmse": 0.2}}}
+            seen = []
+
+            def sync(folder, name):
+                # Called once everything, the completion mark included, is on disk.
+                seen.append((folder, name, (folder / "test_metrics.json").is_file()))
+                return {
+                    "destination": "container/run",
+                    "files": 3,
+                    "bytes": 10,
+                    "uploaded_files": 3,
+                    "unchanged_files": 0,
+                    "seconds": 0.1,
+                }
+
+            store = Mock()
+            store.sync.side_effect = sync
+
+            def patched():
+                return (
+                    patch("holdout_test.torch.load", return_value=metadata),
+                    patch("holdout_test.populate_test_schema"),
+                    patch("holdout_test.artifact_digest", return_value="digest"),
+                    patch("holdout_test.RWKVForecaster.load", return_value=model),
+                    patch("holdout_test.configure_cuda_memory"),
+                    patch("holdout_test.configure_variate_execution"),
+                    patch("holdout_test.evaluate_holdout", return_value=metrics),
+                )
+
+            with ExitStack() as stack, patch("result_upload.make_result_store") as make:
+                for item in patched():
+                    stack.enter_context(item)
+                run(config)
+                make.assert_not_called()
+                store.sync.assert_not_called()
+                self.assertEqual(run(config, store), metrics)
+                (folder, name, complete), *others = seen
+                self.assertEqual((others, complete, name), ([], True, folder.name))
+                self.assertEqual(folder, latest_holdout_run(config))
+                # A failed copy is an error, but the results stay complete.
+                store.sync.side_effect = ConnectionError("network is gone")
+                with self.assertRaisesRegex(RuntimeError, "results are complete in"):
+                    run(config, store)
+            self.assertEqual(len(holdout_runs(config)), 3)
+            journals = sorted((base / "logs").glob("rwkv7_holdout_test*.jsonl"))
+            uploaded = [
+                "holdout_results_uploaded" in journal.read_text()
+                for journal in journals
+            ]
+            self.assertEqual(uploaded, [False, True, False])
+
+    def test_results_saved_before_run_folders_count_as_the_oldest_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = load_config()
+            config["paths"]["holdout_test"] = str(base / "holdout_test")
+            self.assertEqual(holdout_runs(config), [])
+            with self.assertRaisesRegex(FileNotFoundError, "No completed"):
+                latest_holdout_run(config)
+            root = base / "holdout_test"
+            root.mkdir()
+            (root / "test_metrics.json").write_text("{}")
+            self.assertEqual(latest_holdout_run(config), root)
+            unfinished, _ = new_holdout_run(config, epoch=2, step=10)
+            self.assertEqual(latest_holdout_run(config), root)
+            (unfinished / "test_metrics.json").write_text("{}")
+            self.assertEqual(holdout_runs(config), [root, unfinished])
+            self.assertEqual(latest_holdout_run(config), unfinished)
+            with self.assertRaisesRegex(FileNotFoundError, "No completed"):
+                latest_holdout_run(config, "missing")
 
     def test_older_configuration_defaults_to_training_sibling(self):
         config = load_config()
@@ -235,7 +355,8 @@ class HoldoutStageTests(unittest.TestCase):
             fast.assert_called_once_with(model, config["training"])
             self.assertIs(schema.call_args.args[1], archived)
             self.assertEqual(evaluate.call_args.args[1][0]["source"], "test")
-            provenance = json.loads((base / "holdout/model_used.json").read_text())
+            (used,) = (base / "holdout").glob("*/model_used.json")
+            provenance = json.loads(used.read_text())
             self.assertEqual(provenance["checkpoint_sha256"], "old_hash")
             self.assertEqual(provenance["split_checkpoint_sha256"], "new_hash")
 

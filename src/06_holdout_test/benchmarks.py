@@ -6,6 +6,7 @@ from time import perf_counter
 
 import numpy as np
 import torch
+from checkpoint_upload import read_environment_file
 from loguru import logger
 from transform import ROOT
 
@@ -19,23 +20,39 @@ MODEL_DEFAULTS = {
     "timestral": {
         "model_id": "mistralai/Timestral-209M",
         "revision": "9874d252ab0aae16f7f7c999f98f98d6ad7d8365",
+        # Tables (all their targets and covariates) the model runs at once.
+        "batch_size": 32,
+    },
+    "timeh2o": {
+        "model_id": "h2oai/timeh2o-v1",
+        "revision": "1310be782553943a4c520d2810a98ce8f56b2709",
+        # Rows (targets) the model runs at once; changes memory, not forecasts.
+        "batch_size": 32,
     },
 }
+# TimesFM 3.0 is not among them. It pads the histories of one call to the
+# longest, and that padding changes its forecasts (up to 0.3 MASE units), so
+# it cannot share calls the way the stage needs; one request at a time it
+# alone took half the run.
+# The stage runs in the WSL environment, which uv does not manage.
+INSTALL = (
+    "uv sync --inexact --extra benchmarks --extra validation; in the WSL "
+    "environment (source scripts/activate_rwkv7.sh): "
+    "python -m pip install timestral h2ofm==0.43.1"
+)
+BENCHMARK_MODELS = ("prophet", "naive", *MODEL_DEFAULTS)
 
 
 def benchmark_names(config):
     names = config.get("holdout", {}).get("benchmark_models", DEFAULT_MODELS)
     if (
         not isinstance(names, list)
-        or any(
-            not isinstance(n, str)
-            or n not in {"prophet", "naive", "chronos", "timestral"}
-            for n in names
-        )
+        or any(not isinstance(n, str) or n not in BENCHMARK_MODELS for n in names)
         or len(set(names)) != len(names)
     ):
         raise ValueError(
-            "holdout.benchmark_models must be a unique list of prophet, naive, chronos, timestral; RWKV is always included"
+            "holdout.benchmark_models must be a unique list of "
+            f"{', '.join(BENCHMARK_MODELS)}; RWKV is always included"
         )
     return list(names)
 
@@ -116,6 +133,73 @@ def select_plot_tables(records, config):
     }
 
 
+def select_latency_tables(records, config):
+    """The tables whose forecasts are requested one at a time and timed.
+
+    Timing every table makes the stage several times slower, and a few thousand
+    requests already separate the models. The other tables are forecast one
+    table (all its origins) per call and are not timed.
+    """
+    options = config.get("holdout", {}).get("latency", {})
+    count = options.get("tables", 500)
+    seed = options.get("sample_seed", config["seed"])
+    if count is not None and (
+        isinstance(count, bool) or not isinstance(count, int) or count < 1
+    ):
+        raise ValueError(
+            "holdout.latency.tables must be a positive integer, or null for every table"
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("holdout.latency.sample_seed must be an integer")
+    ranked = sorted(
+        range(len(records)),
+        key=lambda i: (
+            hashlib.sha256(
+                f"latency:{seed}:{records[i].get('source_key', records[i]['source'])}".encode()
+            ).hexdigest(),
+            records[i]["source"],
+        ),
+    )
+    selected = sorted(ranked if count is None else ranked[:count])
+    return set(selected), {
+        "requested_tables": count,
+        "measured_tables": len(selected),
+        "sample_seed": seed,
+        "selection": "seeded SHA-256 ranking within evaluated tables; measured before the other tables",
+        "other_tables": "all origins of a table in one call per model; not timed",
+        "sources": [records[i]["source"] for i in selected],
+    }
+
+
+def same_layout_batches(contexts, size):
+    """Positions of contexts that can share a call: equal target and covariate counts."""
+    groups = {}
+    for position, context in enumerate(contexts):
+        covariates = context.get("past_covariates")
+        key = (
+            context["context"].shape[1],
+            0 if covariates is None else covariates.shape[1],
+        )
+        groups.setdefault(key, []).append(position)
+    return [
+        members[start : start + size]
+        for members in groups.values()
+        for start in range(0, len(members), size)
+    ]
+
+
+def left_padded(series, length):
+    """Stack (1, rows, time) histories; NaN (missing) before the shorter ones."""
+    return torch.cat(
+        [
+            torch.nn.functional.pad(
+                s.float(), (length - s.shape[-1], 0), value=float("nan")
+            )
+            for s in series
+        ]
+    )
+
+
 class FoundationBenchmarks:
     """Load each requested model once; never send future values or other table labels."""
 
@@ -131,6 +215,8 @@ class FoundationBenchmarks:
         device = settings.get(
             "foundation_device", "cuda" if torch.cuda.is_available() else "cpu"
         )
+        # A Hugging Face token for gated weights may be kept in .env (HF_TOKEN).
+        read_environment_file(ROOT / ".env")
         for name in self.names:
             if name not in MODEL_DEFAULTS:
                 self.metadata[name] = {
@@ -172,13 +258,25 @@ class FoundationBenchmarks:
                     cache_dir=str(cache),
                     token=False,
                 )
+            elif name == "timeh2o":
+                try:
+                    from h2ofm import TimeH2O
+                except ImportError as error:
+                    raise ImportError(f"TimeH2O requires: {INSTALL}") from error
+                # The weights are gated: this needs a Hugging Face token
+                # (HF_TOKEN or `hf auth login`) that has accepted the licence.
+                model = TimeH2O.from_pretrained(
+                    options["model_id"],
+                    revision=options["revision"],
+                    device=device,
+                    cache_dir=str(cache),
+                    batch_size=options["batch_size"],
+                )
             else:
                 try:
                     from timestral import TimestralForecaster
                 except ImportError as error:
-                    raise ImportError(
-                        "Timestral requires: uv sync --inexact --extra benchmarks --extra validation"
-                    ) from error
+                    raise ImportError(f"Timestral requires: {INSTALL}") from error
                 model = TimestralForecaster.from_pretrained(
                     options["model_id"],
                     revision=options["revision"],
@@ -188,16 +286,24 @@ class FoundationBenchmarks:
                     token=False,
                 )
             self.models[name] = model
-            parameters = sum(p.numel() for p in model.model.parameters())
+            gated = name == "timeh2o"
+            # h2ofm has no public handle on the network.
+            network = model._pipeline.model if gated else model.model
+            parameters = sum(p.numel() for p in network.parameters())
             self.metadata[name] = {
                 "model_id": options["model_id"],
                 "revision": options["revision"],
                 "parameters": parameters,
-                "dtype": str(next(model.model.parameters()).dtype),
-                "device": str(next(model.model.parameters()).device),
+                "dtype": str(next(network.parameters()).dtype),
+                "device": str(next(network.parameters()).device),
                 "point_forecast": "median",
-                "inputs": "historical targets and time-matched past covariates",
-                "authentication": "anonymous token=False",
+                "inputs": "historical targets only, each target on its own; "
+                "this checkpoint does not use past covariates"
+                if gated
+                else "historical targets and time-matched past covariates",
+                "authentication": "Hugging Face login (gated model)"
+                if gated
+                else "anonymous token=False",
                 "load_seconds": perf_counter() - started,
             }
             logger.info("Loaded benchmark {} parameters={:,}", name, parameters)
@@ -226,15 +332,32 @@ class FoundationBenchmarks:
                     context_length=self.context_limit,
                     cross_learning=False,
                 )
-            else:
+            elif name == "timeh2o":
                 points = [
-                    model.forecast(
-                        c["context"],
-                        prediction_length=horizon,
-                        past_covariates=c.get("past_covariates"),
-                    ).median[0]
-                    for c in contexts
+                    forecast.point
+                    for forecast in model.forecast_many(
+                        [c["context"][0] for c in contexts],
+                        horizon,
+                        context_length=min(
+                            self.context_limit, model.config.context_length
+                        ),
+                    )
                 ]
+            else:
+                points = [None] * len(contexts)
+                size = self.options.get(name, MODEL_DEFAULTS[name])["batch_size"]
+                for members in same_layout_batches(contexts, size):
+                    chunk = [contexts[i] for i in members]
+                    length = max(c["context"].shape[-1] for c in chunk)
+                    medians = model.forecast(
+                        left_padded([c["context"] for c in chunk], length),
+                        prediction_length=horizon,
+                        past_covariates=None
+                        if chunk[0].get("past_covariates") is None
+                        else left_padded([c["past_covariates"] for c in chunk], length),
+                    ).median
+                    for i, median in zip(members, medians, strict=True):
+                        points[i] = median
             if len(points) != len(contexts):
                 raise ValueError(
                     f"{name} returned a different number of forecast contexts"

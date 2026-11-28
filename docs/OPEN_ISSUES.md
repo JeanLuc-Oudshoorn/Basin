@@ -62,3 +62,4 @@
 - Affine transformations on dataset? (i.e. log transform all values) - X
 - Distribution needs to be tail heavy? (more 2048+ contexts) - DONE
 - Enable padding to common lengths to benefit more from graph replay - DONE
+- Step by step notebook example (Google Colab)?

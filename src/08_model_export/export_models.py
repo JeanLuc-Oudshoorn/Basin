@@ -199,7 +199,11 @@ def main():
     )
     digest = weights_digest(state)
     expected = args.expected_sha256
-    used = ROOT / "results/model/holdout_test/model_used.json"
+    # The most recent completed holdout run; runs are timestamped subfolders,
+    # older results lie directly in the holdout folder.
+    holdout = ROOT / "results/model/holdout_test"
+    runs = sorted(p.parent for p in holdout.glob("*/test_metrics.json"))
+    used = (runs[-1] if runs else holdout) / "model_used.json"
     if expected is None and used.is_file():
         expected = json.loads(used.read_text(encoding="utf-8")).get(
             "evaluated_weights_sha256"
