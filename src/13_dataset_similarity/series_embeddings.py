@@ -86,3 +86,67 @@ def embed(config, options, log=print):
         row=np.asarray(rows),
         vectors=np.stack(vectors).astype(np.float32),
     )
+
+
+def embed_windows(windows, model, batch_size=64, log=None):
+    """One vector per window; NaN for a window without a shape."""
+    points = windows.shape[1]
+    vectors = np.full((len(windows), 768), np.nan, dtype=np.float32)
+    rows, series = [], []
+    for position, window in enumerate(windows):
+        values = filled(window)
+        if values is not None:
+            rows.append(position)
+            series.append(values)
+    done = 0
+    for start in range(0, len(series), batch_size * 20):
+        part = np.stack(series[start : start + batch_size * 20])[:, None, :]
+        outputs, _ = model.embed(part, batch_size=batch_size, context_length=points)
+        for output in outputs:
+            # The last two positions are not patches of the window.
+            vectors[rows[done]] = output[0, :-2].mean(dim=0).float().cpu().numpy()
+            done += 1
+        if log:
+            log(f"embed: {done:,} of {len(series):,} series")
+    return vectors
+
+
+def main():
+    """Embed a file of windows (rows x points); used for generator trials."""
+    import argparse
+    import json
+
+    import torch
+    from chronos import Chronos2Pipeline
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--windows", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "config.json")
+    parser.add_argument("--model", default=None, help="Folder with the model")
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--threads", type=int, default=8)
+    args = parser.parse_args()
+    torch.set_num_threads(args.threads)
+    holdout = json.loads(args.config.read_text(encoding="utf-8"))["holdout"]
+    if args.model:
+        model = Chronos2Pipeline.from_pretrained(args.model, device_map=args.device)
+    else:
+        model = Chronos2Pipeline.from_pretrained(
+            holdout["chronos"]["model_id"],
+            revision=holdout["chronos"]["revision"],
+            cache_dir=str(ROOT / holdout["model_cache_dir"]),
+            device_map=args.device,
+        )
+    windows = np.load(args.windows)
+    vectors = embed_windows(windows, model, args.batch_size, print)
+    np.save(args.output, vectors)
+    print(f"embed: wrote {vectors.shape} to {args.output}")
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    main()

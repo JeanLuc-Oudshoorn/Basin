@@ -24,11 +24,11 @@ import json
 import numpy as np
 import pandas as pd
 import similarity_data
+from lightgbm import LGBMClassifier
 from scipy.stats import rankdata, spearmanr
 from series_features import FAMILIES, FEATURES
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.manifold import TSNE
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
@@ -242,7 +242,15 @@ def classifier_scores(table, positive, keys, seed, columns=None, weights=None):
     folds = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
     scores = np.zeros(len(positive))
     for train, test in folds.split(data, positive, keys):
-        model = HistGradientBoostingClassifier(max_iter=150, random_state=seed)
+        model = LGBMClassifier(
+            n_estimators=200,
+            learning_rate=0.08,
+            subsample=0.8,
+            subsample_freq=1,
+            colsample_bytree=0.8,
+            random_state=seed,
+            verbose=-1,
+        )
         model.fit(
             data[train], positive[train], sample_weight=weights[train] * len(train)
         )
