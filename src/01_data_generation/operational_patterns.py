@@ -136,6 +136,24 @@ def _per_cycle(rng, cycle, spread):
 
 def sample_pattern(rng, rows, family):
     """The saved parameters of one pattern. Durations are in samples."""
+    spec = _sample_family(rng, rows, family)
+    # Calm and busy stretches: the size of the noise wanders, as it does
+    # when the conditions around a sensor change.
+    spec["busy"] = 0.0 if rng.random() < 0.5 else float(rng.uniform(0.4, 1.3))
+    spec["busy_tau"] = _log_uniform(rng, 5, 300)
+    return spec
+
+
+def _noise(spec, rng, length):
+    """Unit noise, larger in busy stretches and smaller in calm ones."""
+    noise = rng.normal(size=length)
+    stretch = _wander(rng, length, spec["busy_tau"], 1.0)
+    if spec["busy"]:
+        noise = noise * np.exp(spec["busy"] * stretch - spec["busy"] ** 2 / 2)
+    return noise
+
+
+def _sample_family(rng, rows, family):
     if family == "held_value":
         colour = rng.random()
         return {
@@ -339,7 +357,7 @@ def _held_value(spec, drive, rng):
         rng.standard_t(spec["tail"], length)
         / math.sqrt(spec["tail"] / (spec["tail"] - 2))
         if spec["tail"]
-        else rng.normal(size=length)
+        else _noise(spec, rng, length)
     )
     if spec["memory"]:
         memory = spec["memory"]
@@ -392,7 +410,7 @@ def _daily_load(spec, drive, rng):
         value = value * np.exp(
             _wander(rng, length, spec["level_tau"], spec["level_wander"])
         )
-    noise = rng.normal(size=length)
+    noise = _noise(spec, rng, length)
     if spec["noise_memory"]:
         memory = spec["noise_memory"]
         noise = lfilter([math.sqrt(1 - memory**2)], [1.0, -memory], noise)
@@ -422,7 +440,7 @@ def _duty_cycle(spec, drive, rng):
     value = np.zeros(length)
     # Drawn before the cycles: their number depends on the demand, and a later
     # demand must not change the noise of an earlier point.
-    ripple = spec["ripple"] * rng.normal(size=length)
+    ripple = spec["ripple"] * _noise(spec, rng, length)
     idle = spec["idle_noise"] * rng.normal(size=length)
     position, on, current = 0, bool(rng.random() < 0.5), 0.0
     while position < length:
@@ -526,7 +544,7 @@ def _smooth_drift(spec, drive, rng):
         load = np.interp(clock - spec["sparse"], kept, load[kept])
     value = value + load
     if spec["noise"]:
-        value = value + spec["noise"] * rng.normal(size=length)
+        value = value + spec["noise"] * _noise(spec, rng, length)
     return value
 
 
@@ -588,7 +606,7 @@ def _staircase(spec, drive, rng):
             np.arange(length), knots, value[np.minimum(knots, length - 1)]
         )
     if spec["noise"]:
-        noise = rng.normal(size=length)
+        noise = _noise(spec, rng, length)
         if spec["noise_memory"]:
             memory = spec["noise_memory"]
             noise = lfilter([math.sqrt(1 - memory**2)], [1.0, -memory], noise)
@@ -630,7 +648,7 @@ def _oscillation(spec, drive, rng):
     sizes = rng.lognormal(0.0, spec["size_spread"] or 1.0, length)
     size_wander = _wander(rng, length, 6 * spec["period"], spec["size_wander"] or 1.0)
     baseline = _wander(rng, length, 5 * spec["period"], spec["baseline"] or 1.0)
-    noise = spec["noise"] * rng.normal(size=length)
+    noise = spec["noise"] * _noise(spec, rng, length)
     if spec["size_spread"]:
         value = value * sizes[np.clip(cycle - cycle[0], 0, length - 1)]
     if spec["size_wander"]:

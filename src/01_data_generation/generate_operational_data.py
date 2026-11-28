@@ -36,7 +36,7 @@ MAX_COVARIATE_LAG = (
 INSTANTANEOUS_PROBABILITY = 0.02  # Otherwise there is at least one timestep of delay.
 COVARIATE_DELAY_SCALE = 0.75  # Exponential scale; positive lag = 1 + floor(draw).
 # Additional outcome lags in 2..7: zero/one/two with probabilities 15/75/10%.
-VARIANCE_DYNAMICS_PROBABILITY = 0.2  # Noise envelope can change even with a flat mean.
+VARIANCE_DYNAMICS_PROBABILITY = 0.35  # Noise envelope can change even with a flat mean.
 VISIBLE_COVARIATE_LAMBDA = 1.3  # Poisson count, capped at available covariates.
 EDGE_PROBABILITY = 0.1  # Extra edges beyond randomly selected causal scaffolds.
 DIRECT_OUTCOME_PROBABILITY = 0.65  # At least two process parents when available.
@@ -234,6 +234,8 @@ ROW_GAP_PROBABILITY = 0.04  # Rows absent from the file: the series jumps.
 RESOLUTION_PROBABILITY = 0.6
 # Per continuous column: the reading follows the process with a response time of 0.7 to 15 points (a damped transmitter, or a logger that stores interval means).
 DAMPING_PROBABILITY = 0.3
+# Among the nodes whose noise changes size: the share in which calm and busy stretches come and go (the others grow, cycle or change once).
+VOLATILITY_BURST_SHARE = 0.5
 # Resample tables whose outcome never moves (or moves by less than float32 can
 # hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
 REJECT_CONSTANT_OUTCOME = True
@@ -358,6 +360,7 @@ def generator_settings():
         seasonal_wander_probability=SEASONAL_WANDER_PROBABILITY,
         resolution_probability=RESOLUTION_PROBABILITY,
         damping_probability=DAMPING_PROBABILITY,
+        volatility_burst_share=VOLATILITY_BURST_SHARE,
         reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
 

@@ -240,9 +240,10 @@ def sample_observation(rng, columns, settings):
     names = list(settings["artifact_weights"])
     weights = np.array([settings["artifact_weights"][n] for n in names], dtype=float)
     for column in columns:
-        if column["discrete"] or not settings["measurement_probability"]:
+        if column["discrete"]:
             continue
-        if rng.random() < settings["measurement_probability"]:
+        chance = settings["measurement_probability"]
+        if chance and rng.random() < chance:
             count = int(rng.choice([1, 2, 3], p=[0.6, 0.3, 0.1]))
             kinds = rng.choice(
                 names,

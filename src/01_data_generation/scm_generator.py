@@ -473,6 +473,7 @@ class OperationalSCMGenerator:
         seasonal_wander_probability=0.0,
         resolution_probability=0.0,
         damping_probability=0.0,
+        volatility_burst_share=0.0,
         reject_constant_outcome=False,
     ):
         settings = locals().copy()
@@ -573,6 +574,7 @@ class OperationalSCMGenerator:
             "seasonal_wander_probability",
             "resolution_probability",
             "damping_probability",
+            "volatility_burst_share",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -2320,6 +2322,8 @@ class OperationalSCMGenerator:
         r = self.rng
         if r.random() < self.variance_dynamics_probability:
             mode = str(r.choice(["growth", "cyclic", "regime"], p=[0.6, 0.2, 0.2]))
+            if r.random() < self.volatility_burst_share:
+                mode = "bursts"
             node["volatility"] = {
                 "mode": mode,
                 "duration": rows,
@@ -2332,6 +2336,13 @@ class OperationalSCMGenerator:
                 "phase": float(r.uniform(-np.pi, np.pi)),
                 "change_fraction": float(r.uniform(0.25, 0.75)),
             }
+            if mode == "bursts":
+                # Calm and busy stretches that come and go, not one change.
+                node["volatility"].update(
+                    burst_tau=self._log_uniform(5, 300),
+                    burst_depth=float(r.uniform(0.4, 1.3)),
+                    seed=int(r.integers(0, 2**63)),
+                )
         if trend_free:
             for key in (
                 "slope",
@@ -3176,6 +3187,14 @@ class OperationalSCMGenerator:
                     progress >= volatility["change_fraction"],
                     volatility["log_change"],
                     0,
+                )
+            elif mode == "bursts":
+                persistence = math.exp(-1 / volatility["burst_tau"])
+                burst_rng = np.random.default_rng(volatility["seed"])
+                shocks = burst_rng.normal(0, math.sqrt(1 - persistence**2), len(time))
+                shocks[0] = burst_rng.normal()
+                log_scale = volatility["burst_depth"] * lfilter(
+                    [1.0], [1.0, -persistence], shocks
                 )
             else:
                 raise ValueError(f"Unknown volatility mode: {mode}")
