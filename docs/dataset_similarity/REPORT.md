@@ -2,6 +2,11 @@
 
 28 November 2026. Epoch-3 model, validation tables of the training run.
 
+> This report describes the generator as it was when Basin was trained. The
+> generator has since been changed along the lines of "What to change in the
+> generator" below; what was changed, and how each change was measured, is in
+> [GENERATOR_CHANGELOG.md](GENERATOR_CHANGELOG.md).
+
 ## Summary
 
 Basin is trained on synthetic series only. This report compares the 25,000
