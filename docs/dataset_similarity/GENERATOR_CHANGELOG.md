@@ -4,6 +4,51 @@ Changes to the data generator that make its series harder to tell from real
 series, and how much each one helped. Started 2026-11-28 on the branch
 `feature/generator-realism`.
 
+## Summary
+
+Nineteen changes were tried in twelve hours; eleven were kept. Under the final
+form of the measures (described below; lower is better for the two scores):
+
+| | Score | Against unseen real sources | Breadth | Score on 2,048 points | Covariates tell about the target (median) |
+|---|---|---|---|---|---|
+| Generator as Basin was trained on | 0.966 | 0.798 | 0.955 | 0.981 | 0.30 |
+| Generator now | 0.936 | 0.655 | 0.934 | 0.960 (after change 12) | 0.54 |
+
+The kept changes, each scored again under the final measure:
+
+| After change | Score | Unseen sources | Breadth |
+|---|---|---|---|
+| Baseline (two runs) | 0.9659 | 0.798 | 0.955 |
+| 1. Stored resolution | 0.9609 | 0.771 | 0.956 |
+| 2. Fewer trending tables | 0.9602 | 0.764 | 0.955 |
+| 6. Nine operational patterns | 0.9481 | 0.700 | 0.947 |
+| 8. More tables with a pattern, smoother ranges | 0.9454 | 0.690 | 0.942 |
+| 9. Damped readings | 0.9418 | 0.679 | 0.943 |
+| 10. Calm and busy stretches | 0.9423 | 0.671 | 0.941 |
+| 11. Patterns on a trend, exact random walks | 0.9402 | 0.673 | 0.938 |
+| 12. Resource use, shifted shares (two runs) | 0.9362 | 0.658 | 0.935 |
+| 17 to 19. Few repetitions, companion channels, the causal model's cycles (two runs) | 0.9359 | 0.655 | 0.934 |
+
+- **What was added.** Ten kinds of series the generator could not make
+  (`operational_patterns.py`), now in about six tables in ten; three recording
+  behaviours (stored resolution, damped readings, calm and busy stretches);
+  patterns that ride on a trend; channels of a pattern's own as covariates.
+  Nothing was removed: every earlier mechanism still runs, at a smaller share.
+- **Where the score stops.** After change 12 nothing moved the score beyond
+  chance. A classifier that has seen windows of a real source recognises that
+  source; against real sources it has not seen, it now hardly tells IND-Eval
+  and the operational benchmarks from generated series (0.55 and 0.43; 0.5 is
+  chance). Lowering the first score further means imitating the forty or so
+  sources at hand.
+- **What the trained Basin says.** On tables of the old generator Basin is 4%
+  ahead of Chronos-2 and Timestral; on the new patterns it is level at best,
+  and behind on daily load (7%) and daylight (12%), most of all when the
+  history shows fewer than four repetitions of the cycle. That is the same
+  weakness as on real data, now reproduced by the generator.
+- **What it does not show.** Whether Basin forecasts real data better after
+  training on the new generator. That takes a training run.
+- **Speed.** Generation is as fast as before (94 against 96 tables per second).
+
 ## How a change is judged
 
 1. The generator, with its settings as they are after the change, draws
