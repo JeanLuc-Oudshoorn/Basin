@@ -471,7 +471,8 @@ def describe(values):
     fit = 0.0
     if len(moving):
         ratio = np.abs(moving) / np.abs(moving).min()
-        fit = float((np.abs(ratio - np.round(ratio)) < 0.01).mean())
+        # Stored as 32-bit numbers, a change is not an exact multiple.
+        fit = float((np.abs(ratio - np.round(ratio)) < 0.05).mean())
     result["quantum_fit"] = fit
     result["sample_entropy"] = sample_entropy(x)
     above = x > np.median(x)

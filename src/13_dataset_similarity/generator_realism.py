@@ -50,6 +50,21 @@ GROUP_NAMES = {
     "public": "Public datasets",
 }
 PER_GROUP = 5000
+ARTIFACT_KINDS = (
+    "noise",
+    "quantize",
+    "clip",
+    "deadband",
+    "hold",
+    "stuck",
+    "spikes",
+    "dropout",
+    "drift",
+    "recalibration",
+)
+SPLIT_SEEDS = (7, 8, 9)
+# The two samples of the generator as it was before any change.
+BASELINES = ("baseline_s1", "baseline_s2")
 PUBLIC = ROOT / "data" / "00_public"
 PER_FILE, PER_COLUMN = 300, 24
 # Columns that are not measurements: row counters, calendar columns, flags,
@@ -168,26 +183,49 @@ def table_facts(model, frame):
     """What the generator drew for a table, for reading a trial afterwards."""
     outcome = model.get("outcome", {})
     observation = model.get("observation", {})
+    seasons = outcome.get("seasons", [])
+    first = seasons[0] if seasons else {}
+    artifacts = [a["kind"] for a in observation.get("artifacts", {}).get("outcome", [])]
+    missing = [m for m in observation.get("missing", []) if "outcome" in m["columns"]]
+    plant = model.get("plant", {})
+    edges = outcome.get("edges", [])
     facts = {
         "rows": int(len(frame)),
+        "prehistory": bool("recorded_rows" in model),
         "trend_free": bool(model.get("trend_free", False)),
         "univariate": bool(model.get("univariate", False)),
-        "kind": str(model.get("kind", "scm")),
-        "plant": str(model.get("plant", {}).get("family", "none")),
+        "topology": str(model.get("topology", "none")),
+        "plant": str(plant.get("family", "none")),
+        "plant_channel": str(plant.get("outcome_channel", "none")),
         "noise_profile": str(model.get("noise_profile", {}).get("name", "none")),
+        "noise_kind": str(outcome.get("noise", {}).get("kind", "none")),
+        "white_noise": float(outcome.get("white_noise_scale", 0.0)),
+        "persistence": float(outcome.get("persistence", 0.0)),
+        "heteroskedasticity": float(outcome.get("heteroskedasticity", 0.0)),
+        "edges": int(len(edges)),
+        "feedback": bool(sum(outcome.get("outcome_ar_weights", [])) > 0.25),
+        "wander": bool("wander" in outcome),
+        "wander_tau": float(outcome.get("wander", {}).get("tau", 0.0)),
+        "volatility": str(outcome.get("volatility", {}).get("mode", "none")),
+        "ringing": bool("ringing" in outcome),
+        "event_shock": bool(outcome.get("event_parent")),
         "trend": str(outcome.get("trend", {}).get("kind", "none")),
         "operation": str(outcome.get("operation", {}).get("mode", "none")),
-        "seasons": int(len(outcome.get("seasons", []))),
+        "seasons": int(len(seasons)),
+        "period": float(first.get("period", 0.0)),
+        "season_amplitude": float(first.get("amplitude", 0.0)),
+        "season_shape": str(first.get("fourier", {}).get("family", "harmonics"))
+        if first
+        else "none",
+        "season_gate": bool(any("gate" in s for s in seasons)),
         "quantized": bool(outcome.get("quantization_step", 0) > 0),
         "sensor_bounds": bool("sensor" in outcome),
-        "artifacts": ",".join(
-            sorted(
-                a["kind"] for a in observation.get("artifacts", {}).get("outcome", [])
-            )
-        ),
+        "missing": bool(missing),
+        "row_gaps": bool("row_gaps" in model),
+        "artifacts": ",".join(sorted(artifacts)),
     }
-    periods = [s.get("period") for s in outcome.get("seasons", []) if s.get("period")]
-    facts["period"] = float(periods[0]) if periods else 0.0
+    for kind in ARTIFACT_KINDS:
+        facts[f"artifact_{kind}"] = bool(kind in artifacts)
     return facts
 
 
@@ -254,6 +292,16 @@ def sample(args):
     log(f"sample: described, in {folder}")
 
 
+def redescribe(args):
+    """Compute the descriptors again, after they changed, without sampling."""
+    folder = OUTPUT / (
+        "reference" if args.name == "reference" else f"trials/{args.name}"
+    )
+    windows = np.load(folder / "windows.npy")
+    describe(windows, args.workers).to_parquet(folder / "features.parquet", index=False)
+    log(f"describe: {len(windows):,} series in {folder}")
+
+
 def fit_scores(data, positive, keys, seed=7, workers=8, wide=False):
     """Out-of-fold chance of being a positive row, by LightGBM.
 
@@ -296,6 +344,46 @@ def load_reference():
     return index, features, embeddings
 
 
+def breadth(features):
+    """Share of what the generator made at the start that it still makes.
+
+    A series of the first baseline sample counts as still made when the
+    trial holds series as near to it as a second baseline sample does (its
+    fifth-nearest neighbour is within the distance that holds for 95% of the
+    series against that second sample). About 0.95 means nothing was lost;
+    a lower value means kinds of series have become rare or disappeared.
+    None before both baseline samples exist.
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    names = list(series_features.FEATURES)
+    paths = [OUTPUT / "trials" / name / "features.parquet" for name in BASELINES]
+    if not all(path.exists() for path in paths):
+        return None
+    first, second = (pd.read_parquet(path)[names].dropna().to_numpy() for path in paths)
+    own = features[names].dropna().to_numpy()
+    low, high = np.quantile(first, [0.005, 0.995], axis=0)
+    spread = np.clip(first, low, high).std(axis=0)
+    sizes = pd.Series(series_features.FAMILIES).value_counts()
+    weight = np.array([1 / np.sqrt(sizes[series_features.FAMILIES[n]]) for n in names])
+    weight = np.where(spread > 0, weight / np.where(spread > 0, spread, 1), 0)
+
+    def points(table):
+        return (np.clip(table, low, high) - low) * weight
+
+    def fifth(sample):
+        search = NearestNeighbors(n_neighbors=5, algorithm="brute").fit(points(sample))
+        return search.kneighbors(points(first))[0][:, -1]
+
+    # Samples of the same size, so that neither lies denser than the other.
+    size = min(len(second), len(own))
+    rng = np.random.default_rng(7)
+    second = second[rng.choice(len(second), size, replace=False)]
+    own = own[rng.choice(len(own), size, replace=False)]
+    limit = np.quantile(fifth(second), 0.95)
+    return float((fifth(own) <= limit).mean())
+
+
 def score(args):
     from sklearn.metrics import roc_auc_score
 
@@ -314,6 +402,7 @@ def score(args):
         "groups": {},
     }
     likeness = np.zeros(len(synthetic))
+    by_group = {}
     for group in REAL_GROUPS:
         chosen = (index["group"] == group).to_numpy()
         chosen = chosen & real_features[names[0]].notna().to_numpy()
@@ -330,14 +419,22 @@ def score(args):
             ("embeddings", real_vectors[chosen], synthetic_vectors, True),
         ):
             data = np.concatenate([real, own])
-            scores, gain = fit_scores(
-                data, positive, keys, workers=args.workers, wide=wide
+            # How the series fall into folds moves an AUC by a few thousandths;
+            # the mean over several splits is what is reported.
+            runs = [
+                fit_scores(data, positive, keys, seed, args.workers, wide)
+                for seed in SPLIT_SEEDS
+            ]
+            entry[kind] = float(
+                np.mean([roc_auc_score(positive, run[0]) for run in runs])
             )
-            entry[kind] = float(roc_auc_score(positive, scores))
+            scores = np.mean([run[0] for run in runs], axis=0)
+            gain = np.mean([run[1] for run in runs], axis=0)
             entry[f"{kind}_synthetic_resembling"] = float(
                 (scores[~positive] >= 0.5).mean()
             )
             likeness += scores[~positive] / (2 * len(REAL_GROUPS))
+            by_group[f"{group}_{kind}"] = scores[~positive]
             if kind == "descriptors":
                 order = np.argsort(gain)[::-1][:8]
                 entry["top_descriptors"] = {
@@ -364,10 +461,11 @@ def score(args):
         entry["mean"] = (entry["descriptors"] + entry["embeddings"]) / 2
         result["groups"][group] = entry
     result["score"] = float(np.mean([g["mean"] for g in result["groups"].values()]))
+    result["breadth"] = breadth(features)
     (folder / "score.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     kept = pd.read_parquet(folder / "tables.parquet")
     kept = kept[kept["long_enough"]].reset_index(drop=True)[shaped]
-    kept.assign(real_likeness=likeness).to_parquet(
+    kept.assign(real_likeness=likeness, **by_group).to_parquet(
         folder / "likeness.parquet", index=False
     )
     with open(OUTPUT / "trials.jsonl", "a", encoding="utf-8") as handle:
@@ -379,7 +477,12 @@ def score(args):
 def summary(result):
     lines = [
         f"trial {result['name']}: score {result['score']:.4f} "
-        f"({result['synthetic_series']:,} generated series)",
+        f"({result['synthetic_series']:,} generated series), breadth "
+        + (
+            "not measured"
+            if result.get("breadth") is None
+            else f"{result['breadth']:.3f}"
+        ),
         "| Group | Descriptors | Embeddings | Mean |",
         "|---|---|---|---|",
     ]
@@ -393,13 +496,14 @@ def summary(result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("step", choices=("reference", "sample", "score"))
+    parser.add_argument("step", choices=("reference", "sample", "describe", "score"))
     parser.add_argument("--name", default="trial")
     parser.add_argument("--tables", type=int, default=12000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--workers", type=int, default=10)
     args = parser.parse_args()
-    {"reference": reference, "sample": sample, "score": score}[args.step](args)
+    steps = {"reference": reference, "sample": sample, "describe": redescribe}
+    {**steps, "score": score}[args.step](args)
 
 
 if __name__ == "__main__":
