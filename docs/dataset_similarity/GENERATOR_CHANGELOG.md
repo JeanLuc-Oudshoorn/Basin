@@ -202,3 +202,13 @@ Two additions. (1) The tables with a trend all came from the plain causal model,
 ### 12. Resource use
 
 The real sources that a classifier could still tell from generated series without having seen them were the noisy, non-negative ones with bursts: the load of a server, the volume of messages. A tenth pattern covers that kind: a noisy level that cannot go below zero, with heavy-tailed bursts that die away, sometimes a daily profile, lasting shifts of the usual level, idle stretches, or a limit it runs into. The shares among the patterns were shifted towards the kinds taken for real most often (held value, smooth drift, staircase, counts) and away from the one taken for real least (oscillation, 5% to 2.5% of the tables). Setting: `PLANT_WEIGHTS`.
+
+### Note after change 12: the grid descriptor once more
+
+Every 32-bit number lies on a grid, so a series with a small spread around a
+large level counted as coarsely recorded for that reason alone. This is what
+told the generator's random walks (which sit on a level) from the FakeBench-TS
+walks (which start at zero). A grid finer than 50,000 steps over the range of
+the series no longer counts. Under this measure the baseline is 0.9659 (unseen
+sources 0.798) and the state after change 12 is 0.9365 (unseen sources 0.660).
+Rows 13 and later use it.

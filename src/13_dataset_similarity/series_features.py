@@ -472,11 +472,15 @@ def describe(values):
     # distinct values as multiples of the smallest gap. The smallest change
     # from one point to the next would not do, because it can span several
     # grid steps; and stored as 32-bit numbers a gap is not an exact multiple.
+    # A grid finer than 50,000 steps over the range is not a property of the
+    # recording: every 32-bit number lies on such a grid, and a series with a
+    # small spread around a large level would count as coarse for that alone.
     fit = 0.0
     if len(levels) > 2:
         gaps = np.diff(levels)
-        ratio = gaps / gaps.min()
-        fit = float((np.abs(ratio - np.round(ratio)) < 0.05).mean())
+        if height / gaps.min() <= 50_000:
+            ratio = gaps / gaps.min()
+            fit = float((np.abs(ratio - np.round(ratio)) < 0.05).mean())
     result["quantum_fit"] = fit
     result["sample_entropy"] = sample_entropy(x)
     above = x > np.median(x)
