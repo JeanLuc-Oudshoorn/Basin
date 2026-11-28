@@ -31,6 +31,7 @@ import json
 import re
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from time import perf_counter
 
 import numpy as np
@@ -170,7 +171,7 @@ def describe(windows, workers):
 def reference(args):
     folder = OUTPUT / "reference"
     folder.mkdir(parents=True, exist_ok=True)
-    rows = collect_benchmarks() + collect_public()
+    rows = collect_benchmarks(POINTS) + collect_public(POINTS)
     windows = np.stack([item.pop("values") for item in rows]).astype(np.float32)
     np.save(folder / "windows.npy", windows)
     index = pd.DataFrame(rows)
@@ -245,7 +246,7 @@ def worker_generator():
     return _GENERATOR
 
 
-def sample_block(jobs):
+def sample_block(jobs, points=POINTS):
     """(latest points or None, facts) of the tables of some seeds."""
     generator = worker_generator()
     results = []
@@ -255,7 +256,7 @@ def sample_block(jobs):
         values = frame["outcome"].to_numpy(dtype=np.float32)
         facts = table_facts(model, frame)
         facts["seed"] = str(seed)
-        results.append((values[-POINTS:] if len(values) >= POINTS else None, facts))
+        results.append((values[-points:] if len(values) >= points else None, facts))
     return results
 
 
@@ -276,7 +277,8 @@ def sample(args):
     blocks = [jobs[start : start + 16] for start in range(0, count, 16)]
     windows, facts = [], []
     with ProcessPoolExecutor(args.workers) as pool:
-        for done, block in enumerate(pool.map(sample_block, blocks), 1):
+        draw = partial(sample_block, points=POINTS)
+        for done, block in enumerate(pool.map(draw, blocks), 1):
             for values, fact in block:
                 fact["long_enough"] = values is not None
                 facts.append(fact)
@@ -549,13 +551,23 @@ def summary(result):
 
 
 def main():
+    global POINTS, OUTPUT
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("step", choices=("reference", "sample", "describe", "score"))
     parser.add_argument("--name", default="trial")
     parser.add_argument("--tables", type=int, default=12000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--workers", type=int, default=10)
+    parser.add_argument(
+        "--points",
+        type=int,
+        default=POINTS,
+        help="Window length; another length than 512 gets its own folder",
+    )
     args = parser.parse_args()
+    if args.points != POINTS:
+        OUTPUT = OUTPUT / f"points_{args.points}"
+        POINTS = args.points
     steps = {"reference": reference, "sample": sample, "describe": redescribe}
     {**steps, "score": score}[args.step](args)
 

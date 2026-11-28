@@ -227,3 +227,22 @@ A pattern for transients: knocks at fixed intervals or at random, answered by a 
 ### 15. More daily cycles
 
 A strong cycle shows in 18% of the generated series against 28% to 33% of the real ones, and a classifier that has not seen a source takes a daily rhythm as a sign of a real one. Giving the daily-load pattern more room did not help: the public datasets improved slightly, the other three groups lost more (+0.0022 overall). Discarded. A larger share of one pattern is not what is missing.
+
+### Check after change 12: windows of 2,048 points, and speed
+
+All trials use the latest 512 points. As a check, the generator as it was and
+the generator after change 12 were scored once on the latest 2,048 points
+(about 5,900 generated series each, since half of the tables are that long;
+real groups: 2,500 FakeBench-TS, 2,536 operational, 5,000 IND-Eval, 1,493
+public windows):
+
+| | Score | Unseen sources | FakeBench-TS | Operational | IND-Eval | Public |
+|---|---|---|---|---|---|---|
+| As trained on | 0.9810 | 0.817 | 0.9959 | 0.9687 | 0.9824 | 0.9770 |
+| After change 12 | 0.9603 | 0.680 | 0.9880 | 0.9549 | 0.9634 | 0.9348 |
+
+The gain holds on long windows, and is somewhat larger there. Long windows
+are easier to tell apart in general: more of a series shows.
+
+Generation is as fast as before: 94 tables per second against 96 with ten
+processes (two runs of 3,000 tables each).
