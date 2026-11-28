@@ -87,6 +87,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 16 | A second pattern added to the first in a quarter of the pattern tables | 0.9353 | 0.9806 | 0.9305 | 0.9393 | 0.8909 | Discarded (-0.0009); unseen sources 0.661, breadth 0.94 |
 | 17 | Cycles of which a table shows as little as one and a half repetitions (was three) | 0.9365 | 0.9809 | 0.9313 | 0.9378 | 0.8958 | Kept for the forecasting check, not the score (+0.0003); unseen sources 0.658, breadth 0.94 |
 | 18 | Companion channels of the patterns: what drives the pattern, and a second sensor on it | 0.9366 | 0.9815 | 0.9316 | 0.9375 | 0.8956 | Kept on its own measure, covariates (+0.0004); unseen sources 0.662, breadth 0.94 |
+| 19 | Change 13 after all: calendar cycle lengths and a size of its own for every cycle in the causal model's seasons | 0.9366 | 0.9815 | 0.9297 | 0.9386 | 0.8966 | Kept for the forecasting check, not the score (+0.0001); unseen sources 0.656, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -372,3 +373,7 @@ The realism score looks at the target only. A table also has covariates, and Bas
 In a real system the other channels tell a lot about any one channel; in the generator they told little, and the new patterns had made it worse: their covariates came from the causal model, which reaches the pattern only as its demand. A pattern now offers two channels of its own: what drives it before noise and recording (the setpoint of a held value, the schedule of a daily load, the clear-sky curve of daylight, the running state of a duty cycle, the rate behind counts) with a chance of 35%, and with a chance of 50% a second sensor on that driver with its own gain, delay of up to 8 points, response time and noise. The second sensor shares the cause of the target, not its noise, as two instruments of one unit do. Random walks get neither: nothing tells about them, and their covariates stay uninformative, as in FakeBench-TS. The plain causal model and the earlier units are unchanged (0.28 and 0.5 to 0.8).
 
 The target is not touched, so the score does not move (0.9366 against 0.9362; unseen sources 0.662 against 0.658). The change is kept on its own measure, the table above.
+
+### 19. The causal model's cycles, reconsidered
+
+Change 13 was discarded because it moved neither score (the row repeats its trial). The forecasting check has since shown that cycles, and long ones most of all, are what Basin has not learned. On that evidence the change is taken after all, like change 17: the causal model's seasons can now be 7, 144 or 288 points long as well, a day at a common sampling rate is the most likely length, and in half of the seasons every repetition has a size of its own. It adds cycles of a different make than the daily-load pattern (free Fourier shapes, anchored in the outcome's own past) and takes nothing away. Settings: `CALENDAR_PERIODS`, `CYCLE_JITTER_PROBABILITY`.

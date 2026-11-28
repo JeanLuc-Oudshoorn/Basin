@@ -477,6 +477,8 @@ class OperationalSCMGenerator:
         damping_probability=0.0,
         volatility_burst_share=0.0,
         trending_pattern_probability=0.0,
+        calendar_periods=False,
+        cycle_jitter_probability=0.0,
         reject_constant_outcome=False,
     ):
         settings = locals().copy()
@@ -579,6 +581,7 @@ class OperationalSCMGenerator:
             "damping_probability",
             "volatility_burst_share",
             "trending_pattern_probability",
+            "cycle_jitter_probability",
         ):
             if not 0 <= settings[name] <= 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
@@ -748,6 +751,7 @@ class OperationalSCMGenerator:
             raise ValueError("max_prehistory_rows must be an integer of at least 64")
         self.max_prehistory_rows = max_prehistory_rows
         self.reject_constant_outcome = bool(reject_constant_outcome)
+        self.calendar_periods = bool(calendar_periods)
         for attribute, defaults, overrides in (
             ("plant_weights", DEFAULT_PLANT_WEIGHTS, plant_weights),
             ("artifact_weights", DEFAULT_ARTIFACT_WEIGHTS, artifact_weights),
@@ -1610,9 +1614,22 @@ class OperationalSCMGenerator:
         r = self.rng
         capacity = min(self.max_lag_count, self.max_lag)
         roles = {1: "recent"}
-        candidates = [
-            p for p in (8, 12, 24, 48, 96, 168) if p <= min(self.max_lag, rows // 3)
-        ]
+        # Cycle lengths of recorded data: a day at the common sampling rates
+        # (24, 48, 96, 144, 288 points), a week (7, 168), a year (12).
+        cycle_weights = dict.fromkeys((8, 12, 24, 48, 96, 168), 1.0)
+        if self.calendar_periods:
+            cycle_weights = {
+                7: 1.0,
+                8: 1.0,
+                12: 1.0,
+                24: 4.0,
+                48: 2.0,
+                96: 3.0,
+                144: 2.0,
+                168: 1.0,
+                288: 1.0,
+            }
+        candidates = [p for p in cycle_weights if p <= min(self.max_lag, rows // 3)]
         distant = [p for p in range(8, self.max_lag + 1) if p not in candidates]
         if capacity > 1 and distant and r.random() < self.long_lag_probability:
             roles[int(r.choice(distant))] = "rare_long"
@@ -1645,7 +1662,12 @@ class OperationalSCMGenerator:
                 len(candidates),
                 int(r.choice([1, 2, 3], p=[0.80, 0.16, 0.04])),
             )
-            seasonal = sorted(r.choice(candidates, number, replace=False).tolist())
+            chances = np.array([cycle_weights[p] for p in candidates])
+            seasonal = sorted(
+                r.choice(
+                    candidates, number, replace=False, p=chances / chances.sum()
+                ).tolist()
+            )
             roles.update({p: "seasonal" for p in seasonal})
         lags = sorted(roles)
         return lags, [roles[p] for p in lags], seasonal
@@ -2439,6 +2461,15 @@ class OperationalSCMGenerator:
             season["period"] = float(min(season["period"], max(6, rows / 3)))
             if is_outcome:
                 season["amplitude"] = max(0.6, season["amplitude"])
+            if (
+                self.cycle_jitter_probability
+                and r.random() < self.cycle_jitter_probability
+            ):
+                # No two cycles are equally large: a cloudy day, a busy shift.
+                season["cycle_jitter"] = {
+                    "depth": self._log_uniform(0.05, 0.6),
+                    "seed": int(r.integers(0, 2**63)),
+                }
             season["harmonics"] = [
                 {
                     "order": k,
@@ -3321,6 +3352,14 @@ class OperationalSCMGenerator:
             )
             envelope *= 1 + s.get("alternation", 0) * np.cos(phase / 2)
             envelope *= np.exp(np.clip(s.get("growth", 0) * time, -3, 3))
+            jitter = s.get("cycle_jitter")
+            if jitter:
+                cycle = np.floor(phase / (2 * np.pi)).astype(int)
+                cycle -= cycle.min()
+                sizes = np.random.default_rng(jitter["seed"]).lognormal(
+                    0.0, jitter["depth"], int(cycle.max()) + 1
+                )
+                envelope = envelope * sizes[cycle]
             gate = s.get("gate")
             if gate:
                 cycle = np.floor(phase / (2 * np.pi)) + gate["shift"]

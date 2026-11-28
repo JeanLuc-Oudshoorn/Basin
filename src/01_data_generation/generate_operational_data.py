@@ -239,6 +239,12 @@ DAMPING_PROBABILITY = 0.3
 VOLATILITY_BURST_SHARE = 0.5
 # Among the tables with a trend: the share in which an operational pattern rides on the trend (a growing load, a drifting setpoint).
 TRENDING_PATTERN_PROBABILITY = 0.5
+# Cycle lengths of the causal model's outcome follow the calendar at common
+# sampling rates (a day of 24, 48, 96, 144 or 288 points most often, a week of
+# 7 or 168), instead of six lengths with equal chances.
+CALENDAR_PERIODS = True
+# Per cycle of a season of the causal model: every repetition gets its own size (lognormal, spread 0.05 to 0.6).
+CYCLE_JITTER_PROBABILITY = 0.5
 # Resample tables whose outcome never moves (or moves by less than float32 can
 # hold). Flat STRETCHES inside a table (shutdown, stuck sensor, clipping) stay.
 REJECT_CONSTANT_OUTCOME = True
@@ -365,6 +371,8 @@ def generator_settings():
         damping_probability=DAMPING_PROBABILITY,
         volatility_burst_share=VOLATILITY_BURST_SHARE,
         trending_pattern_probability=TRENDING_PATTERN_PROBABILITY,
+        calendar_periods=CALENDAR_PERIODS,
+        cycle_jitter_probability=CYCLE_JITTER_PROBABILITY,
         reject_constant_outcome=REJECT_CONSTANT_OUTCOME,
     )
 
