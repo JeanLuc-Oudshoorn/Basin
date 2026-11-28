@@ -427,7 +427,7 @@ provide alternatives to continuous noisy sources.
 
 ### Trends, seasonality and changing variance
 
-`TREND_FREE_FRACTION=0.5` controls the share of **proposals**, not a guaranteed
+`TREND_FREE_FRACTION=0.7` controls the share of **proposals**, not a guaranteed
 final trend-free fraction. Screening records both proposed and accepted profiles:
 
 - A trend-free proposal with linear R-squared at most 0.15 is accepted as trend-free.
@@ -451,7 +451,8 @@ permanently change the course of a trend.
 | `MAX_FOURIER_HARMONICS` | `16` | Also limited by the sampling resolution |
 | `SEASONAL_SHAPE_DRIFT_PROBABILITY` | `0.15` | Allow seasonal shape to evolve |
 | `MULTIPLICATIVE_TREND_PROBABILITY` | `0.22` | Among trending proposals |
-| `VARIANCE_DYNAMICS_PROBABILITY` | `0.2` | Allow changing noise envelopes |
+| `VARIANCE_DYNAMICS_PROBABILITY` | `0.35` | Allow changing noise envelopes |
+| `VOLATILITY_BURST_SHARE` | `0.5` | Among those: calm and busy stretches that come and go, instead of one growth, cycle or change |
 
 Fourier partial sums produce pulse/square-like, sawtooth, triangular, rectified,
 multi-peak and smooth random seasonal shapes. Multiple cycles, alternating peaks,
@@ -470,7 +471,7 @@ can be asymmetric; active periods may contain oscillations, multiple operating
 levels and startup jitter. `SWITCHING_PROBABILITY=0.14` separately supports
 shutdown/restart and ramp-reset behavior.
 
-With `PLANT_PROBABILITY=0.3`, eligible proposals can use a plant whose demand is
+With `PLANT_PROBABILITY=0.85`, eligible proposals can use a plant whose demand is
 driven by the SCM. Plant outputs and optional companion measurements come from
 the same evolving state. Totalizers are selected within trending proposals;
 other plant families are selected within trend-free proposals.
@@ -486,6 +487,48 @@ other plant families are selected within trend-free proposals.
 | `interlock` | A protective trip remains latched until safe conditions and a new reset command |
 | `coupled_storage` | Two inventories share an exactly balanced transfer flow |
 | `rotating_machine` | Speed integrates into continuous phase; shared modes set speed, vibration amplitude and torque |
+
+### Operational patterns
+
+Ten further families are used like a plant but are not closed-loop units. Each
+is a small generative model of a kind of signal that is common in recorded
+operational data and that the SCM rarely produces
+([operational_patterns.py](../src/01_data_generation/operational_patterns.py)).
+The standardized SCM outcome arrives as the pattern's relative demand, so the
+table's covariates can carry information about the target; the pattern's
+signal becomes the recorded outcome. No parameter is fitted to a recorded
+series; all are drawn from wide ranges.
+
+| Pattern | Signal | Runner weight |
+|---|---|---|
+| `held_value` | A controlled variable: noise (white, sluggish or alternating) around a setpoint that sometimes moves, optionally with few levels | `1.0` |
+| `daily_load` | A daily profile from saved knots (slopes or plateaus), a size of its own for every day, rest days, level wander, noise that can grow with the load | `1.2` |
+| `daylight` | Active for part of the cycle and exactly zero otherwise; clear and overcast days, clouds | `0.3` |
+| `duty_cycle` | Equipment switching on and off: plateaus with inrush and droop, or exponential charge and discharge; rests shorten with demand | `0.4` |
+| `random_walk` | The sum of independent zero-mean changes (ten laws), with constant, once-changing or wandering size; nothing drives it | `0.4` |
+| `smooth_drift` | Slow, twice-filtered wander, ramp-and-hold programs, optionally logged every 4 to 150 points and joined by straight lines | `0.7` |
+| `counts` | Events per interval: Poisson or negative binomial around a rate with a daily profile, wander, bursts and idle intervals | `0.5` |
+| `staircase` | A value that moves in steps and holds: a counter, a recipe level, free steps; optional ramps and noise | `0.4` |
+| `oscillation` | A waveform (harmonics, pulses or a skewed ramp) whose length and size vary from cycle to cycle | `0.2` |
+| `resource_use` | A noisy level that cannot go below zero, with heavy-tailed bursts, lasting shifts, idle stretches or a limit | `0.5` |
+
+Cycle lengths of the cyclic patterns come mostly from the calendar: a day of
+24, 48, 96, 144 or 288 points, a week of 7 or 168, a year of 12. Half of the
+patterns get calm and busy stretches in their noise. A random-walk target is
+recorded exactly: neither damped nor rounded (see the recording layer), so
+that its next change stays unpredictable from its last. `counts`, `daylight`
+and `resource_use` keep their direction (a count is not negative).
+
+With `TRENDING_PATTERN_PROBABILITY=0.5`, half of the trending proposals carry a
+pattern that rides on the table's trend (`held_value`, `daily_load`,
+`duty_cycle`, `smooth_drift`, `staircase`, `oscillation` or `resource_use`). The
+trend's whole change is 0.5 to 6 times the pattern's usual spread.
+
+With these settings about six tables in ten hold a pattern, one in ten one of
+the closed-loop units above, and the rest the plain SCM. The patterns were
+added after measuring how easily a classifier tells generated series from real
+ones; see
+[the change log](dataset_similarity/GENERATOR_CHANGELOG.md).
 
 `PLANT_WEIGHTS` controls relative selection. Stick-slip and interlock each have
 runner weight `0.08`. They use lightweight causal state updates rather than an
@@ -536,6 +579,14 @@ causal state inside the simulator.
 | `MISSINGNESS_PROBABILITY` | `0.15` | Select a table-level missingness mechanism |
 | `ROW_GAP_PROBABILITY` | `0.04` | Remove blocks or scattered rows |
 | `SENSOR_BOUNDS_PROBABILITY` | `0.05` | Sample structural sensor bounds |
+| `RESOLUTION_PROBABILITY` | `0.6` | Per continuous column, store the reading at 6 to 20,000 levels over its range (log-uniform) |
+| `DAMPING_PROBABILITY` | `0.3` | Per continuous column, record through a response time of 0.7 to 15 points |
+
+Stored resolution and damping are the normal state of recorded data rather than
+faults, so they have settings of their own and do not depend on
+`MEASUREMENT_PROBABILITY`: a historian keeps a fixed number of digits, and a
+transmitter or a logger that stores interval means follows the process with a
+delay. Damping is applied before the other effects, resolution among the last.
 
 Artifacts include noise, clipping, coarse quantization, deadband, held/stuck
 readings, spikes, dropout, drift and recalibration. Missingness can depend on
