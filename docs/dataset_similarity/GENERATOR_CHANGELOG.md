@@ -329,3 +329,30 @@ Basin's standing: it is level with the other two throughout.
 ### 17. Few repetitions of a long cycle
 
 This change follows from the forecasting check above, not from the score. The cyclic patterns drew their cycle length so that a table held at least three repetitions; now one and a half suffice. A table of 500 rows can hold a day of 5-minute readings (288 points), as real histories do. The score is unchanged (0.9365 against 0.9362; unseen sources 0.658 against 0.658), as expected: it concerns tables shorter than 900 rows, few of which are long enough to be scored. It is kept because it is an addition, costs nothing on either score, and the forecasting check points at exactly this as what Basin has not learned.
+
+### Which histories make Basin lose: cycles
+
+Over all 13,069 generated tables of the second sample, Basin's error against
+the *better* of Chronos-2 and Timestral was related to the 56 descriptors of
+the history. Basin is the best of the three on 35% of the tables, and its
+median error is 4% above the better of the other two. The descriptors that go
+with a larger loss are all about cycles: the share of the variance in the
+strongest cycle, seasonal strength, how far the cycle is from a sine wave,
+two-level behaviour, the cycle's length. With a strong cycle in the history
+Basin is 13% behind the better of the two, without one 3%. Nothing else
+stands out: not trend, not noise, not coarse readings, not a resting floor.
+
+Read against the best model per kind, as the benchmark pages do: Basin is 14%
+behind Timestral on daily load and 15% on daylight, 4% to 6% on counts,
+resource use, staircase and smooth drift, level on held value and duty
+cycle, and 8% ahead of the best of the two on the plain causal model. The
+real benchmarks gave 5% to 30%, largest on the periodic ones.
+
+Stage 13's first analysis found the same two descriptors (how far the cycle
+is from a sine wave, two-level behaviour) to go with Basin's losses on the
+real cases of stage 11. The generator now makes the series on which Basin
+loses for the same reason as on real data. For training, this argues for
+giving cyclic tables more room than the realism score asks for: the score
+was indifferent to a larger share of daily load (change 15), the forecasting
+check is not. That is a choice for whoever starts the next training run; the
+setting is the weight of `daily_load` and `daylight` in `PLANT_WEIGHTS`.
