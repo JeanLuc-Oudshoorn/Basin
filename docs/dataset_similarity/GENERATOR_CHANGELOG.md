@@ -83,6 +83,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 12 | A tenth pattern (resource use) and shifted shares among the patterns | 0.9382 | 0.9820 | 0.9354 | 0.9385 | 0.8971 | Kept (-0.0035); unseen sources 0.668, breadth 0.94 |
 | 13 | Calendar cycle lengths and a size of its own for every cycle, in the seasons of the causal model | 0.9366 | 0.9815 | 0.9297 | 0.9386 | 0.8966 | Discarded (+0.0001); unseen sources 0.656, breadth 0.94 |
 | 14 | An eleventh pattern (a variable that is knocked off its level and recovers) and a pattern on 70% of the trends | 0.9351 | 0.9819 | 0.9267 | 0.9376 | 0.8943 | Discarded (-0.0014); unseen sources 0.655, breadth 0.93 |
+| 15 | More daily cycles: daily load in 20% of the tables (was 13%), a daily profile more often in counts and resource use | 0.9387 | 0.9838 | 0.9351 | 0.9412 | 0.8948 | Discarded (+0.0022); unseen sources 0.660, breadth 0.94 |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -222,3 +223,7 @@ The two parts of changes 3 and 4 that add something to the causal model's own se
 ### 14. Disturbance and recovery
 
 A pattern for transients: knocks at fixed intervals or at random, answered by a jump that creeps back, a swell, ringing, or a stay away from the level. First run -0.0014, a second run on other tables +0.0000 (0.9351 and 0.9365 against 0.9365); the second score 0.655 and 0.657 against 0.660. The new pattern is taken for real about as often as the plain causal model, not more. Discarded. The two runs also show that two samples of the same generator can differ by 0.0014 on the first score, so from here a single run has to gain more than 0.002 to count.
+
+### 15. More daily cycles
+
+A strong cycle shows in 18% of the generated series against 28% to 33% of the real ones, and a classifier that has not seen a source takes a daily rhythm as a sign of a real one. Giving the daily-load pattern more room did not help: the public datasets improved slightly, the other three groups lost more (+0.0022 overall). Discarded. A larger share of one pattern is not what is missing.
