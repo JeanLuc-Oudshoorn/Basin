@@ -12,7 +12,7 @@ Basin is a **time-series foundation model (TSFM) for the operational domain**:
 sensor readings, process measurements, equipment telemetry, energy and
 utility loads, and similar data from running systems. It is built on
 **RWKV-7**, a linear-attention architecture, and is tuned for one thing in
-particular: **accurate short- to medium-term forecasts**.
+particular: **lightning fast, accurate short- to medium-term forecasts**.
 
 You give Basin the recent history of one or more series, optionally with
 related covariates, and it returns probabilistic forecasts (a median plus
@@ -106,38 +106,33 @@ Most TSFMs try to do it all: one model for finance, weather, retail,
 traffic, healthcare and industrial data at once. Basin deliberately does
 not.
 
-First, it is not clear that mixing domains helps. Recent research from
+**Generalist knowledge often goes unused.** Picture a generalist TSFM hosted
+on a cloud platform, making real-time predictions on sensor data from a
+plant. It only ever sees operational data. Everything its pre-training
+taught it about financial, economic, biological or retail time series is
+never used, and that is how most practitioners work: within one domain,
+never running their forecasting model across unrelated kinds of data.
+
+**Capacity spent elsewhere is accuracy lost.** A model of fixed size (TSFMs
+are often around 200M parameters) can only learn so much. When it has to
+learn every domain, patterns from different domains [compete for the same
+parameter space](https://arxiv.org/pdf/2605.29548), and the rare, complex
+behaviour of any single domain gets crowded out. Capacity spent on domains
+you never forecast is a direct opportunity cost in accuracy on the one you
+do. Focusing on one domain leaves room for exactly those rare and difficult
+cases: process upsets, equipment cycling, control-loop behaviour and sensor
+faults.
+
+**Other domains can even make the model worse.** Recent research from
 Microsoft, [*Does Cross-Domain Pre-Training Truly Help Time Series
 Foundation Models?*](https://www.microsoft.com/en-us/research/publication/does-cross-domain-pre-training-truly-help-time-series-foundation-models/),
-finds that cross-domain pre-training can cause **negative transfer**: data
-from other domains can make a model *worse* on the domain you care about.
+finds that cross-domain pre-training can cause **negative transfer**. So the
+cost is not just wasted capacity: data from other domains can actively hurt
+performance on the domain you care about.
 
-Second, it matches how TSFMs are used. Most practitioners work within one
-domain and never run their forecasting model across unrelated kinds of data.
-A model that is very good at that one domain is worth more to them than one
-that is decent at everything.
-
-Third, capacity is limited. A model can only absorb so many patterns for a
-given parameter count. When it has to learn every domain, rare patterns
-from different domains [compete for the same parameter
-space](https://arxiv.org/pdf/2605.29548), and the rare, complex behaviour of
-any single domain gets crowded out. Focusing on one domain leaves room for
-exactly those rare and difficult cases: process upsets, equipment cycling,
-control-loop behaviour and sensor faults.
-
-A useful analogy: mainstream models such as Chronos-2 and Timestral behave
-like general-purpose large language models, while Basin is closer to a
-*small* language model specialised for one field.
-
-You could close the gap by simply making a general model bigger, but that
-has two costs:
-
-1. **Forecast latency.** Larger models take longer to produce a forecast.
-   Latency is already the weak spot of TSFMs compared with traditional
-   machine-learning methods, and Basin does not want to make it worse than
-   necessary.
-2. **Model size.** Larger models take more disk space and memory, and may
-   no longer fit in the RAM or VRAM of the machine that has to run them.
+**A specialist, not a generalist.** Mainstream models such as Chronos-2 and
+Timestral behave like general-purpose large language models, while Basin is
+closer to a *small* language model specialised for one field.
 
 ## Why a focus on short- to medium-term forecasting?
 
@@ -155,8 +150,13 @@ For most applications the near future is what matters. With daily data,
 practitioners usually want to know what happens tomorrow, next week or next
 month, not a year from now. Basin therefore forecasts **112 timesteps per
 pass**, which covers most practical needs, and spends its capacity on making
-those steps accurate. (Longer horizons are still possible by rolling the
-forecast forward.)
+those steps accurate.
+
+You can still forecast as far ahead as you like. Beyond 112 steps, Basin
+continues autoregressively: it treats its own forecast as if it were observed
+data and forecasts the next block from there. That can work well, but errors
+can build up from block to block, and Basin is not explicitly optimised for
+those longer horizons.
 
 Some uses don't need long horizons at all. In anomaly detection, for
 example, the actual values are already known: you re-forecast the series
@@ -219,7 +219,8 @@ episodes and faults.
 **Availability.** The large bundled collections that do exist, such as
 [GIFT-Eval Pretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain),
 mix data from many domains. Filtering them down to only the operational
-domain would be cumbersome.
+domain is challenging, because the origin and domain of a dataset are not
+always clear.
 
 ## Why is the project named Basin?
 
