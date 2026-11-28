@@ -195,7 +195,7 @@ LIFECYCLE_TREND_PROBABILITY = 0.35
 MAX_DOMINANT_DRIVERS = 2  # None disables the excitation budget.
 PERSISTENT_HIDDEN_PROBABILITY = 0.8
 SHARED_STATE_PROBABILITY = 0.2  # One categorical mode drives multiple channels.
-PLANT_PROBABILITY = 0.3
+PLANT_PROBABILITY = 0.6
 # A totalizer (running total of a flow) only counts up, so it is drawn for
 # TRENDING tables instead, with probability PLANT_PROBABILITY x its weight share.
 PLANT_WEIGHTS = {
@@ -208,6 +208,17 @@ PLANT_WEIGHTS = {
     "interlock": 0.08,
     "coupled_storage": 0.10,
     "rotating_machine": 0.10,
+    # Patterns of recorded operational data (operational_patterns.py). They
+    # take the place of a unit: the SCM outcome is their demand.
+    "held_value": 0.8,
+    "daily_load": 0.8,
+    "daylight": 0.3,
+    "duty_cycle": 0.4,
+    "random_walk": 0.4,
+    "smooth_drift": 0.5,
+    "counts": 0.4,
+    "staircase": 0.3,
+    "oscillation": 0.4,
 }
 # Recording layer, applied after simulation (see measurement_layer.py).
 REDUNDANT_SENSOR_PROBABILITY = 0.12  # Per table: 1-2 extra sensors on a signal.

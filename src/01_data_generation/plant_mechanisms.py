@@ -20,8 +20,20 @@ import numpy as np
 
 try:
     from .effect_mechanisms import second_order_coefficients
+    from .operational_patterns import (
+        PATTERNS,
+        UPRIGHT,
+        sample_pattern,
+        simulate_pattern,
+    )
 except ImportError:
     from effect_mechanisms import second_order_coefficients
+    from operational_patterns import (
+        PATTERNS,
+        UPRIGHT,
+        sample_pattern,
+        simulate_pattern,
+    )
 
 PLANT_FAMILIES = (
     "relay",
@@ -33,6 +45,7 @@ PLANT_FAMILIES = (
     "interlock",
     "coupled_storage",
     "rotating_machine",
+    *PATTERNS,  # Signals of operational_patterns.py, used like a unit.
 )
 DEFAULT_PLANT_WEIGHTS = {
     "relay": 0.4,
@@ -44,6 +57,7 @@ DEFAULT_PLANT_WEIGHTS = {
     "interlock": 0.0,
     "coupled_storage": 0.0,
     "rotating_machine": 0.0,
+    **dict.fromkeys(PATTERNS, 0.0),  # Opt-in, like the families above.
 }
 LIFECYCLE_KINDS = (
     "saturating",
@@ -65,6 +79,7 @@ _OUTCOME_CHANNELS = {
     "totalizer": (("pv",), (1.0,)),
     "stick_slip": (("pv",), (1.0,)),
     "interlock": (("pv", "actuator"), (0.7, 0.3)),
+    **dict.fromkeys(PATTERNS, (("pv",), (1.0,))),
 }
 _EXPORTS = {
     "coupled_storage": {
@@ -83,6 +98,7 @@ _EXPORTS = {
     "totalizer": {"rate": 0.4, "status": 0.3},
     "stick_slip": {"position": 0.5, "drive": 0.5, "status": 0.4},
     "interlock": {"pv": 0.5, "actuator": 0.5, "status": 0.5, "reset": 0.5},
+    **{pattern: {} for pattern in PATTERNS},
 }
 
 
@@ -257,6 +273,12 @@ def sample_plant(rng, rows, weights, first_export_index):
             cooling_tau=_log_uniform(rng, 5, 80),
             command={"levels": [0.0, 1.0], "dwell": [15, 80], "ramp": 0},
         )
+    elif family in PATTERNS:
+        spec.update(sample_pattern(rng, rows, family), process_noise=0.0)
+        if family in UPRIGHT:
+            spec["output_gain"] = abs(spec["output_gain"])
+        if family == "random_walk":
+            spec["load_coupling"] = 0.0  # Nothing drives a random walk.
     else:
         raise ValueError(f"Unknown plant family: {family}")
     channels, probability = _OUTCOME_CHANNELS[family]
@@ -348,6 +370,8 @@ def simulate_plant(spec, demand, time):
         channels.update(
             pv=np.cumsum(rate) / spec["duration"], rate=rate, status=running
         )
+    elif family in PATTERNS:
+        channels.update(pv=simulate_pattern(spec, drive, rng))
     elif family == "stick_slip":
         channels.update(_stick_slip(spec, drive, noise))
     elif family == "interlock":

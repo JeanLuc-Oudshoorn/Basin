@@ -74,6 +74,7 @@ unrelated, where the generator's series are either smoother or noisier.
 | 3 | Dominant cycles (first cycle 3 to 12 times larger in half of the seasonal tables) and a size of its own for every repetition | 0.9591* | 0.9904 | 0.9407 | 0.9587 | 0.9467 | Discarded (+0.0007) |
 | 4 | 3, plus cycle lengths of a day at common sampling rates (24, 48, 96, 144, 288) and 50% seasonal tables | 0.9586* | 0.9920 | 0.9397 | 0.9596 | 0.9431 | Discarded (+0.0002) |
 | 5 | 4, plus noise sized to the cycle in 60% of the dominant cycles | 0.9595* | 0.9919 | 0.9451 | 0.9592 | 0.9420 | Discarded (+0.0011) |
+| 6 | Nine operational patterns as new kinds of series, in a third of the tables | 0.9476 | 0.9836 | 0.9420 | 0.9444 | 0.9207 | Kept (-0.0123) |
 
 \* Changes 3 to 5 were scored with one division into folds, against 0.9584
 for change 2 scored the same way. After change 5 the score was made more
@@ -107,3 +108,21 @@ Real cycles are 24, 48, 96 or about 144 points long; the generated ones were spr
 ### 5. Jagged cycles
 
 Against electricity, the generated cycles were too smooth (the up and down pattern of real load is almost random from point to point). Adding noise in proportion to the cycle made the UCR series, which are smooth, easier to tell apart, and electricity no harder. Changes 3 to 5 were taken out again; the lesson is that one kind of series has to become several percent of all tables before its dataset gets harder to tell apart, so single kinds move the score little.
+
+### 6. Operational patterns
+
+The first five changes showed that the generator's existing mechanisms, however their shares are set, rarely give a series that the classifier takes for a real one (7 in 100 on average, and no mechanism above 17). What was missing were whole kinds of signal. Nine were added as generative models with wide parameter ranges, none fitted to a recorded series:
+
+| Pattern | What it is | Share of tables |
+|---|---|---|
+| Held value | A controlled variable: noise around a setpoint that sometimes moves, often coarsely recorded | 6% |
+| Daily load | A daily profile with quiet and busy hours, rest days, days of different size | 6% |
+| Daylight | A source that works part of the day and rests at exactly zero (solar generation) | 2% |
+| Duty cycle | Equipment that switches on and off: plateaus, or charging and discharging | 3% |
+| Random walk | The sum of independent changes, with ten kinds of changes | 3% |
+| Smooth drift | A slow physical variable, ramps and holds, sometimes logged rarely and joined by straight lines | 4% |
+| Counts | Events per interval, with idle intervals, clumping and bursts | 3% |
+| Staircase | A value that moves in steps and holds: a counter, a recipe level | 2% |
+| Oscillation | A repeating waveform whose length and size vary from cycle to cycle | 3% |
+
+A pattern takes the place of a closed-loop unit: the table's causal model still runs and supplies the pattern's demand, so the covariates can carry information about the target (except for the random walk, which nothing drives). Cycle lengths come mostly from the calendar (a day of 24, 48, 96, 144 or 288 points). All earlier unit families and the plain causal model remain; the share of tables with a unit of any kind goes from about a fifth to about four in ten. Breadth stays at 0.95: nothing the generator made before has become rare. Settings: `PLANT_PROBABILITY`, `PLANT_WEIGHTS`; code in `operational_patterns.py`.
